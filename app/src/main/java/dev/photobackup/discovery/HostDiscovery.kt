@@ -6,6 +6,7 @@ import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -22,6 +23,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.Closeable
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Inet4Address
@@ -66,37 +68,22 @@ class HostDiscovery(context: Context) {
         withContext(Dispatchers.IO) {
             val wifi = app.getSystemService(Context.WIFI_SERVICE) as WifiManager
             val lock = wifi.createMulticastLock("photobackup-mdns").apply { setReferenceCounted(false); acquire() }
-            // JmDNS.create/close block and cannot be cancelled, so they live on a detached scope:
-            // this source returns promptly on cancel, and the detached job still closes JmDNS and releases the lock.
             val detached = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-            val job = detached.launch {
-                var jmdns: JmDNS? = null
-                try {
-                    jmdns = JmDNS.create(InetAddress.getByName(localIp))
-                    jmdns.addServiceListener("_smb._tcp.local.", object : ServiceListener {
-                        override fun serviceAdded(event: ServiceEvent) {
-                            event.dns.requestServiceInfo(event.type, event.name, 1000)
-                        }
-
-                        override fun serviceRemoved(event: ServiceEvent) {}
-
-                        override fun serviceResolved(event: ServiceEvent) {
-                            val addr = event.info.inet4Addresses.firstOrNull()?.hostAddress ?: return
-                            detached.launch { emit(event.info.name, addr) }
-                        }
-                    })
-                    awaitCancellation()
-                } finally {
-                    withContext(NonCancellable) {
-                        runCatching { jmdns?.close() }
-                        runCatching { lock.release() }
+            superviseDetached(detached, release = { lock.release() }) {
+                val jmdns = JmDNS.create(InetAddress.getByName(localIp))
+                jmdns.addServiceListener("_smb._tcp.local.", object : ServiceListener {
+                    override fun serviceAdded(event: ServiceEvent) {
+                        event.dns.requestServiceInfo(event.type, event.name, 1000)
                     }
-                }
-            }
-            try {
-                job.join()
-            } finally {
-                job.cancel()
+
+                    override fun serviceRemoved(event: ServiceEvent) {}
+
+                    override fun serviceResolved(event: ServiceEvent) {
+                        val addr = event.info.inet4Addresses.firstOrNull()?.hostAddress ?: return
+                        detached.launch { emit(event.info.name, addr) }
+                    }
+                })
+                jmdns
             }
         }
 
@@ -188,4 +175,34 @@ internal fun mergeSources(
     delay(timeoutMs)
     running.cancel()
     withTimeoutOrNull(500) { running.join() }
+}
+
+/**
+ * Runs [open] (blocking, uncancellable, may throw) on [scope] and holds the result until cancelled, then closes it
+ * and calls [release] (always, even if [open] throws or the job is cancelled before it starts). Failures are
+ * contained: nothing propagates to the scope's uncaught-exception handler. Returns promptly on cancel.
+ */
+internal suspend fun superviseDetached(scope: CoroutineScope, release: () -> Unit, open: () -> Closeable) {
+    // ATOMIC: the body (and its finally) runs even if cancelled before it starts, so release() cannot be skipped.
+    val job = scope.launch(start = CoroutineStart.ATOMIC) {
+        var handle: Closeable? = null
+        try {
+            handle = open()
+            awaitCancellation()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // mDNS failure (interface gone, etc.): contained; other sources carry on
+        } finally {
+            withContext(NonCancellable) {
+                runCatching { handle?.close() }
+                runCatching { release() }
+            }
+        }
+    }
+    try {
+        job.join()
+    } finally {
+        job.cancel()
+    }
 }
