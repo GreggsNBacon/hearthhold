@@ -1,6 +1,7 @@
 # Photo Backup — Design
 
 Date: 2026-11-22
+App name: **Hearthhold** (owner decision 2026-11-22)
 Status: approved 2026-11-22
 
 ## Intent

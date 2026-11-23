@@ -40,7 +40,7 @@ fun HomeScreen(
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.refresh(auto = true) }
 
     Screen(
-        "Photo Backup",
+        "Hearthhold",
         actions = {
             TextButton(onClick = { viewModel.refresh() }) { Text("Refresh") }
             TextButton(onClick = onSettings) { Text("Settings") }

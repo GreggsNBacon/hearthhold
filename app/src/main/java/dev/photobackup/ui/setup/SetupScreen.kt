@@ -171,7 +171,7 @@ private fun PermissionsStep(vm: SetupViewModel) {
         perms.associateWith { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED }
     }
     val mediaOk = granted.filterKeys { !it.endsWith("POST_NOTIFICATIONS") }.values.all { it }
-    Text("Photo Backup needs to read your photos and videos to back them up, and to show notifications about problems.")
+    Text("Hearthhold needs to read your photos and videos to back them up, and to show notifications about problems.")
     Text(if (mediaOk) "Photos and videos: allowed" else "Photos and videos: not allowed yet")
     if (perms.any { it.endsWith("POST_NOTIFICATIONS") }) {
         val n = granted.entries.first { it.key.endsWith("POST_NOTIFICATIONS") }.value

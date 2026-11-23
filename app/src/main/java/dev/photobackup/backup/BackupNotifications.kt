@@ -57,7 +57,7 @@ object BackupNotifications {
             ensureChannels(context)
             val n = NotificationCompat.Builder(context, CHANNEL_ERRORS)
                 .setSmallIcon(android.R.drawable.stat_notify_error)
-                .setContentTitle("Photo Backup")
+                .setContentTitle("Hearthhold")
                 .setContentText(text)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(text))
                 .setAutoCancel(true)

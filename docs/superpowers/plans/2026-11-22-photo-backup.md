@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- minSdk **30**, compileSdk/targetSdk **35**. Package `dev.photobackup`. App name "Photo Backup".
+- minSdk **30**, compileSdk/targetSdk **35**. Package `dev.photobackup`. App name "Hearthhold".
 - The app never deletes or overwrites a drive file, **except** its own ledger-tracked `.part` files and a just-renamed copy that failed verification.
 - An item is only offered for removal from the phone when its status is `VERIFIED` **and** the ledger's size + date modified still match the phone's current version.
 - No location permission. The home check is "can connect and log in to the configured share".
@@ -95,13 +95,13 @@
 - Consumes: `PhoneMedia`
 - Produces:
   - `object RemotePathPlanner { fun targetDir(destination: String, deviceName: String, m: PhoneMedia, zone: ZoneId): String; fun sanitise(name: String): String; fun clashName(fileName: String, n: Int): String; fun partName(fileName: String): String; const val FAT32_MAX_BYTES = 4_294_967_295L }`
-  - Paths use `\` separators (SMB) with no leading separator, e.g. `Backups\Pixel\2026\11`.
+  - Paths use `\` separators (SMB) with no leading separator, e.g. `Backups\Pixel\Camera\2026`.
 
 - [ ] **Step 1: Write failing tests**
 
 ```kotlin
-@Test fun usesDateTakenYearMonth() = assertEquals("Backups\\Pixel\\2026\\03", targetDir("Backups", "Pixel", phone(dateTakenMs = ms(2026,3,14)), UTC))
-@Test fun fallsBackToDateAddedWhenTakenZero() = assertEquals("Backups\\Pixel\\2025\\12", targetDir("Backups", "Pixel", phone(dateTakenMs = 0, dateAddedSec = sec(2025,12,1)), UTC))
+@Test fun usesDateTakenYear() = assertEquals("Backups\\Pixel\\Camera\\2026", targetDir("Backups", "Pixel", phone(dateTakenMs = ms(2026,3,14)), UTC))
+@Test fun fallsBackToDateAddedWhenTakenZero() = assertEquals("Backups\\Pixel\\Camera\\2025", targetDir("Backups", "Pixel", phone(dateTakenMs = 0, dateAddedSec = sec(2025,12,1)), UTC))
 @Test fun clashNameKeepsExtension() { assertEquals("IMG_1 (1).jpg", clashName("IMG_1.jpg", 1)); assertEquals("noext (2)", clashName("noext", 2)) }
 @Test fun partName() = assertEquals("IMG_1.jpg.part", partName("IMG_1.jpg"))
 @Test fun sanitisesIllegalSmbCharacters() { assertEquals("a_b_c_.jpg", sanitise("a:b?c*.jpg")); assertEquals("trail", sanitise("trail. ")) ; assertEquals("日本.jpg", sanitise("日本.jpg")) }
@@ -174,7 +174,7 @@ Per-item algorithm (order matters):
 - [ ] **Step 1: Write failing tests** (each uses `FakeRemoteStore` + in-memory ledger)
 
 ```kotlin
-@Test fun uploadsAndVerifiesNewItem()            // files["B\\Dev\\2026\\03\\IMG.jpg"] == bytes; ledger VERIFIED; sha set; no .part remains
+@Test fun uploadsAndVerifiesNewItem()            // files["B\\Dev\\Camera\\2026\\IMG.jpg"] == bytes; ledger VERIFIED; sha set; no .part remains
 @Test fun neverOverwritesDifferentFileWithSameName() // pre-seed different bytes at IMG.jpg → upload lands at "IMG (1).jpg"; original bytes unchanged
 @Test fun identicalExistingFileIsAdoptedNotReuploaded() // pre-seed same bytes → VERIFIED, remotePath = IMG.jpg, no writes recorded
 @Test fun interruptedUploadLeavesItemPendingAndNextRunCleansPart() // truncateWritesAfter + failOn throws Unreachable → Stopped; row UPLOADING w/ partPath; second run (no faults) deletes .part, ends VERIFIED
@@ -368,7 +368,7 @@ Per-item algorithm (order matters):
     - Phone with any other status → `PHONE`
   - `SmbCoilFetcher` is a Coil `Fetcher` for `smb://host/share/path` data. It decodes thumbnails with `inSampleSize` and caches to Coil's disk cache by key `path+size`. For video thumbnails it uses `MediaMetadataRetriever.setDataSource(MediaDataSource)` backed by `RemoteStore.openRead(offset)`.
   - Drive-only items render greyed out with "Drive not reachable" when `connect()` fails, using cached thumbnails.
-  - `CopyToPhone.copy(context, store, remotePath, isVideo): Uri` inserts into MediaStore `Pictures/Photo Backup/` or `Movies/Photo Backup/` using `IS_PENDING`.
+  - `CopyToPhone.copy(context, store, remotePath, isVideo): Uri` inserts into MediaStore `Pictures/Hearthhold/` or `Movies/Hearthhold/` using `IS_PENDING`.
 
 - [ ] **Step 1:** Write failing tests:
   - `verifiedOnPhoneIsBoth`
