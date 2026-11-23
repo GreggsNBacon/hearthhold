@@ -15,8 +15,8 @@ android {
         applicationId = "dev.photobackup"
         minSdk = 30
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.1.0"
+        versionCode = 4
+        versionName = "1.2.0"
     }
 
     // Optional release signing (owner-managed, gitignored). Only key NAMES are ever reported, never values.

@@ -27,6 +27,7 @@
 - **Automatic backup** of Camera, Screenshots and any folders you pick, over SMB2/3 on home Wi-Fi.
 - **Verified copies**: every file is read back and checked with SHA-256 before it counts as backed up. Nothing on the drive is ever overwritten.
 - **Free up space**: suggests old, big items; re-checks both copies by hash, then Android asks you to confirm the delete.
+- **Swipe review and Bin**: go through photos one at a time: Up keep, Right drive only, Left junk, Down skip (gestures configurable), with Undo. Nothing changes until Finish; junk drive copies go to a `.Bin` folder on the drive, where you can restore or empty them.
 - **Gallery** of phone and drive together, with a badge on each item showing where it lives.
 - **Viewer and player** for photos and videos, from the phone or straight from the drive, with loop and 0.25x–2x speed.
 - **Gentle on your router**: one file at a time by default, adjustable parallel uploads, optional overnight-only window.
@@ -65,6 +66,15 @@
 - **Free up space**: removes only items you choose, after a full hash re-check against the drive copy and Android's own confirmation prompt.
 - Removed videos play from the drive, with loop and 0.25x–2x speed.
 
+## Swipe review and the Bin
+
+- Nothing changes until you tap **Finish**; until then every swipe can be undone.
+- Finish re-checks both copies (phone and drive) by hash, then Android asks once to confirm the phone delete.
+- Junk drive copies move to `<dest>\<device>\.Bin\<folder>\<year>\` on the next backup run.
+- The Bin screen restores items to where they were, or empties them.
+- Items older than 30 days in the Bin are emptied automatically.
+- Only files inside `.Bin` are ever deleted from the drive.
+
 ## Gallery icons
 
 Each thumbnail can carry a small round badge in its corner:
@@ -83,6 +93,8 @@ The chip at the top shows overall status, e.g. "Backing up 3 of 40", "5 waiting"
 `<dest>\<device>\<source>\YYYY\`
 
 With named folders: `<dest>\<device>\<folder or source>\YYYY\`.
+
+Junk from swipe review waits in `<dest>\<device>\.Bin\<folder>\YYYY\` until restored or emptied.
 
 ## Known limits
 
@@ -124,3 +136,10 @@ keyPassword=CHANGE_ME
 | 12 | A folder rule answered No leaves the old files where they are; new ones go to the named folder | |
 | 13 | Hand-picking a drive-only item in the Gallery and choosing a folder moves it | |
 | 14 | A move started with Wi-Fi turned off waits, and the next run on Wi-Fi completes it | |
+| 15 | Swiping each direction (up, right, left, down) does what the gesture setting says | |
+| 16 | Undo brings back the last swiped item | |
+| 17 | Finish with Wi-Fi off keeps the decisions and applies them when the drive is reachable | |
+| 18 | Cancelling Android's delete dialog leaves the phone files in place | |
+| 19 | Restoring from the Bin puts the file back in its folder on the drive | |
+| 20 | Emptying the Bin deletes only files inside `.Bin` | |
+| 21 | Items binned over 30 days ago are removed automatically on the next run | |
