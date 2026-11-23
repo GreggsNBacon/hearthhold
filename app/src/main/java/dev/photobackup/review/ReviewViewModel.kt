@@ -2,6 +2,7 @@ package dev.photobackup.review
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import dev.photobackup.freeup.formatSize
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.FolderAssignmentStore
 import dev.photobackup.ledger.LedgerEntry
@@ -25,6 +26,10 @@ import java.io.IOException
 
 const val CONNECT_TO_FINISH_MESSAGE = "Connect to home Wi-Fi to finish"
 const val KEEP_HIDE_DAYS = 180L
+const val CHANGED_WHILE_FINISHING = "Changed by a backup while finishing — decision kept, try again"
+
+/** An item Finish left as it was, with a short user-safe reason. [name] is the file name (or a count). */
+data class LeftAlone(val name: String, val reason: String)
 
 data class ReviewCard(val entry: LedgerEntry, val phone: PhoneMedia)
 
@@ -52,6 +57,10 @@ data class ReviewUiState(
     val canUndo: Boolean = false,
     val folderFilter: String? = null,
     val finish: FinishState = FinishState.Idle,
+    /** Items the last Finish left alone, for the result screen; cleared when the result is dismissed. */
+    val leftAlone: List<LeftAlone> = emptyList(),
+    /** Folders the deck can be narrowed to: phone folders (no trailing slash) and named folders, sorted. */
+    val folderOptions: List<String> = emptyList(),
 )
 
 class ReviewViewModel(
@@ -191,9 +200,15 @@ class ReviewViewModel(
             it.copy(
                 loading = false, error = error, current = d.getOrNull(0), next = d.getOrNull(1),
                 remaining = d.size, summary = summary(), canUndo = history.isNotEmpty() || decided.isNotEmpty(),
-                folderFilter = folderFilter,
+                folderFilter = folderFilter, folderOptions = folderOptions(),
             )
         }
+    }
+
+    private fun folderOptions(): List<String> {
+        val all = eligible.map { PhoneFolders.normalise(it.phone.relativePath).trimEnd('/') }.filter { it.isNotEmpty() } +
+            folderOf.values.filterNotNull()
+        return all.distinctBy { it.lowercase() }.sortedBy { it.lowercase() }
     }
 
     fun finishSummary(): FinishSummary = summary()
@@ -278,10 +293,17 @@ class ReviewViewModel(
     fun startFinish() {
         if (_state.value.finish != FinishState.Idle) return
         setFinish(FinishState.Checking)
+        _state.update { it.copy(leftAlone = emptyList()) }
         viewModelScope.launch {
             try {
                 val all = lock.withLock { decisions.all() }
-                when (val r = finisher.prepare(all)) {
+                val r = finisher.prepare(all)
+                when (r) {
+                    is PrepareResult.NothingToDelete -> setLeftAlone(r.failed)
+                    is PrepareResult.Ready -> setLeftAlone(r.failed)
+                    PrepareResult.Offline -> Unit
+                }
+                when (r) {
                     PrepareResult.Offline -> setFinish(FinishState.Error(CONNECT_TO_FINISH_MESSAGE))
                     is PrepareResult.NothingToDelete -> {
                         if (r.keepOnlyApplied || r.failed.isEmpty()) {
@@ -316,6 +338,11 @@ class ReviewViewModel(
             try {
                 when (val r = finisher.apply(p)) {
                     is ApplyResult.Done -> {
+                        if (r.leftAlone > 0) {
+                            val n = r.leftAlone
+                            val more = LeftAlone("$n ${if (n == 1) "item" else "items"}", CHANGED_WHILE_FINISHING)
+                            _state.update { it.copy(leftAlone = it.leftAlone + more) }
+                        }
                         setFinish(FinishState.Done(r.freedBytes, r.junkCount, r.keptCount, p.failed.size + r.leftAlone))
                         reload()
                     }
@@ -338,15 +365,58 @@ class ReviewViewModel(
         if (_state.value.finish !is FinishState.NeedsConfirm) return
         prepared = null
         setFinish(FinishState.Idle)
+        _state.update { it.copy(leftAlone = emptyList()) }
     }
 
     /** Clears a Done or Error result so the deck is usable again. */
     fun dismissFinish() {
         val f = _state.value.finish
-        if (f is FinishState.Done || f is FinishState.Error) setFinish(FinishState.Idle)
+        if (f is FinishState.Done || f is FinishState.Error) {
+            setFinish(FinishState.Idle)
+            _state.update { it.copy(leftAlone = emptyList()) }
+        }
+    }
+
+    /** Names come from the ledger; a row that is gone (or unreadable) shows as "An item". */
+    private suspend fun setLeftAlone(failed: List<FailedRow>) {
+        val list = failed.map { f ->
+            val name = try {
+                ledger.get(f.mediaId)?.displayName
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+            LeftAlone(name ?: "An item", f.reason)
+        }
+        _state.update { it.copy(leftAlone = list) }
     }
 
     private fun setFinish(f: FinishState) = _state.update { it.copy(finish = f) }
 
     private suspend fun reload() = lock.withLock { load() }
+}
+
+private fun plural(n: Int, one: String, many: String = one + "s") = "$n ${if (n == 1) one else many}"
+
+/** The Finish question, e.g. "Free 1.8 GB: 42 drive only, 17 junk; 12 kept". Zero parts are left out. */
+fun finishSummaryText(s: FinishSummary): String {
+    val deletes = listOfNotNull(
+        if (s.driveOnly > 0) "${s.driveOnly} drive only" else null,
+        if (s.junk > 0) "${s.junk} junk" else null,
+    ).joinToString(", ")
+    val kept = if (s.keep > 0) "${s.keep} kept" else null
+    return if (deletes.isEmpty()) kept.orEmpty()
+    else "Free ${formatSize(s.bytesToFree)}: $deletes" + (kept?.let { "; $it" } ?: "")
+}
+
+/** The lines of the Finish result. */
+fun doneLines(d: FinishState.Done): List<String> {
+    val lines = listOfNotNull(
+        if (d.freedBytes > 0) "Freed ${formatSize(d.freedBytes)} on the phone" else null,
+        if (d.junkCount > 0) "${plural(d.junkCount, "junk item")} going to the drive bin" else null,
+        if (d.keptCount > 0) "${d.keptCount} kept" else null,
+        if (d.failedCount > 0) "${d.failedCount} left alone" else null,
+    )
+    return lines.ifEmpty { listOf("Nothing needed changing") }
 }

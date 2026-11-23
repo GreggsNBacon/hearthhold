@@ -85,7 +85,7 @@ const val THUMB_PX = 384
 
 /**
  * The main screen: the combined Gallery with backup badges, a status chip (tap → status sheet with the old Home
- * content) and an overflow menu (Browse drive, Settings). It is the start destination, so Back exits the app.
+ * content) and an overflow menu (Swipe review, Bin, Browse drive, Settings). It is the start destination, so Back exits the app.
  * The drive check is the Gallery's own (re-run on resume); the status sheet reuses its result (no second login).
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -97,6 +97,8 @@ fun GalleryScreen(
     onFreeUp: () -> Unit,
     onBrowse: () -> Unit,
     onSettings: () -> Unit,
+    onReview: () -> Unit = {},
+    onBin: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
     val home by status.state.collectAsState()
@@ -180,6 +182,14 @@ fun GalleryScreen(
                                 onClick = { menuOpen = false; refreshAll() },
                             )
                             DropdownMenuItem(
+                                text = { Text("Swipe review") },
+                                onClick = { menuOpen = false; onReview() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Bin") },
+                                onClick = { menuOpen = false; onBin() },
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Browse drive") },
                                 onClick = { menuOpen = false; onBrowse() },
                             )
@@ -258,6 +268,10 @@ fun GalleryScreen(
                     onFreeUp()
                 },
                 onReenter = { status.reenter(onDone = refreshAll) },
+                onReview = {
+                    showSheet = false
+                    onReview()
+                },
                 tooBig = state.tooBig,
             )
         }

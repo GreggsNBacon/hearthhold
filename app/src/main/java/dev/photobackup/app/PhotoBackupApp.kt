@@ -11,6 +11,8 @@ import coil.decode.VideoFrameDecoder
 import coil.disk.DiskCache
 import dev.photobackup.backup.BackupLock
 import dev.photobackup.backup.BackupNotifications
+import dev.photobackup.bin.BinRepository
+import dev.photobackup.bin.BinViewModel
 import dev.photobackup.backup.BackupScheduler
 import dev.photobackup.backup.BackupStatusRepository
 import dev.photobackup.backup.LedgerDatabase
@@ -30,6 +32,11 @@ import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerDao
 import dev.photobackup.media.LocalMediaSource
 import dev.photobackup.player.PlayerSession
+import dev.photobackup.review.DEFAULT_GESTURES
+import dev.photobackup.review.RealReviewFinisher
+import dev.photobackup.review.ReviewAction
+import dev.photobackup.review.ReviewViewModel
+import dev.photobackup.review.Swipe
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.settings.KeystoreCredentialCipher
 import dev.photobackup.settings.SettingsStore
@@ -46,7 +53,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.ZoneId
@@ -293,6 +304,63 @@ class AppContainer(context: Context) {
                 ageMonths = { settings().freeUpAgeMonths },
                 opener = media.opener(),
                 makeDeleteRequest = { items -> repo.deleteRequest(app, items) },
+            )
+        }
+    }
+
+    /**
+     * The saved swipe gestures, kept current for the review deck (which reads them synchronously on every swipe) and
+     * its corner hints. Starts collecting when first used; the defaults stand in until the settings have been read.
+     */
+    val gestures: StateFlow<Map<Swipe, ReviewAction?>> by lazy {
+        settingsStore.settings.map { it.gestures }.stateIn(appScope, SharingStarted.Eagerly, DEFAULT_GESTURES)
+    }
+
+    /** Opens a store for the saved drive, or null when none is set up. */
+    private suspend fun driveStoreOrNull(): RemoteStore? = if (settings().smb == null) null else driveStore()
+
+    val reviewFactory: ViewModelProvider.Factory = viewModelFactory {
+        initializer {
+            val db = LedgerDatabase.get(app)
+            val repo = FreeUpRepository(ledger)
+            val finisher = RealReviewFinisher(
+                ledger = ledger,
+                decisions = db.reviewDecisionDao(),
+                keeps = db.reviewKeepDao(),
+                repo = repo,
+                openStore = { driveStoreOrNull() },
+                queryPhone = { media.query(settings().folders).associateBy { it.mediaId } },
+                opener = media.opener(),
+                makeDeleteRequest = { items -> repo.deleteRequest(app, items) },
+                runNow = { appScope.launch { runCatching { backup.runNow(settings().chargingOnly) } } },
+            )
+            val g = gestures
+            ReviewViewModel(
+                ledger = ledger,
+                queryPhone = { media.query(settings().folders) },
+                decisions = db.reviewDecisionDao(),
+                keeps = db.reviewKeepDao(),
+                assignments = db.folderAssignmentDao(),
+                folderRules = { settings().folderRules },
+                gestures = { g.value },
+                finisher = finisher,
+            )
+        }
+    }
+
+    val binFactory: ViewModelProvider.Factory = viewModelFactory {
+        initializer {
+            val repo = BinRepository(
+                ledger = ledger,
+                assignments = LedgerDatabase.get(app).folderAssignmentDao(),
+                openStore = { driveStoreOrNull() },
+                root = { settings().let { it.destination to it.deviceName } },
+            )
+            BinViewModel(
+                list = repo.list(),
+                restore = { repo.restore(it) },
+                empty = { repo.empty(it) },
+                emptyAll = { repo.emptyAll() },
             )
         }
     }

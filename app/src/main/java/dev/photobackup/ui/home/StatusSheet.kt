@@ -15,6 +15,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -59,6 +60,8 @@ fun StatusSheetContent(
     onBackUpNow: () -> Unit,
     onFreeUp: () -> Unit,
     onReenter: () -> Unit,
+    /** Opens Swipe review. */
+    onReview: () -> Unit = {},
     /** Files flagged too big for this drive's format (FAT32). */
     tooBig: Int = 0,
 ) {
@@ -100,6 +103,7 @@ fun StatusSheetContent(
                 Text("Free up ${formatSize(state.freeUpBytes)}")
             }
         }
+        OutlinedButton(onClick = onReview, modifier = Modifier.fillMaxWidth()) { Text("Swipe review") }
     }
 }
 

@@ -24,6 +24,7 @@ import dev.photobackup.media.FolderRules
 
 /** Why [name] can't be a new drive folder name, or null when it is fine. Same rule as the Settings folder rules. */
 fun newFolderError(name: String): String? {
+    if (FolderRules.isReserved(name)) return FolderRules.RESERVED_MESSAGE
     val c = FolderRules.canonical(name) ?: return "Enter a folder name"
     if (c.all { it == '_' }) return "That name can't be used"
     return null

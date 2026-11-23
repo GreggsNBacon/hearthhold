@@ -7,6 +7,13 @@ object FolderRules {
     /** Reserved drive folder holding binned photos; never a valid named folder. */
     const val BIN_FOLDER = ".Bin"
 
+    /** Shown when a typed folder name is the reserved bin folder. */
+    const val RESERVED_MESSAGE = "\".Bin\" is reserved for the bin"
+
+    /** True when [name], as it would be stored on the drive, is the reserved bin folder (any case). */
+    fun isReserved(name: String): Boolean =
+        RemotePathPlanner.sanitise(name.trim()).trim().equals(BIN_FOLDER, ignoreCase = true)
+
     /** A folder name as it is stored and used on the drive, or null when blank or reserved (.Bin). */
     fun canonical(name: String): String? {
         val t = name.trim()

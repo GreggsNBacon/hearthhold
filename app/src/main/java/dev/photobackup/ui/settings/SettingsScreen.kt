@@ -16,6 +16,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -39,6 +41,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.photobackup.backup.BackupEngine
 import dev.photobackup.media.PhoneFolders
+import dev.photobackup.review.ReviewAction
+import dev.photobackup.review.Swipe
+import dev.photobackup.review.gestureLabel
+import dev.photobackup.review.label
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.smb.RemoteStore
 import dev.photobackup.ui.Screen
@@ -154,6 +160,8 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
             HorizontalDivider()
             FreeUpAge(s, viewModel)
             HorizontalDivider()
+            Gestures(s, state.gestureMessage, viewModel)
+            HorizontalDivider()
             Folders(s, viewModel) { viewModel.loadPhoneFolders(); addingFolder = true }
             HorizontalDivider()
             FolderRulesSection(s, state.ruleMessage, onAdd = { viewModel.loadPhoneFolders(); addingRule = true }) { path ->
@@ -166,6 +174,39 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
         }
     }
 }
+
+/** "Swipe gestures": what each swipe does in Swipe review. No action can't be chosen for the last active swipe. */
+@Composable
+private fun Gestures(s: AppSettings, message: String?, vm: SettingsViewModel) {
+    Section("Swipe gestures")
+    Text("What each swipe does in Swipe review.", style = MaterialTheme.typography.bodySmall)
+    for (swipe in listOf(Swipe.UP, Swipe.RIGHT, Swipe.LEFT, Swipe.DOWN)) {
+        var open by remember { mutableStateOf(false) }
+        val current = s.gestures[swipe]
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(swipe.label, Modifier.weight(1f))
+            Box {
+                OutlinedButton(onClick = { open = true }) { Text(gestureLabel(current)) }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    for (option in GESTURE_OPTIONS) {
+                        val allowed = canSetGesture(s.gestures, swipe, option)
+                        DropdownMenuItem(
+                            text = {
+                                Text(if (allowed) gestureLabel(option) else "${gestureLabel(option)} (one swipe must do something)")
+                            },
+                            enabled = allowed,
+                            onClick = { open = false; if (option != current) vm.setGesture(swipe, option) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+    message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+}
+
+private val GESTURE_OPTIONS: List<ReviewAction?> =
+    listOf(ReviewAction.KEEP, ReviewAction.DRIVE_ONLY, ReviewAction.JUNK, ReviewAction.SKIP, null)
 
 @Composable
 private fun Section(title: String) = Text(title, style = MaterialTheme.typography.titleMedium)

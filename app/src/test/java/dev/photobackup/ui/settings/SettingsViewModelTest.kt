@@ -10,7 +10,11 @@ import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.FolderAssignment
 import dev.photobackup.ledger.FolderAssignmentStore
 import dev.photobackup.ledger.LedgerEntry
+import dev.photobackup.gallery.newFolderError
+import dev.photobackup.media.FolderRules
 import dev.photobackup.media.PartialMediaAccessException
+import dev.photobackup.review.ReviewAction
+import dev.photobackup.review.Swipe
 import dev.photobackup.settings.CredentialCipher
 import dev.photobackup.settings.SettingsStore
 import dev.photobackup.smb.FakeRemoteStore
@@ -452,5 +456,32 @@ class SettingsViewModelTest {
         seedRows()
         val vm = ruleVm()
         assertEquals(1, vm.countOnDrive("Pictures/WhatsApp/", "whatsapp")) // row 1 stays; row 2 (Sent) would move
+    }
+
+    @Test fun gestureChangeIsSaved() = runBlocking {
+        vm().setGesture(Swipe.DOWN, null).join()
+        assertEquals(null, settings.settings.first().gestures[Swipe.DOWN])
+        vm().setGesture(Swipe.UP, ReviewAction.JUNK).join()
+        assertEquals(ReviewAction.JUNK, settings.settings.first().gestures[Swipe.UP])
+    }
+
+    @Test fun lastActiveGestureCannotBeSetToNoAction() = runBlocking {
+        val vm = vm()
+        vm.setGesture(Swipe.UP, null).join(); vm.setGesture(Swipe.RIGHT, null).join(); vm.setGesture(Swipe.LEFT, null).join()
+        assertTrue(canSetGesture(settings.settings.first().gestures, Swipe.LEFT, null))
+        assertFalse(canSetGesture(settings.settings.first().gestures, Swipe.DOWN, null))
+        vm.setGesture(Swipe.DOWN, null).join()
+        assertEquals(ReviewAction.SKIP, settings.settings.first().gestures[Swipe.DOWN])
+        assertEquals(SettingsViewModel.GESTURE_NEEDED, vm.state.value.gestureMessage)
+        vm.setGesture(Swipe.UP, ReviewAction.KEEP).join()
+        assertNull(vm.state.value.gestureMessage)
+    }
+
+    @Test fun binFolderNameIsReservedWithAClearMessage() {
+        val vm = vm()
+        for (n in listOf(".Bin", ".bin", " .BIN ")) assertEquals(FolderRules.RESERVED_MESSAGE, vm.nameError(n))
+        assertEquals("\".Bin\" is reserved for the bin", FolderRules.RESERVED_MESSAGE)
+        assertEquals(FolderRules.RESERVED_MESSAGE, newFolderError(".bIn"))
+        assertNull(vm.nameError("Bin"))
     }
 }

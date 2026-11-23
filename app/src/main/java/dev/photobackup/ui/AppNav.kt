@@ -24,6 +24,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import dev.photobackup.app.AppContainer
+import dev.photobackup.bin.BinScreen
 import dev.photobackup.freeup.FreeUpScreen
 import dev.photobackup.freeup.FreeUpViewModel
 import dev.photobackup.gallery.BrowseScreen
@@ -31,6 +32,7 @@ import dev.photobackup.gallery.GalleryScreen
 import dev.photobackup.gallery.SmbRoot
 import dev.photobackup.gallery.ViewerListHolder
 import dev.photobackup.player.ViewerScreen
+import dev.photobackup.review.ReviewScreen
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.ui.settings.SettingsScreen
 import dev.photobackup.ui.setup.SetupScreen
@@ -44,6 +46,8 @@ object Routes {
     const val VIEWER = "viewer/{source}/{index}"
     const val FREEUP = "freeup"
     const val SETTINGS = "settings"
+    const val REVIEW = "review"
+    const val BIN = "bin"
 
     fun browse(path: String = "") = "browse?path=${Uri.encode(path)}"
     fun viewer(source: String, index: Int) = "viewer/${Uri.encode(source)}/$index"
@@ -75,6 +79,18 @@ fun AppNav(container: AppContainer) {
                 FreeUpScreen(vm)
             }
         }
+        composable(Routes.REVIEW) {
+            val gestures by container.gestures.collectAsState()
+            ReviewScreen(
+                viewModel = viewModel(factory = container.reviewFactory),
+                gestures = gestures,
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Routes.BIN) {
+            val root by produceState<SmbRoot?>(null) { value = container.driveRoot() }
+            BinScreen(viewModel = viewModel(factory = container.binFactory), root = root, onBack = { nav.popBackStack() })
+        }
         composable(Routes.SETTINGS) {
             SettingsScreen(
                 viewModel = viewModel(factory = container.settingsFactory),
@@ -94,6 +110,8 @@ fun AppNav(container: AppContainer) {
                 onFreeUp = { nav.navigate(Routes.FREEUP) },
                 onBrowse = { nav.navigate(Routes.browse()) },
                 onSettings = { nav.navigate(Routes.SETTINGS) },
+                onReview = { nav.navigate(Routes.REVIEW) },
+                onBin = { nav.navigate(Routes.BIN) },
             )
         }
         composable(

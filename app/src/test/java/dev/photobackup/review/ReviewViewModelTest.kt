@@ -409,4 +409,59 @@ class ReviewViewModelTest {
         v.setFolderFilter("Pictures")
         assertEquals(1, v.state.value.remaining); assertEquals(1L, v.cur())
     }
+
+    @Test fun finish_lists_left_alone_rows_with_names_and_reasons() = runTest {
+        add(1); add(2)
+        val v = vm()
+        v.swipe(Swipe.LEFT); v.swipe(Swipe.LEFT)
+        finisher.prepareResult = PrepareResult.Ready(
+            "req", decisions.all().filter { it.mediaId == 2L }, listOf(FailedRow(1, "Phone file changed"), FailedRow(9, "gone")),
+        )
+        finisher.applyResult = ApplyResult.Done(100, 1, 0, leftAlone = 1)
+        v.startFinish(); v.onDeleteConfirmed()
+        assertEquals(
+            listOf(LeftAlone("f1.jpg", "Phone file changed"), LeftAlone("An item", "gone"), LeftAlone("1 item", CHANGED_WHILE_FINISHING)),
+            v.state.value.leftAlone,
+        )
+        v.dismissFinish()
+        assertEquals(emptyList<LeftAlone>(), v.state.value.leftAlone)
+    }
+
+    @Test fun finish_nothing_to_delete_lists_left_alone_rows() = runTest {
+        add(1)
+        val v = vm()
+        v.swipe(Swipe.LEFT)
+        finisher.prepareResult = PrepareResult.NothingToDelete(false, 0, listOf(FailedRow(1, "Not ready")))
+        v.startFinish()
+        assertEquals(listOf(LeftAlone("f1.jpg", "Not ready")), v.state.value.leftAlone)
+    }
+
+    @Test fun finish_cancel_clears_left_alone() = runTest {
+        add(1); add(2)
+        val v = vm()
+        v.swipe(Swipe.LEFT); v.swipe(Swipe.LEFT)
+        finisher.prepareResult = PrepareResult.Ready("req", decisions.all().take(1), listOf(FailedRow(2, "x")))
+        v.startFinish(); v.onDeleteCancelled()
+        assertEquals(emptyList<LeftAlone>(), v.state.value.leftAlone)
+    }
+
+    @Test fun folder_options_list_phone_folders_and_named_folders() = runTest {
+        add(1, path = "DCIM/Camera/"); add(2, path = "Pictures/WhatsApp/"); add(3, path = "Pictures/WhatsApp/")
+        rules = mapOf("Pictures/WhatsApp/" to "Family")
+        val v = vm()
+        assertEquals(listOf("DCIM/Camera", "Family", "Pictures/WhatsApp"), v.state.value.folderOptions)
+        v.setFolderFilter("Family")
+        assertEquals(2, v.state.value.remaining)
+        assertEquals(listOf("DCIM/Camera", "Family", "Pictures/WhatsApp"), v.state.value.folderOptions)
+    }
+
+    @Test fun finish_texts() {
+        assertEquals("Free 3 KB: 2 drive only, 1 junk; 3 kept", finishSummaryText(FinishSummary(3, 2, 1, 3072)))
+        assertEquals("1 kept", finishSummaryText(FinishSummary(1, 0, 0, 0)))
+        assertEquals(
+            listOf("Freed 2 KB on the phone", "1 junk item going to the drive bin", "2 kept", "1 left alone"),
+            doneLines(FinishState.Done(2048, 1, 2, 1)),
+        )
+        assertEquals(listOf("Nothing needed changing"), doneLines(FinishState.Done(0, 0, 0)))
+    }
 }

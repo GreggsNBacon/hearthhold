@@ -14,6 +14,8 @@ import dev.photobackup.ledger.LedgerStore
 import dev.photobackup.media.FolderRules
 import dev.photobackup.media.PartialMediaAccessException
 import dev.photobackup.media.PhoneFolders
+import dev.photobackup.review.ReviewAction
+import dev.photobackup.review.Swipe
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.settings.SettingsStore
 import dev.photobackup.smb.RemoteStore
@@ -40,7 +42,13 @@ data class SettingsUiState(
     val ruleBusy: Boolean = false,
     /** A short fixed message after a rule could not be saved or removed (never exception text); null when none. */
     val ruleMessage: String? = null,
+    /** Shown after a gesture change was refused (all four would be No action); cleared by the next change. */
+    val gestureMessage: String? = null,
 )
+
+/** False when setting [swipe] to [action] would leave every swipe direction on No action. */
+fun canSetGesture(current: Map<Swipe, ReviewAction?>, swipe: Swipe, action: ReviewAction?): Boolean =
+    action != null || Swipe.values().any { it != swipe && current[it] != null }
 
 sealed interface PhoneFolderList {
     data object Loading : PhoneFolderList
@@ -97,6 +105,17 @@ class SettingsViewModel(
 
     fun setFreeUpAge(months: Int): Job = edit { it.copy(freeUpAgeMonths = months.coerceIn(1, 36)) }
 
+    /** Sets what swiping [swipe] does in review (null = No action). Refused if no direction would do anything. */
+    fun setGesture(swipe: Swipe, action: ReviewAction?): Job = viewModelScope.launch {
+        val current = store.settings.first().gestures
+        if (!canSetGesture(current, swipe, action)) {
+            _state.update { it.copy(gestureMessage = GESTURE_NEEDED) }
+            return@launch
+        }
+        _state.update { it.copy(gestureMessage = null) }
+        store.update { it.copy(gestures = Swipe.values().associateWith { s -> if (s == swipe) action else it.gestures[s] }) }
+    }
+
     fun setCamera(on: Boolean): Job = edit { it.copy(folders = it.folders.copy(camera = on)) }
     fun setScreenshots(on: Boolean): Job = edit { it.copy(folders = it.folders.copy(screenshots = on)) }
 
@@ -130,6 +149,7 @@ class SettingsViewModel(
 
     /** Null when [name] is usable as a drive folder name, else a message to show next to the field. */
     fun nameError(name: String): String? {
+        if (FolderRules.isReserved(name)) return FolderRules.RESERVED_MESSAGE
         val c = FolderRules.canonical(name) ?: return "Enter a folder name"
         if (c.all { it == '_' }) return "That name can't be used"
         return null
@@ -352,5 +372,6 @@ class SettingsViewModel(
         const val REMOVE_FAILED = "Couldn't remove the rule"
         const val RUN_FAILED = "Rule saved — the move starts with the next backup"
         const val CHOOSE_FOLDER = "Choose a phone folder"
+        const val GESTURE_NEEDED = "At least one swipe must do something"
     }
 }
