@@ -1,0 +1,16 @@
+# smbj and dependencies
+-keep class com.hierynomus.** { *; }
+-keep class com.rapid7.** { *; }
+-keep class net.engio.** { *; }
+-keep class org.bouncycastle.** { *; }
+-keep class javax.jmdns.** { *; }
+-dontwarn com.hierynomus.**
+-dontwarn com.rapid7.**
+-dontwarn net.engio.**
+-dontwarn org.bouncycastle.**
+-dontwarn javax.jmdns.**
+-dontwarn org.slf4j.**
+-dontwarn javax.el.**
+-dontwarn javax.security.**
+-dontwarn org.ietf.jgss.**
+-dontwarn java.lang.management.**
