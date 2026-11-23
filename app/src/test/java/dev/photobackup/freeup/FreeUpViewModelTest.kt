@@ -189,7 +189,7 @@ class FreeUpViewModelTest {
         seed(1)
         val v = vm(open = { throw IllegalStateException("boom") })
         v.refresh()
-        assertEquals("boom", v.state.value.error)
+        assertEquals("Something went wrong", v.state.value.error) // never the exception text
         assertFalse(v.state.value.busy)
     }
 }

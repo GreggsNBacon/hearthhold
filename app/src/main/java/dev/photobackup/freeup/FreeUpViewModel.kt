@@ -94,7 +94,7 @@ class FreeUpViewModel(
     private fun describe(e: Exception): String = when (e) {
         is SecurityException -> "Photo access is needed"
         is IOException -> CONNECT_HOME_MESSAGE // includes RemoteException
-        else -> e.message ?: "Something went wrong"
+        else -> "Something went wrong" // never the exception text (userMessage policy)
     }
 
     private suspend fun checkReachable(): Boolean {
@@ -218,6 +218,17 @@ class FreeUpViewModel(
             load()
         }
     }
+}
+
+/**
+ * The message line under the list: the removal result (e.g. "2 items failed the check") and, when the drive is not
+ * reachable, the "connect to home Wi-Fi" hint; both when both apply, so one never hides the other. Pure.
+ */
+fun freeUpMessage(state: FreeUpUiState): String? {
+    val lines = mutableListOf<String>()
+    state.error?.let { lines += it }
+    if (!state.driveReachable && lines.none { CONNECT_HOME_MESSAGE in it }) lines += CONNECT_HOME_MESSAGE
+    return lines.takeIf { it.isNotEmpty() }?.joinToString("\n")
 }
 
 fun formatSize(bytes: Long): String {

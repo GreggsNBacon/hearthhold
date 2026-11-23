@@ -100,13 +100,11 @@ class AuthPrompt(
             val (user, pass) = ask(base.username.orEmpty(), error) ?: throw cause
             _request.value = AuthRequest(user, busy = true)
             val next = base.copy(username = user, password = pass)
-            try {
-                val result = block(next)
-                save(user, pass)
-                onReauthSaved()
-                return result
+            val result = try {
+                block(next)
             } catch (_: RemoteException.AuthFailed) {
                 error = MSG_AUTH
+                continue
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -114,6 +112,16 @@ class AuthPrompt(
                 save(user, pass)
                 throw e
             }
+            save(user, pass)
+            // Outside the try: the login is accepted and saved whatever this follow-up does, so a failure here must
+            // neither re-save nor turn the accepted login into a reported failure.
+            try {
+                onReauthSaved()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+            return result
         }
     }
 

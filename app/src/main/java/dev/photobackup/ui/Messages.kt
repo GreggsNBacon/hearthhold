@@ -21,7 +21,7 @@ fun userMessage(e: Throwable): String = when (e) {
     is RemoteException.DriveFull -> MSG_FULL
     is DriveNotConfiguredException -> "Finish setup first"
     is AccessDeniedException -> MSG_ACCESS_DENIED
-    is java.io.FileNotFoundException ->"Folder not found on the drive"
+    is java.io.FileNotFoundException -> "Folder not found on the drive"
     is IOException -> MSG_UNREACHABLE
     is SecurityException -> "Photo access is needed"
     else -> "Something went wrong"

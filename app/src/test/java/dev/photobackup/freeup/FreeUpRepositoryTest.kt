@@ -169,4 +169,25 @@ class FreeUpRepositoryTest {
         assertEquals(0, FreeUpRepository(ledger).markRemoved(listOf(e)))
         assertEquals(BackupStatus.FAILED, ledger.get(1)!!.status)
     }
+
+
+    @Test fun failedCheckDoesNotOverwriteARowABackupChangedMeanwhile() = runBlocking {
+        val e = entry(1)
+        val (ledger, store) = setup(e)
+        store.files[e.remotePath!!] = ByteArray(5) // damaged drive copy
+        // While the (slow) check runs, a backup run starts re-uploading this item.
+        val uploading = e.copy(status = BackupStatus.UPLOADING, partPath = "r\\f1 (1).jpg.part", remotePath = null)
+        val racing = object : dev.photobackup.ledger.LedgerStore by ledger {
+            var reads = 0
+            override suspend fun get(mediaId: Long): LedgerEntry? {
+                if (++reads == 2) ledger.upsert(uploading) // the re-read before the FAILED write sees the new row
+                return ledger.get(mediaId)
+            }
+        }
+        val failed = mutableListOf<String>()
+        val kept = FreeUpRepository(racing).recheck(listOf(e), store, mapOf(1L to phone(e)), opener(), onFailed = { failed += it })
+        assertTrue(kept.isEmpty())
+        assertEquals(listOf(FreeUpRepository.DAMAGED), failed)
+        assertEquals(uploading, ledger.get(1)) // partPath kept, so the next run cleans that .part
+    }
 }

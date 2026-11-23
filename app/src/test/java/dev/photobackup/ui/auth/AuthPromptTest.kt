@@ -151,4 +151,18 @@ class AuthPromptTest {
         assertNull(p.request.value)
         assertEquals(0, reauthSaved)
     }
+
+
+    @Test fun failingReauthFollowUpDoesNotTurnAnAcceptedLoginIntoAFailure() = runTest {
+        val p = AuthPrompt(
+            load = { saved },
+            save = { u, pw -> saves += u to pw; saved = saved?.copy(username = u, password = pw) },
+            onReauthSaved = { throw IllegalStateException("scheduler down") },
+        )
+        val result = async { p.withAuthRetry(needsNew) }
+        runCurrent()
+        p.submit("greg", "new")
+        assertEquals("ok", result.await())
+        assertEquals(listOf("greg" to "new"), saves) // saved once, not re-saved by an error path
+    }
 }

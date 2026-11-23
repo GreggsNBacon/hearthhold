@@ -58,7 +58,7 @@ class FreeUpRepository(
                     null -> ok.add(e)
                     GONE -> Unit // vanished from the phone meanwhile: drive copy is still valid, just skip it
                     else -> {
-                        ledger.upsert(e.copy(status = BackupStatus.FAILED, lastError = reason, updatedAtMs = clock()))
+                        markFailed(e, reason)
                         onFailed(reason)
                     }
                 }
@@ -67,6 +67,19 @@ class FreeUpRepository(
             onProgress(i + 1, total, doneBytes, totalBytes)
         }
         return ok
+    }
+
+    /**
+     * Re-queues an item that failed the check. The check can take minutes, and a backup run may have changed the
+     * row meanwhile (e.g. started re-uploading an edited file, with a partPath to clean up): so it re-reads the row
+     * and writes only if it is still the same VERIFIED copy, never a stale copy over a newer row.
+     */
+    private suspend fun markFailed(checked: LedgerEntry, reason: String) {
+        val now = ledger.get(checked.mediaId) ?: return
+        if (now.status != BackupStatus.VERIFIED || now.remotePath != checked.remotePath ||
+            now.localSha256 != checked.localSha256
+        ) return
+        ledger.upsert(now.copy(status = BackupStatus.FAILED, lastError = reason, updatedAtMs = clock()))
     }
 
     /** Null if the item passes every check, else the user-facing reason. */

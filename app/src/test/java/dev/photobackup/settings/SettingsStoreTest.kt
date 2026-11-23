@@ -123,4 +123,36 @@ class SettingsStoreTest {
         store.update { it.copy(smb = SmbConfig("nas", "share", "u", "new")) }
         assertEquals("enc:new", ds.data.first()[stringPreferencesKey("smb_password")])
     }
+
+
+    /** Decrypts only while [ok]: models a passing Keystore hiccup. */
+    private class FlakyCipher : CredentialCipher {
+        var ok = true
+        override fun encrypt(plain: String) = "enc:$plain"
+        override fun decrypt(cipher: String): String =
+            if (ok) cipher.removePrefix("enc:") else throw java.security.GeneralSecurityException("hiccup")
+    }
+
+    @Test fun unrelatedEditDuringKeystoreHiccupKeepsThePassword() = runBlocking {
+        val ds = PreferenceDataStoreFactory.create { File(tmp.root, "f.preferences_pb") }
+        val cipher = FlakyCipher()
+        val store = SettingsStore(ApplicationProvider.getApplicationContext(), cipher, ds)
+        store.update { it.copy(smb = SmbConfig("nas", "share", "u", "pw")) }
+        cipher.ok = false
+        assertNull(store.settings.first().smb?.password)
+        store.update { it.copy(chargingOnly = true) } // a toggle, login untouched
+        assertEquals("enc:pw", ds.data.first()[stringPreferencesKey("smb_password")])
+        cipher.ok = true
+        assertEquals("pw", store.settings.first().smb?.password)
+        assertTrue(store.settings.first().chargingOnly)
+    }
+
+    @Test fun changingTheLoginStillRewritesIt() = runBlocking {
+        val (store, ds) = newStore()
+        store.update { it.copy(smb = SmbConfig("nas", "share", "u", "pw")) }
+        store.update { it.copy(smb = it.smb?.copy(password = null)) }
+        assertNull(ds.data.first()[stringPreferencesKey("smb_password")])
+        store.update { it.copy(smb = null) }
+        assertNull(ds.data.first()[stringPreferencesKey("smb_host")])
+    }
 }

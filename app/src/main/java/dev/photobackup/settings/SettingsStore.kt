@@ -28,8 +28,17 @@ class SettingsStore internal constructor(
 
     val settings: Flow<AppSettings> = dataStore.data.map { read(it) }
 
+    /**
+     * Read-transform-write. When the transform leaves the drive login unchanged, the stored login (including the
+     * password ciphertext) is left exactly as it is: if the password is momentarily undecryptable (a Keystore
+     * hiccup reads as null), an unrelated edit such as a toggle must not erase it.
+     */
     suspend fun update(transform: (AppSettings) -> AppSettings) {
-        dataStore.edit { prefs -> write(prefs, transform(read(prefs))) }
+        dataStore.edit { prefs ->
+            val before = read(prefs)
+            val after = transform(before)
+            write(prefs, after, writeLogin = after.smb != before.smb)
+        }
     }
 
     private fun read(p: Preferences): AppSettings {
@@ -62,11 +71,13 @@ class SettingsStore internal constructor(
     private fun decryptOrNull(enc: String): String? =
         try { cipher.decrypt(enc) } catch (e: Exception) { null }
 
-    private fun write(p: MutablePreferences, s: AppSettings) {
-        p.putOrRemove(HOST, s.smb?.host)
-        p.putOrRemove(SHARE, s.smb?.share)
-        p.putOrRemove(USER, s.smb?.username)
-        p.putOrRemove(PASSWORD, s.smb?.password?.let { cipher.encrypt(it) })
+    private fun write(p: MutablePreferences, s: AppSettings, writeLogin: Boolean) {
+        if (writeLogin) {
+            p.putOrRemove(HOST, s.smb?.host)
+            p.putOrRemove(SHARE, s.smb?.share)
+            p.putOrRemove(USER, s.smb?.username)
+            p.putOrRemove(PASSWORD, s.smb?.password?.let { cipher.encrypt(it) })
+        }
         p.putOrRemove(DESTINATION, s.destination)
         p[DEVICE_NAME] = s.deviceName
         p[CHARGING_ONLY] = s.chargingOnly

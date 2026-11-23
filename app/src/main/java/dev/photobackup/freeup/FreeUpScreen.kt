@@ -77,7 +77,7 @@ fun FreeUpScreen(viewModel: FreeUpViewModel) {
                 }
             }
         }
-        val message = if (!state.driveReachable) CONNECT_HOME_MESSAGE else state.error
+        val message = freeUpMessage(state)
         if (message != null) {
             Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
