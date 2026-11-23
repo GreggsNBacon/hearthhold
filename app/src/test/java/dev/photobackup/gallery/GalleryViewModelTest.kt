@@ -1,6 +1,8 @@
 package dev.photobackup.gallery
 
 import dev.photobackup.ledger.BackupStatus
+import dev.photobackup.ledger.FolderAssignment
+import dev.photobackup.ledger.FolderAssignmentStore
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.smb.RemoteException
@@ -237,5 +239,85 @@ class GalleryViewModelTest {
         vm.resume()
         assertFalse(vm.state.value.phoneDenied)
         assertEquals(1, vm.state.value.waiting)
+    }
+
+    private class FakeAssignments : FolderAssignmentStore {
+        val map = linkedMapOf<Long, String>()
+        override suspend fun get(mediaId: Long) = map[mediaId]?.let { FolderAssignment(mediaId, it) }
+        override suspend fun all() = map.map { FolderAssignment(it.key, it.value) }
+        override suspend fun set(a: FolderAssignment) { map[a.mediaId] = a.folder }
+        override suspend fun clear(mediaId: Long) { map.remove(mediaId) }
+        override fun observeAll() = MutableStateFlow(all0())
+        private fun all0() = map.map { FolderAssignment(it.key, it.value) }
+    }
+
+    private fun foldersVm(
+        store: FakeAssignments,
+        rules: Map<String, String> = emptyMap(),
+        runs: () -> Unit = {},
+    ) = GalleryViewModel(
+        queryPhone = { phone },
+        ledger = ledger,
+        checkDrive = {},
+        driveRoot = { SmbRoot("nas", "usb") },
+        compute = dispatcher,
+        assignments = store,
+        rules = { rules },
+        runNow = runs,
+        root = { "Backups" to "Pixel 7" },
+    )
+
+    @Test fun sendToWritesAssignmentsAndRunsOnce() {
+        val store = FakeAssignments()
+        var runs = 0
+        val vm = foldersVm(store) { runs++ }
+        vm.sendTo(listOf("media:1", "media:2"), "Dog")
+        assertEquals(mapOf(1L to "Dog", 2L to "Dog"), store.map)
+        assertEquals(1, runs)
+    }
+
+    @Test fun sendToNullClears() {
+        val store = FakeAssignments().apply { map[1] = "Dog"; map[2] = "Dog"; map[3] = "Cat" }
+        var runs = 0
+        val vm = foldersVm(store) { runs++ }
+        vm.sendTo(listOf("media:1", "media:2"), null)
+        assertEquals(mapOf(3L to "Cat"), store.map)
+        assertEquals(1, runs)
+    }
+
+    @Test fun selectionTogglesAndClearsAfterSending() {
+        val vm = foldersVm(FakeAssignments())
+        vm.select("media:1")
+        vm.toggle("media:2")
+        assertEquals(setOf("media:1", "media:2"), vm.selection.value)
+        vm.toggle("media:1")
+        assertEquals(setOf("media:2"), vm.selection.value)
+        vm.sendTo(vm.selection.value.toList(), "Dog")
+        assertTrue(vm.selection.value.isEmpty())
+        vm.select("media:3")
+        vm.clearSelection()
+        assertTrue(vm.selection.value.isEmpty())
+    }
+
+    @Test fun sendToRejectsBadNamesAndKeys() {
+        val store = FakeAssignments()
+        var runs = 0
+        val vm = foldersVm(store) { runs++ }
+        vm.sendTo(listOf("media:1"), "___")
+        vm.sendTo(listOf("junk"), "Dog")
+        assertTrue(store.map.isEmpty())
+        assertEquals(0, runs)
+    }
+
+    @Test fun folderNamesDedupeIgnoringCaseAndPreferLedgerSpelling() {
+        val store = FakeAssignments().apply { map[5] = "dog"; map[6] = "Birds" }
+        ledger.value = listOf(
+            entry(1, BackupStatus.VERIFIED, 10).copy(remotePath = "Backups\\Pixel 7\\DOG\\2024\\a.jpg"),
+            entry(2, BackupStatus.VERIFIED, 10).copy(remotePath = "Other\\Pixel 7\\Elsewhere\\2024\\b.jpg"),
+        )
+        val vm = foldersVm(store, mapOf("DCIM/Camera/" to "Dog", "x/" to "Cats"))
+        var names = emptyList<String>()
+        kotlinx.coroutines.runBlocking { names = vm.folderNames() }
+        assertEquals(listOf("DOG", "Birds", "Cats"), names)
     }
 }

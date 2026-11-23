@@ -33,11 +33,16 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -73,6 +78,7 @@ import dev.photobackup.ui.home.StatusChip
 import dev.photobackup.ui.home.StatusSheetContent
 import dev.photobackup.ui.home.statusChip
 import java.time.LocalTime
+import kotlinx.coroutines.launch
 
 /** Thumbnails are always requested at this size, so the drive thumbnail cache key is stable across layouts. */
 const val THUMB_PX = 384
@@ -133,14 +139,36 @@ fun GalleryScreen(
     var showSheet by rememberSaveable { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var errorItem by remember { mutableStateOf<GalleryItem?>(null) }
+    val selection by viewModel.selection.collectAsState()
+    val selecting = selection.isNotEmpty()
+    var pickerNames by remember { mutableStateOf<List<String>?>(null) }
+    val scope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
+    val notice by viewModel.notice.collectAsState()
+    LaunchedEffect(notice) {
+        notice?.let {
+            viewModel.noticeShown()
+            snackbar.showSnackbar(it)
+        }
+    }
+    BackHandler(enabled = selecting) { viewModel.clearSelection() }
     val refreshAll = {
         viewModel.refresh()
         status.refreshFreeUp()
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
-            TopAppBar(
+            if (selecting) TopAppBar(
+                title = { Text("${selection.size} selected") },
+                actions = {
+                    TextButton(onClick = { viewModel.clearSelection() }) { Text("Cancel") }
+                    TextButton(onClick = {
+                        scope.launch { pickerNames = viewModel.folderNames() }
+                    }) { Text("Send to folder\u2026") }
+                },
+            ) else TopAppBar(
                 title = { Text("Hearthhold") },
                 actions = {
                     StatusChip(chip, onClick = { showSheet = true })
@@ -197,10 +225,14 @@ fun GalleryScreen(
                             root = state.root,
                             available = available,
                             driveReachable = state.drive == DriveState.REACHABLE,
+                            selected = item.key in selection,
                             onClick = {
-                                val list = state.items
-                                onOpen(list, list.indexOf(item))
+                                if (selecting) viewModel.toggle(item.key) else {
+                                    val list = state.items
+                                    onOpen(list, list.indexOf(item))
+                                }
                             },
+                            onLongClick = { viewModel.select(item.key) },
                             onShowError = { errorItem = item },
                         )
                     }
@@ -225,6 +257,18 @@ fun GalleryScreen(
                 tooBig = state.tooBig,
             )
         }
+    }
+
+    pickerNames?.let { names ->
+        FolderPickerSheet(
+            names = names,
+            count = selection.size,
+            onPick = { folder ->
+                pickerNames = null
+                viewModel.sendTo(selection.toList(), folder)
+            },
+            onDismiss = { pickerNames = null },
+        )
     }
 
     errorItem?.let { item ->
@@ -257,7 +301,9 @@ private fun Cell(
     root: SmbRoot?,
     available: Boolean,
     driveReachable: Boolean,
+    selected: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onShowError: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -274,7 +320,7 @@ private fun Cell(
             .combinedClickable(
                 enabled = available,
                 onClick = onClick,
-                onLongClick = if (badge == Badge.FAILED) onShowError else null,
+                onLongClick = onLongClick,
             ),
     ) {
         AsyncImage(
@@ -290,6 +336,14 @@ private fun Cell(
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize().alpha(if (available) 1f else 0.4f),
         )
+        if (selected) {
+            Box(Modifier.fillMaxSize().background(Color(0x663366FF)))
+            Icon(
+                Icons.Filled.Check, "Selected", tint = Color.White,
+                modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(22.dp)
+                    .background(MaterialTheme.colorScheme.primary, CircleShape),
+            )
+        }
         if (item.isVideo) Tag("▶", Modifier.align(Alignment.TopStart))
         BackupBadge(
             badge,

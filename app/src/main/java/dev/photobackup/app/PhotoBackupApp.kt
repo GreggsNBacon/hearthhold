@@ -270,6 +270,10 @@ class AppContainer(context: Context) {
                 checkDrive = { checkDrive() },
                 driveRoot = { driveRoot() },
                 needsPassword = { passwordUnreadable(settings()) },
+                assignments = LedgerDatabase.get(app).folderAssignmentDao(),
+                rules = { settings().folderRules },
+                runNow = { backup.runNow(settings().chargingOnly) },
+                root = { settings().let { it.destination to it.deviceName } },
             )
         }
     }

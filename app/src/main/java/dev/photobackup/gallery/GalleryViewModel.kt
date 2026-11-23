@@ -2,7 +2,11 @@ package dev.photobackup.gallery
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import dev.photobackup.backup.RemotePathPlanner
+import dev.photobackup.ledger.FolderAssignment
+import dev.photobackup.ledger.FolderAssignmentStore
 import dev.photobackup.ledger.LedgerEntry
+import dev.photobackup.media.FolderRules
 import dev.photobackup.media.PartialMediaAccessException
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.ui.auth.DriveNotConfiguredException
@@ -16,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
@@ -84,13 +89,20 @@ data class GalleryUiState(
 @OptIn(ExperimentalCoroutinesApi::class)
 class GalleryViewModel(
     private val queryPhone: suspend () -> List<PhoneMedia>,
-    ledger: kotlinx.coroutines.flow.Flow<List<LedgerEntry>>,
+    private val ledger: kotlinx.coroutines.flow.Flow<List<LedgerEntry>>,
     private val checkDrive: suspend () -> Unit,
     private val driveRoot: suspend () -> SmbRoot?,
     compute: CoroutineDispatcher = Dispatchers.Default,
     /** True when a login is saved but its password can't be decrypted. */
     private val needsPassword: suspend () -> Boolean = { false },
     private val clock: () -> Long = System::currentTimeMillis,
+    private val assignments: FolderAssignmentStore? = null,
+    /** Phone folder -> drive folder rules. */
+    private val rules: suspend () -> Map<String, String> = { emptyMap() },
+    /** Starts a backup run now (moves/uploads items into their new folder). */
+    private val runNow: suspend () -> Unit = {},
+    /** Drive destination and device name (the drive path prefix is `<destination>\<device>\`), or null. */
+    private val root: suspend () -> Pair<String?, String>? = { null },
 ) : ViewModel() {
     private class Phone(
         val items: List<PhoneMedia>,
@@ -231,5 +243,78 @@ class GalleryViewModel(
         }
         lastCheckDoneMs = clock()
         extra.update { it.copy(drive = result, driveMessage = message) }
+    }
+
+    private val _selection = MutableStateFlow<Set<String>>(emptySet())
+
+    /** Keys of the selected items; non-empty means selection mode. */
+    val selection: StateFlow<Set<String>> = _selection
+
+    private val _notice = MutableStateFlow<String?>(null)
+
+    /** A short message to show once (snackbar), e.g. "Moving 2 to Dog". */
+    val notice: StateFlow<String?> = _notice
+
+    fun noticeShown() { _notice.value = null }
+
+    /** Long-press: enter selection mode with this item selected. */
+    fun select(key: String) = _selection.update { it + key }
+
+    fun toggle(key: String) = _selection.update { if (key in it) it - key else it + key }
+
+    fun clearSelection() { _selection.value = emptySet() }
+
+    /**
+     * Puts the items into drive folder [folder] (null = back to the default: clears the assignment), clears the
+     * selection and starts one backup run so the move happens now. A name that is blank or underscore-only is ignored.
+     */
+    fun sendTo(keys: List<String>, folder: String?): Job {
+        val name = folder?.let { FolderRules.canonical(it) }
+        if (folder != null && (name == null || name.all { it == '_' })) return Job().apply { complete() }
+        val ids = keys.mapNotNull { it.removePrefix("media:").takeIf { _ -> it.startsWith("media:") }?.toLongOrNull() }
+        val store = assignments
+        if (store == null || ids.isEmpty()) return Job().apply { complete() }
+        return viewModelScope.launch {
+            for (id in ids) {
+                if (name == null) store.clear(id) else store.set(FolderAssignment(id, name))
+            }
+            clearSelection()
+            runNow()
+            _notice.value = if (name == null) "Back to default" else "Moving ${ids.size} to $name"
+        }
+    }
+
+    /**
+     * Folder names for the picker: drive folders seen in the ledger under `<destination>\<device>\`, then folders
+     * already assigned, then rule folders; deduped ignoring case, first spelling wins. No drive access.
+     */
+    suspend fun folderNames(): List<String> {
+        val out = ArrayList<String>()
+        fun add(n: String?) {
+            val c = n?.let { FolderRules.canonical(it) } ?: return
+            if (c.all { it == '_' }) return
+            if (out.none { FolderRules.same(it, c) }) out += c
+        }
+        val prefix = try {
+            root()?.let { (dest, device) ->
+                val d = (dest ?: "").replace('/', '\\').trim('\\')
+                listOf(d, RemotePathPlanner.sanitise(device)).filter { it.isNotEmpty() }.joinToString("\\") + "\\"
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+        if (prefix != null) {
+            for (e in ledger.first()) {
+                val full = e.remotePath ?: continue
+                if (!full.startsWith(prefix, ignoreCase = true)) continue
+                val parts = full.substring(prefix.length).split('\\')
+                if (parts.size == 3 && parts.none { it.isEmpty() }) add(parts[0])
+            }
+        }
+        assignments?.all()?.sortedBy { it.mediaId }?.forEach { add(it.folder) }
+        rules().values.sortedBy { it.lowercase() }.forEach { add(it) }
+        return out
     }
 }
