@@ -14,6 +14,9 @@ import dev.photobackup.ledger.FolderAssignment
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.ledger.SecondCopy
 import dev.photobackup.ledger.SecondStatus
+import dev.photobackup.ledger.LedgerRules
+import dev.photobackup.ledger.ReviewKeep
+import dev.photobackup.media.FolderRules
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.smb.FakeRemoteStore
 import dev.photobackup.smb.RemoteException
@@ -117,8 +120,11 @@ class FakePhone : RestorePhone {
         )
     }
 
+    /** Thrown by [findSame] (e.g. SecurityException without photo access). */
+    var findSameError: Exception? = null
+
     override fun findSame(displayName: String, sizeBytes: Long, isVideo: Boolean): List<PhoneMedia> =
-        existing.map { it.first }.filter { it.displayName == displayName && it.sizeBytes == sizeBytes }
+        findSameError?.let { throw it } ?: existing.map { it.first }.filter { it.displayName == displayName && it.sizeBytes == sizeBytes }
 
     override fun freeBytes(): Long = free
 
@@ -475,4 +481,124 @@ class RestoreEngineTest {
         engine().run(all) { seen += it.done to it.total }
         assertEquals(listOf(0 to 2, 1 to 2, 2 to 2), seen)
     }
+
+    // ---- main drive dropping partway ----
+
+    /** Main openRead fails from call [from] on, for [count] calls (default: for good). */
+    private fun mainReadsFail(from: Int, count: Int = 1_000_000) {
+        var reads = 0
+        main.failOn = { op, _ ->
+            if (op == "openRead") {
+                reads++
+                if (reads >= from && reads < from + count) RemoteException.Unreachable() else null
+            } else null
+        }
+    }
+
+    @Test fun mainDropsPartwayAndItemHasNoSecondCopyStopsTheJob() = runBlocking {
+        put(row(1))
+        put(row(2))
+        put(row(3))
+        putSecond(3)
+        mainReadsFail(from = 2)
+        val r = engine().run(all) {}
+        assertEquals(1, r.restored)
+        assertEquals(RestoreEngine.UNREACHABLE, r.stopped)
+        assertTrue(r.failed.isEmpty())
+        assertTrue(phone.pending.isEmpty())
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, db.ledgerDao().get(2)!!.status)
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, db.ledgerDao().get(3)!!.status)
+    }
+
+    @Test fun mainDropsPartwaySecondServesCoveredItemsThenStops() = runBlocking {
+        put(row(1))
+        put(row(2))
+        put(row(3))
+        put(row(4))
+        putSecond(2)
+        putSecond(3)
+        mainReadsFail(from = 2)
+        val r = engine().run(all) {}
+        assertEquals(3, r.restored)
+        assertEquals(RestoreEngine.UNREACHABLE, r.stopped)
+        assertTrue(r.failed.isEmpty())
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, db.ledgerDao().get(4)!!.status)
+    }
+
+    @Test fun mainBlipIsReopenedOnceAndTheRunCarriesOn() = runBlocking {
+        secondOn = false
+        put(row(1))
+        put(row(2))
+        put(row(3))
+        var connects = 0
+        var reads = 0
+        main.failOn = { op, _ ->
+            when (op) {
+                "connect" -> { connects++; null }
+                "openRead" -> if (++reads == 2) RemoteException.Unreachable() else null
+                else -> null
+            }
+        }
+        val r = engine().run(all) {}
+        assertEquals(3, r.restored)
+        assertNull(r.stopped)
+        assertEquals(2, connects)
+    }
+
+    // ---- fallback folder vs. the next backup ----
+
+    @Test fun fallbackFolderItemIsNotReUploadedNorMovedByFolderRules() = runBlocking {
+        val remote = path(1, folder = "Odd")
+        put(row(1, remote = remote).copy(relativePath = "Pictures/Odd/"))
+        phone.refused += "Pictures/Odd/"
+        engine().run(all) {}
+        val item = phone.allItems().single()
+        assertEquals(RestoreEngine.PHOTO_FALLBACK, item.relativePath)
+        val e = db.ledgerDao().get(item.mediaId)!!
+        assertFalse(LedgerRules.needsUpload(e, item))
+        assertFalse(LedgerRules.changed(e, item))
+        assertTrue(LedgerRules.isSafeToRemove(e, item))
+        // A rule for the fallback folder must not pull the drive file into another folder.
+        val rules = mapOf("DCIM/Restored" to "Restored")
+        val backup = BackupEngine(
+            store = main, ledger = db.ledgerDao(), opener = { m -> phone.openInput(m.uri) },
+            settings = BackupSettings("Backup", "Pixel", ZoneOffset.UTC), clock = { now }, itemPauseMs = 0,
+            folderFor = { _, rel -> FolderRules.desired(rel, null, rules) },
+        )
+        val r = backup.run(phone.allItems()) { _, _, _ -> } as BackupResult.Done
+        assertEquals(0, r.uploaded)
+        assertEquals(0, r.moved)
+        assertTrue(main.writes.isEmpty())
+        assertEquals(setOf(remote), main.files.keys)
+        assertEquals(remote, db.ledgerDao().get(item.mediaId)!!.remotePath)
+    }
+
+    // ---- minors ----
+
+    @Test fun reviewRowsMoveWithTheReKey() = runBlocking {
+        put(row(1))
+        db.reviewKeepDao().upsert(ReviewKeep(1, 42))
+        engine().run(all) {}
+        val newId = phone.published.single().substringAfterLast('/').toLong()
+        assertEquals(42L, db.reviewKeepDao().get(newId)!!.keptAt)
+        assertNull(db.reviewKeepDao().get(1))
+    }
+
+    @Test fun noPhotoAccessForTheAlreadyThereCheckWritesNothing() = runBlocking {
+        put(row(1))
+        phone.findSameError = SecurityException("no access")
+        val r = engine().run(all) {}
+        assertEquals(RestoreEngine.NO_PHOTO_ACCESS, r.failed.single().reason)
+        assertTrue(phone.created.isEmpty())
+    }
+
+    @Test fun unexpectedDriveErrorOnOpenStillDiscardsThePendingItem() = runBlocking {
+        put(row(1))
+        main.failOn = { op, _ -> if (op == "openRead") throw IllegalStateException("boom") else null }
+        val r = engine().run(all) {}
+        assertEquals(RestoreEngine.DRIVE_READ, r.failed.single().reason)
+        assertTrue(phone.pending.isEmpty())
+        assertEquals(1, phone.discarded.size)
+    }
+
 }

@@ -29,8 +29,8 @@ interface RestoreLedger {
 
     /**
      * In one transaction: the row [oldId] becomes a VERIFIED row keyed by [item] (same drive path and hash, the phone
-     * item's id, uri, name, size and date modified; everything else kept), and its FolderAssignment and SecondCopy move
-     * with it. Only while [oldId] is still a candidate at [remotePath] with [sha], and no other row has [item]'s id.
+     * item's id, uri, name, size and date modified; everything else kept), and its FolderAssignment, SecondCopy and review rows
+     * (ReviewDecision, ReviewKeep) move with it. Only while [oldId] is still a candidate at [remotePath] with [sha], and no other row has [item]'s id.
      * False = nothing changed. Never touches a drive file.
      */
     suspend fun rekey(oldId: Long, remotePath: String, sha: String, item: RestoredItem, nowMs: Long): Boolean
@@ -80,6 +80,19 @@ abstract class RestoreDao : RestoreLedger {
     @Query("DELETE FROM SecondCopy WHERE mediaId = :mediaId")
     abstract suspend fun deleteSecondCopy(mediaId: Long)
 
+    /** The item's own review rows win when it already has them (already-on-phone re-key); the old ones go. */
+    @Query("UPDATE OR IGNORE ReviewDecision SET mediaId = :to WHERE mediaId = :from")
+    abstract suspend fun moveDecision(from: Long, to: Long)
+
+    @Query("DELETE FROM ReviewDecision WHERE mediaId = :mediaId")
+    abstract suspend fun deleteDecision(mediaId: Long)
+
+    @Query("UPDATE OR IGNORE ReviewKeep SET mediaId = :to WHERE mediaId = :from")
+    abstract suspend fun moveKeep(from: Long, to: Long)
+
+    @Query("DELETE FROM ReviewKeep WHERE mediaId = :mediaId")
+    abstract suspend fun deleteKeep(mediaId: Long)
+
     @Transaction
     override suspend fun rekey(oldId: Long, remotePath: String, sha: String, item: RestoredItem, nowMs: Long): Boolean {
         val old = candidateRow(oldId, remotePath, sha) ?: return false
@@ -102,6 +115,12 @@ abstract class RestoreDao : RestoreLedger {
         )
         folder?.let { insertAssignment(it.copy(mediaId = item.mediaId)) }
         copy?.let { insertSecondCopy(it.copy(mediaId = item.mediaId)) }
+        if (item.mediaId != oldId) {
+            moveDecision(oldId, item.mediaId)
+            deleteDecision(oldId)
+            moveKeep(oldId, item.mediaId)
+            deleteKeep(oldId)
+        }
         return true
     }
 }

@@ -109,8 +109,9 @@ interface RestorePhone {
  *    published; anything else is discarded. Then [RestoreLedger.rekey] in one transaction; if the row changed
  *    meanwhile the new phone file is discarded.
  *
- * A lost connection to the main drive (RemoteException) switches to the second drive for the rest of the run; both
- * unreachable (or main unreachable with the second location off) stops the job with [UNREACHABLE]. Cancelling keeps
+ * A lost connection to the main drive (RemoteException) is retried once per run on a fresh connection. After that
+ * main is down: items with a usable second copy come from the second drive, and the first item the second drive can't
+ * serve stops the job with [UNREACHABLE] (also when the second location is off). Cancelling keeps
  * finished items and discards the one in flight. Never writes, renames or deletes a drive file; never logs.
  */
 class RestoreEngine(
@@ -136,36 +137,44 @@ class RestoreEngine(
         const val PHONE_WRITE = "Couldn't save it on the phone"
         const val PHONE_MISMATCH = "The phone copy didn't match — removed"
         const val CHANGED = "Changed meanwhile — phone copy removed"
+        const val NO_PHOTO_ACCESS = "Photos permission needed"
         const val CHANGED_KEPT = "Changed meanwhile — left as it was"
 
         fun noRoom(needed: Long, free: Long) =
             "Not enough space on the phone: needs ${formatSize(needed)}, ${formatSize(free.coerceAtLeast(0))} free"
     }
 
-    /** A drive for one run: opened at most once, dropped for the rest of the run once it failed. */
-    private class Source(private val open: suspend () -> RemoteStore) {
+    /**
+     * A drive for one run, opened at most [maxOpens] times: [fail] drops the connection, and the next [get] reopens
+     * it while opens are left. Once an open fails or none are left it is [down] for the rest of the run.
+     */
+    private class Source(private val open: suspend () -> RemoteStore, private val maxOpens: Int) {
         private var store: RemoteStore? = null
-        private var asked = false
+        private var opens = 0
         var down = false
             private set
 
         suspend fun get(): RemoteStore? {
             if (down) return null
-            if (!asked) {
-                asked = true
-                store = try {
-                    open()
-                } catch (e: Exception) {
-                    if (e is CancellationException) throw e
-                    null
-                }
-                if (store == null) down = true
+            store?.let { return it }
+            if (opens >= maxOpens) {
+                down = true
+                return null
             }
+            opens++
+            store = try {
+                open()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                null
+            }
+            if (store == null) down = true
             return store
         }
 
         fun fail() {
-            down = true
+            close()
+            store = null
         }
 
         fun close() {
@@ -221,8 +230,9 @@ class RestoreEngine(
             val items = rows.filter { selection.includes(keyOf(it)) }
                 .sortedWith(compareBy<LedgerEntry, RestoreGroupKey>(groupOrder) { keyOf(it) }
                     .thenBy { it.dateTakenMs }.thenBy { it.mediaId })
-            val main = Source(openMain)
-            val second = openSecond?.let { Source(it) }
+            // Main: one reopen after a lost connection (a blip); the second drive: no reopen.
+            val main = Source(openMain, maxOpens = 2)
+            val second = openSecond?.let { Source(it, maxOpens = 1) }
             var restored = 0
             var already = 0
             val failed = mutableListOf<RestoreFailure>()
@@ -254,7 +264,13 @@ class RestoreEngine(
     private suspend fun restoreOne(row: LedgerEntry, main: Source, second: Source?): Outcome {
         val sha = row.localSha256!!
         val path = row.remotePath!!
-        alreadyOnPhone(row, sha)?.let { m ->
+        val there = try {
+            alreadyOnPhone(row, sha)
+        } catch (_: SecurityException) {
+            // Can't see the phone's photos: restoring could make a duplicate, so leave it.
+            return Outcome.Failed(NO_PHOTO_ACCESS)
+        }
+        there?.let { m ->
             if (ledger.hasRow(m.mediaId)) return Outcome.AlreadyThere
             return if (ledger.rekey(row.mediaId, path, sha, m.restored(), clock())) {
                 Outcome.AlreadyThere
@@ -265,18 +281,21 @@ class RestoreEngine(
         var mainUnreachable = false
         var unreadable = false
         var secondUnreachable = false
-        val m = main.get()
-        if (m == null) {
-            mainUnreachable = true
-        } else {
+        // A lost connection drops the store; the next get() reopens it once per run, then main is down for good.
+        while (true) {
+            val m = main.get()
+            if (m == null) {
+                mainUnreachable = true
+                break
+            }
             when (val a = attempt(m, path, row, sha)) {
                 is Attempt.Done -> return a.outcome
-                Attempt.BadSource -> {}
-                Attempt.Unreadable -> unreadable = true
-                Attempt.Unreachable -> {
-                    main.fail()
-                    mainUnreachable = true
+                Attempt.BadSource -> break
+                Attempt.Unreadable -> {
+                    unreadable = true
+                    break
                 }
+                Attempt.Unreachable -> main.fail()
             }
         }
         if (second != null) {
@@ -298,10 +317,10 @@ class RestoreEngine(
                 }
             }
         }
-        if (mainUnreachable && (second == null || second.down)) return Outcome.Stop
+        // Main unreachable and the second drive didn't serve this item: stop the job (finished items are kept).
+        if (mainUnreachable) return Outcome.Stop
         return Outcome.Failed(
             when {
-                mainUnreachable -> UNREACHABLE
                 secondUnreachable -> SECOND_UNREACHABLE
                 unreadable -> DRIVE_READ
                 else -> NO_GOOD_COPY
@@ -312,11 +331,15 @@ class RestoreEngine(
     private fun usable(c: SecondCopy, sha: String) = c.status == SecondStatus.VERIFIED && c.remotePath != null &&
         c.sha256 == sha && c.movingTo == null && c.partPath == null
 
-    /** A phone item with the row's name and size whose bytes hash to [sha]; any read problem = not that one. */
+    /**
+     * A phone item with the row's name and size whose bytes hash to [sha]; any read problem = not that one. A
+     * SecurityException from the lookup (no photo access) propagates.
+     */
     private fun alreadyOnPhone(row: LedgerEntry, sha: String): PhoneMedia? {
         val same = try {
             phone.findSame(row.displayName, row.sizeBytes, row.isVideo)
         } catch (e: Exception) {
+            if (e is SecurityException) throw e
             return null
         }
         return same.firstOrNull { m ->
@@ -368,6 +391,10 @@ class RestoreEngine(
             } catch (e: IOException) {
                 discard()
                 return if (e is RemoteException) Attempt.Unreachable else Attempt.Unreadable
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                discard() // never leave a hidden half-item, whatever the store throws
+                return Attempt.Unreadable
             }
             val job = coroutineContext[Job]
             val streamed = try {

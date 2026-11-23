@@ -190,7 +190,8 @@ class RestoreResults(private val prefs: SharedPreferences) {
 class RestoreWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     companion object {
         const val BUSY = "A backup is running — try again in a moment"
-        const val CANCELLED = "Restore cancelled — finished items kept"
+        /** Cancelled, or stopped by Android (e.g. Wi-Fi lost; WorkManager then runs it again). */
+        const val CANCELLED = "Restore stopped — finished items kept"
         const val FAILED = "Restore failed — try again"
         const val SETUP = "Finish setup first"
         const val SETTINGS = "Couldn't read the settings — try again"
