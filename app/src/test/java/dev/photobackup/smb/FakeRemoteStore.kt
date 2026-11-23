@@ -11,12 +11,17 @@ class FakeRemoteStore(
     var freeBytes: Long = Long.MAX_VALUE,
     var fileSystem: String = "EXFAT",
     var truncateWritesAfter: Long? = null,
+    /** When true, openRead returns the data with its first byte flipped (simulates a bad read-back). */
+    var corruptReads: Boolean = false,
 ) : RemoteStore {
     val files: MutableMap<String, ByteArray> = linkedMapOf()
     val dirs: MutableSet<String> = linkedSetOf()
 
     /** Paths opened for write, in order. */
     val writes: MutableList<String> = mutableListOf()
+
+    /** Paths passed to delete, in order. */
+    val deletes: MutableList<String> = mutableListOf()
 
     private fun check(op: String, path: String) {
         failOn?.invoke(op, path)?.let { throw it }
@@ -84,7 +89,10 @@ class FakeRemoteStore(
 
     override suspend fun openRead(path: String, offset: Long): InputStream {
         check("openRead", path)
-        val data = files[path] ?: throw FileNotFoundException(path)
+        val stored = files[path] ?: throw FileNotFoundException(path)
+        val data = if (corruptReads && stored.isNotEmpty()) {
+            stored.copyOf().also { it[0] = (it[0].toInt() xor 0xFF).toByte() }
+        } else stored
         val start = offset.coerceIn(0L, data.size.toLong()).toInt()
         return ByteArrayInputStream(data, start, data.size - start)
     }
@@ -98,6 +106,7 @@ class FakeRemoteStore(
 
     override suspend fun delete(path: String) {
         check("delete", path)
+        deletes.add(path)
         if (files.remove(path) == null && !dirs.remove(path)) throw FileNotFoundException(path)
     }
 
