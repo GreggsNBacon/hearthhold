@@ -104,6 +104,13 @@ Remote access (Immich on a spare PC, router WireGuard VPN) and Google Photos are
 - Find SMB hosts on the local subnet. Use mDNS (`_smb._tcp`) and NetBIOS name query broadcast, and fall back to probing TCP 445 across the /24. List them by name (e.g. `RT-AX86U`).
 - Manual host/IP entry is always available.
 
+### Remembering the login
+*Owner's decision (2026-11-22):*
+- **One saved login per drive.** The username and password entered once (in setup, or when listing shares) are reused for every share and every subfolder: the folder picker, Browse, the gallery, the player and background backups. Opening a subfolder never prompts.
+- **Re-prompt only on authentication failure.** If any drive access fails with "wrong username or password", the app shows one "Re-enter drive password" dialog (username pre-filled). On a successful login, the new password is saved, and the action that failed is retried automatically. Cancelling leaves the old login in place.
+- **Background failures.** If a background backup fails to log in, it posts the "Wrong username or password" notification. Tapping it opens the app straight to that dialog.
+- If the saved password can't be decrypted (e.g. after a phone restore), the app treats it the same as an authentication failure.
+
 ### Security
 - Credentials are encrypted with an Android Keystore-backed key and stored in DataStore. They're never logged.
 
