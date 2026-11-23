@@ -71,7 +71,10 @@
 - Nothing changes until you tap **Finish**; until then every swipe can be undone.
 - Finish re-checks both copies (phone and drive) by hash, then Android asks once to confirm the phone delete.
 - Junk drive copies move to `<dest>\<device>\.Bin\<folder>\<year>\` on the next backup run.
-- The Bin screen restores items to where they were, or empties them.
+- Each gesture can also be set to "No action".
+- Restore renames the file back to its original place; if that name is taken it becomes `name (n).ext`.
+- Restored items come back as drive-only; use "Copy to phone" in the viewer to get one back on the phone.
+- The Bin screen restores or empties items.
 - Items older than 30 days in the Bin are emptied automatically.
 - Only files inside `.Bin` are ever deleted from the drive.
 
