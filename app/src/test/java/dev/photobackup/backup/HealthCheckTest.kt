@@ -9,6 +9,7 @@ import dev.photobackup.ledger.LedgerDao
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.ledger.SecondCopy
 import dev.photobackup.ledger.SecondStatus
+import dev.photobackup.smb.AccessDeniedException
 import dev.photobackup.smb.FakeRemoteStore
 import dev.photobackup.smb.RemoteException
 import dev.photobackup.smb.RemoteStore
@@ -231,6 +232,13 @@ class HealthCheckTest {
         assertEquals(path(1), dao.get(1)!!.remotePath)
     }
 
+    @Test fun damagedTotalLeavesOutBinRows() = runBlocking {
+        put(row(1).copy(lastError = HealthCheck.NO_GOOD_COPY_ERROR))
+        put(row(2, status = BackupStatus.REMOVED_FROM_PHONE).copy(lastError = HealthCheck.NO_GOOD_COPY_ERROR, binRequestedAt = 5))
+        put(row(3, status = BackupStatus.BINNED).copy(lastError = HealthCheck.NO_GOOD_COPY_ERROR, binRequestedAt = 5))
+        assertEquals(1, check().damagedTotal())
+    }
+
     @Test fun noGoodCopyRowsStayInTheRotation() = runBlocking {
         put(row(1, checked = 5).copy(lastError = HealthCheck.NO_GOOD_COPY_ERROR), onDrive = bad)
         put(row(2, checked = 7))
@@ -254,7 +262,9 @@ class HealthCheckTest {
         assertEquals(path(1), e.remotePath)
         assertEquals("elsewhere", e.movingTo)
         assertNull(e.lastError)
-        assertTrue(main.deletes.isEmpty())
+        // The unreferenced new copy (this repair's own file) is removed; the original stays.
+        assertEquals(listOf("Backup\\Pixel\\Camera\\2024\\img1 (1).jpg"), main.deletes)
+        assertArrayEquals(bad, main.files[path(1)])
     }
 
     // ---- network drops ----
@@ -273,14 +283,75 @@ class HealthCheckTest {
         assertEquals(3L, dao.get(3)!!.lastCheckedAt)
     }
 
-    @Test fun aPlainIoErrorOnStatAlsoStopsThePass() = runBlocking {
-        put(row(1), onDrive = bad)
-        main.failOn = { op, _ -> if (op == "stat") IOException("flaky") else null }
+    @Test fun aPerFileErrorRotatesThatRowToTheBackAndThePassGoesOn() = runBlocking {
+        put(row(1, checked = null), onDrive = bad)
+        put(row(2, checked = 5))
+        put(row(3, checked = 6))
+        main.failOn = { op, p -> if (op == "stat" && p == path(1)) AccessDeniedException() else null }
+        val pass = check(batch = 2).checkMain(main, null)
+        assertTrue(pass.completed)
+        assertEquals(1, pass.checked) // row 2; row 1 was not judged
+        val one = dao.get(1)!!
+        assertNull(one.lastError) // never marked damaged
+        assertEquals(now, one.lastCheckedAt) // rotated to the back
+        assertEquals(path(1), one.remotePath)
+        assertEquals(now, dao.get(2)!!.lastCheckedAt)
+        // Next pass starts with row 3, not row 1.
+        now += 10
+        check(batch = 1).checkMain(main, null)
+        assertEquals(now, dao.get(3)!!.lastCheckedAt)
+    }
+
+    @Test fun aPlainIoErrorMidReadAlsoOnlySkipsThatRow() = runBlocking {
+        put(row(1, checked = 1))
+        put(row(2, checked = 2))
+        main.failOn = { op, p -> if (op == "openRead" && p == path(1)) IOException("sharing violation") else null }
         val pass = check().checkMain(main, null)
-        assertFalse(pass.completed)
-        assertEquals(0, pass.checked)
+        assertTrue(pass.completed)
+        assertEquals(1, pass.checked)
         assertNull(dao.get(1)!!.lastError)
-        assertNull(dao.get(1)!!.lastCheckedAt)
+        assertEquals(now, dao.get(2)!!.lastCheckedAt)
+    }
+
+    @Test fun stepRecordsTheGateWhenAPassWithPerFileErrorsFinishes() = runBlocking {
+        put(row(1))
+        main.failOn = { op, _ -> if (op == "stat") AccessDeniedException() else null }
+        val repo = repo()
+        step(repo, null, mutableListOf()).runIfDue(main)
+        assertEquals(now, repo.status.first().lastHealthCheckMs)
+    }
+
+    // ---- failed repairs clean up only what they created ----
+
+    @Test fun aReadBackMismatchRemovesTheNewCopyAndKeepsTheOriginal() = runBlocking {
+        put(row(1), onDrive = bad)
+        phone[1] = good
+        main.corruptReads = true // every read-back differs from what was written
+        val pass = check().checkMain(main, null)
+        assertEquals(0, pass.repaired)
+        assertEquals(0, pass.damaged)
+        val newName = "Backup\\Pixel\\Camera\\2024\\img1 (1).jpg"
+        assertFalse(newName in main.files)
+        assertFalse(main.files.keys.any { it.endsWith(".part") })
+        assertArrayEquals(bad, main.files[path(1)])
+        assertEquals(listOf(newName), main.deletes)
+        assertEquals(path(1), dao.get(1)!!.remotePath)
+        assertNull(dao.get(1)!!.lastError)
+    }
+
+    @Test fun aSourceThatChangesAfterItsProbeLeavesNoPart() = runBlocking {
+        put(row(1), onDrive = bad)
+        var opens = 0
+        val hc = HealthCheck(
+            ledger = dao, copies = db.secondCopyDao(),
+            opener = { _ -> opens++; ByteArrayInputStream(if (opens == 1) good else bad) },
+            clock = { now },
+        )
+        val pass = hc.checkMain(main, null)
+        assertEquals(0, pass.repaired)
+        assertEquals(listOf("Backup\\Pixel\\Camera\\2024\\img1 (1).jpg.part"), main.deletes)
+        assertFalse(main.files.keys.any { it.endsWith(".part") })
+        assertArrayEquals(bad, main.files[path(1)])
     }
 
     @Test fun secondDropDuringRepairLeavesTheRowForLater() = runBlocking {

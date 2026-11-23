@@ -159,7 +159,10 @@ interface LedgerDao : LedgerStore {
     suspend fun repoint(mediaId: Long, oldPath: String, newPath: String, sha: String, nowMs: Long): Boolean =
         repointCount(mediaId, oldPath, newPath, sha, nowMs) > 0
 
-    @Query("SELECT COUNT(*) FROM LedgerEntry WHERE lastError = :error")
+    /** Rows with this exact error, leaving out bin rows (as [observeStatusCounts] does). */
+    @Query(
+        "SELECT COUNT(*) FROM LedgerEntry WHERE lastError = :error AND binRequestedAt IS NULL AND status != 'BINNED'"
+    )
     suspend fun countWithError(error: String): Int
 
     @Query("SELECT * FROM LedgerEntry ORDER BY dateTakenMs DESC")

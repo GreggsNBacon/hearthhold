@@ -214,6 +214,26 @@ class BackupWorkerTest {
         assertEquals("Not reachable", status().secondStatus)
     }
 
+    @Test fun cancelDuringTheTailKeepsThePublishedSuccess() {
+        // The runner publishes Done (uploads finished), then is cancelled during the health check tail.
+        runner = object : BackupRunner {
+            override suspend fun run(onProgress: (Int, Int, Long, Long) -> Unit): BackupResult = error("unused")
+            override suspend fun run(
+                onProgress: (Int, Int, Long, Long) -> Unit,
+                onMoving: (Int) -> Unit,
+                onResult: suspend (BackupResult) -> Unit,
+            ): BackupResult {
+                onResult(BackupResult.Done(2, 0, 0))
+                throw kotlinx.coroutines.CancellationException("stopped during health check")
+            }
+        }
+        try { runWorker() } catch (_: kotlinx.coroutines.CancellationException) { }
+        val s = status()
+        assertEquals("Backed up 2, failed 0", s.lastResult)
+        assertTrue(s.lastSuccessMs != null)
+        assertFalse(s.inProgress)
+    }
+
     @Test fun unreadableSettingsRetriesAndClaimsNothing() {
         runner = BackupRunner { _ -> throw dev.photobackup.settings.SettingsUnreadableException() }
         assertEquals(ListenableWorker.Result.retry(), runWorker())

@@ -149,6 +149,7 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
 
         // The engine reports progress from a non-suspending callback; hand it to a sequential consumer.
         val updates = Channel<Progress>(Channel.CONFLATED)
+        var published: Result? = null
         return try {
             coroutineScope {
                 val consumer = launch {
@@ -165,18 +166,30 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 // A new run starts: the previous run's error is stale (lastResult stays until this run ends).
                 repo.update { it.copy(inProgress = true, done = 0, total = 0, etaSec = null, moving = 0, lastError = null) }
                 trySetForeground(0, 0, null)
-                val r = try {
-                    runner.run({ done, total, bytes, totalBytes ->
-                        updates.trySend(Progress(done, total, bytes, totalBytes))
-                    }) { moving -> updates.trySend(Progress(0, 0, 0, 0, moving)) }
-                } finally {
-                    // Stop the consumer before any final status write so it cannot set inProgress afterwards.
+                // Stop the consumer before any final status write so it cannot set inProgress afterwards.
+                suspend fun stopConsumer() {
                     updates.close()
                     withContext(NonCancellable) { consumer.cancelAndJoin() }
                 }
-                finish(repo, r)
+                val r = try {
+                    runner.run(
+                        { done, total, bytes, totalBytes -> updates.trySend(Progress(done, total, bytes, totalBytes)) },
+                        { moving -> updates.trySend(Progress(0, 0, 0, 0, moving)) },
+                    ) { result ->
+                        // Published before the runner's read-only tail (health check): a cancel there keeps it.
+                        if (published == null) {
+                            stopConsumer()
+                            published = finish(repo, result)
+                        }
+                    }
+                } finally {
+                    stopConsumer()
+                }
+                published ?: finish(repo, r)
             }
         } catch (e: CancellationException) {
+            // The result was already recorded: the stop came during the tail, so leave that status as it is.
+            if (published != null) throw e
             val why = if (isStopped) BackupStop.message(Build.VERSION.SDK_INT) { stopReason } else null
             idle(repo) { if (why != null) it.copy(lastResult = why) else it }
             throw e

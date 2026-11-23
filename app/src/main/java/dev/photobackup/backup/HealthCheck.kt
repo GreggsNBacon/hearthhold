@@ -11,6 +11,7 @@ import dev.photobackup.smb.RemoteStore
 import dev.photobackup.smb.SmbConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -20,9 +21,10 @@ import java.io.InputStream
 import kotlin.coroutines.coroutineContext
 
 /**
- * One health check pass over one drive. [checked]: files read in full and judged. [repaired]: damaged copies re-made
- * and their rows repointed. [damaged]: damaged copies with no good source, marked [HealthCheck.NO_GOOD_COPY_ERROR].
- * [completed] false = cut short by a drive error (progress is kept per row in lastCheckedAt).
+ * One health check pass over one drive. [checked]: files judged healthy, repaired or damaged (rows skipped for a
+ * per-file error, or left waiting for the second drive, are not counted). [repaired]: damaged copies re-made and their
+ * rows repointed. [damaged]: damaged copies with no good source, marked [HealthCheck.NO_GOOD_COPY_ERROR].
+ * [completed] false = cut short by a lost connection (progress is kept per row in lastCheckedAt).
  */
 data class HealthPass(val checked: Int, val repaired: Int, val damaged: Int, val completed: Boolean)
 
@@ -38,14 +40,17 @@ object HealthGate {
  * Re-reads drive copies in full and compares them to the recorded hash, oldest-checked first, [batchSize] per pass.
  *
  * Main drive ([checkMain]): a copy is damaged only when a stat proves it missing / of the wrong size, or a completed
- * full read hashes to something else. Any drive error while judging (RemoteException or other IOException) stops the
- * pass; nothing is marked damaged because a read failed. A damaged copy is re-made from, in order:
+ * full read hashes to something else; nothing is marked damaged because a read failed. A lost connection
+ * (RemoteException) stops the pass. Any other drive error on one file (e.g. access denied) skips that row: it gets
+ * lastCheckedAt (to the back of the queue, so it can't block the others) and no error. A damaged copy is re-made
+ * from, in order:
  * 1. the phone file, when it is there and hashes to the recorded hash (checked before the rename);
  * 2. a VERIFIED second copy of that hash (only when the second location is on: [checkMain]'s secondStore non-null);
  * 3. none: the row keeps its path and gets [NO_GOOD_COPY_ERROR]; it stays in the rotation.
  * The new copy goes next to the bad one under a free name (clash scheme `name (n).ext`, never overwriting), is
  * verified by read-back, and the row is repointed with a conditional write (only while it is still the same settled
- * copy). The bad file is never deleted; nothing on either drive is ever deleted here.
+ * copy). The bad file is never deleted. The only deletes are a failed repair's own leftovers on the main drive: its
+ * `.part`, or the new copy it just made when that failed its read-back or could not be recorded on the row.
  *
  * A second-location pass (re-check of SecondCopy rows) is meant to slot in next to [checkMain] with its own batch.
  * Nothing is logged; stored errors are fixed texts.
@@ -62,7 +67,11 @@ class HealthCheck(
         const val NO_GOOD_COPY_ERROR = "Damaged on drive — no good copy left"
     }
 
-    private enum class Outcome { HEALTHY, REPAIRED, DAMAGED, LEFT }
+    /**
+     * SKIPPED: a per-file problem; the row gets lastCheckedAt only (to the back of the queue). WAITING: untouched (the
+     * second drive was unavailable, or the row changed meanwhile), so it comes first again next pass.
+     */
+    private enum class Outcome { HEALTHY, REPAIRED, DAMAGED, SKIPPED, WAITING }
 
     /** How one repair attempt from one source ended. */
     private sealed interface Attempt {
@@ -71,8 +80,8 @@ class HealthCheck(
         /** The source's size or hash is not the recorded one: proven no good. */
         data object BadSource : Attempt
 
-        /** The source could not be read: unknown whether it is good. */
-        data object Unreadable : Attempt
+        /** The source could not be read: unknown whether it is good. [network]: the second drive dropped. */
+        class Unreadable(val network: Boolean) : Attempt
     }
 
     /** The second store for one pass: asked for at most once, dropped once it failed. */
@@ -119,30 +128,41 @@ class HealthCheck(
             try {
                 for (row in ledger.healthBatch(batchSize)) {
                     coroutineContext.ensureActive()
-                    val outcome = checkOne(store, mover, second, row)
-                    checked++
-                    when (outcome) {
-                        Outcome.REPAIRED -> repaired++
-                        Outcome.DAMAGED -> damaged++
-                        Outcome.HEALTHY, Outcome.LEFT -> {}
+                    when (checkOne(store, mover, second, row)) {
+                        Outcome.HEALTHY -> checked++
+                        Outcome.REPAIRED -> { checked++; repaired++ }
+                        Outcome.DAMAGED -> { checked++; damaged++ }
+                        Outcome.SKIPPED, Outcome.WAITING -> {}
                     }
                 }
-            } catch (e: IOException) {
-                // The main drive dropped or failed a read: stop. Rows not reached keep their old lastCheckedAt.
+            } catch (e: RemoteException) {
+                // The main drive dropped: stop. Rows not reached keep their old lastCheckedAt.
                 completed = false
             }
             HealthPass(checked, repaired, damaged, completed)
         }
 
-    /** An IOException from [store] propagates (the pass stops). */
+    /** A RemoteException from [store] propagates (the pass stops). */
     private suspend fun checkOne(store: RemoteStore, mover: DriveMover, second: SecondSource, row: LedgerEntry): Outcome {
         val path = row.remotePath!!
         val sha = row.localSha256!!
-        if (intact(store, row, path, sha)) {
+        val ok = try {
+            intact(store, row, path, sha)
+        } catch (e: IOException) {
+            if (e is RemoteException) throw e
+            return skip(row, path, sha)
+        }
+        if (ok) {
             ledger.markCheckedCount(row.mediaId, path, sha, clearError = NO_GOOD_COPY_ERROR, setError = null, nowMs = clock())
             return Outcome.HEALTHY
         }
         return repair(store, mover, second, row, path, sha)
+    }
+
+    /** Rotates the row to the back of the queue (lastCheckedAt only; its error is left as it is). */
+    private suspend fun skip(row: LedgerEntry, path: String, sha: String): Outcome {
+        ledger.markCheckedCount(row.mediaId, path, sha, clearError = null, setError = null, nowMs = clock())
+        return Outcome.SKIPPED
     }
 
     private suspend fun intact(store: RemoteStore, row: LedgerEntry, path: String, sha: String): Boolean {
@@ -152,22 +172,26 @@ class HealthCheck(
     }
 
     /** What a full read of a repair source found, before anything is written. */
-    private enum class Probe { GOOD, BAD, UNSURE }
+    private enum class Probe { GOOD, BAD, UNSURE, DROPPED }
 
     private suspend fun repair(
         store: RemoteStore, mover: DriveMover, second: SecondSource, row: LedgerEntry, path: String, sha: String,
     ): Outcome {
-        var unsure = false
-        // Each source is hashed in full first, so a bad source never leaves a `.part` behind (nothing is deleted here).
+        var unsureFile = false // a source unreadable for a per-file reason
+        var waitSecond = false // the second drive was unavailable or dropped
+        fun unreadable(a: Attempt.Unreadable) {
+            if (a.network) waitSecond = true else unsureFile = true
+        }
+        // Each source is hashed in full first, so a bad source is never copied.
         // 1. The phone file.
         when (phoneProbe(row, sha)) {
             Probe.GOOD -> when (val a = copyIn(store, mover, second, row, path, sha, openPhone(row), fromSecond = false)) {
                 is Attempt.Done -> return a.outcome
                 Attempt.BadSource -> {}
-                Attempt.Unreadable -> unsure = true
+                is Attempt.Unreadable -> unreadable(a)
             }
             Probe.BAD -> {}
-            Probe.UNSURE -> unsure = true
+            Probe.UNSURE, Probe.DROPPED -> unsureFile = true
         }
         // 2. A verified second copy, only with the second location on.
         if (second.enabled) {
@@ -177,27 +201,34 @@ class HealthCheck(
                 c.movingTo == null && c.partPath == null
             ) {
                 val s = second.get()
-                when (if (s == null) Probe.UNSURE else secondProbe(second, s, cPath, row.sizeBytes, sha)) {
+                when (if (s == null) Probe.DROPPED else secondProbe(second, s, cPath, row.sizeBytes, sha)) {
                     Probe.GOOD -> {
+                        var network = false
                         val input = try {
                             s!!.openRead(cPath, 0)
                         } catch (e: IOException) {
-                            if (e is RemoteException) second.drop()
+                            if (e is RemoteException) {
+                                second.drop()
+                                network = true
+                            }
                             null
                         }
-                        when (val a = copyIn(store, mover, second, row, path, sha, input, fromSecond = true)) {
+                        when (val a = copyIn(store, mover, second, row, path, sha, input, fromSecond = true, network)) {
                             is Attempt.Done -> return a.outcome
                             Attempt.BadSource -> {}
-                            Attempt.Unreadable -> unsure = true
+                            is Attempt.Unreadable -> unreadable(a)
                         }
                     }
                     Probe.BAD -> {}
-                    Probe.UNSURE -> unsure = true
+                    Probe.UNSURE -> unsureFile = true
+                    Probe.DROPPED -> waitSecond = true
                 }
             }
         }
-        // 3. No good copy: only when every source is proven absent or bad. Unsure = leave the row for the next pass.
-        if (unsure) return Outcome.LEFT
+        // 3. No good copy: only when every source is proven absent or bad. Otherwise the row waits (second drive
+        //    unavailable: first again next pass) or rotates to the back (a per-file read problem).
+        if (waitSecond) return Outcome.WAITING
+        if (unsureFile) return skip(row, path, sha)
         ledger.markCheckedCount(row.mediaId, path, sha, clearError = null, setError = NO_GOOD_COPY_ERROR, nowMs = clock())
         return Outcome.DAMAGED
     }
@@ -218,7 +249,7 @@ class HealthCheck(
         null
     }
 
-    /** Missing, wrong size or a different hash = BAD; a read error = UNSURE (a dropped second store is not asked again). */
+    /** Missing, wrong size or a different hash = BAD; a read error = UNSURE; dropped store (not asked again) = DROPPED. */
     private suspend fun secondProbe(second: SecondSource, s: RemoteStore, path: String, size: Long, sha: String): Probe =
         try {
             val st = s.stat(path)
@@ -230,21 +261,25 @@ class HealthCheck(
         } catch (_: FileNotFoundException) {
             Probe.BAD
         } catch (e: IOException) {
-            if (e is RemoteException) second.drop()
-            Probe.UNSURE
+            if (e is RemoteException) {
+                second.drop()
+                Probe.DROPPED
+            } else {
+                Probe.UNSURE
+            }
         }
 
     /**
-     * Copies [input] (closed here; null = the source could not be opened again) to a free name next to [path],
-     * verified, and repoints the row. A RemoteException
-     * from the main store propagates (the pass stops); any other main-drive failure leaves the row as it was (LEFT).
-     * Whatever a failed attempt left on the drive (its `.part`, an unverified copy) stays: nothing is deleted.
+     * Copies [input] (closed here; null = the source could not be opened again, [network] saying why) to a free name
+     * next to [path], verified, and repoints the row. A RemoteException from the main store propagates (the pass
+     * stops); any other main-drive failure skips the row. A failed attempt removes only what it created itself: its
+     * `.part`, or the new copy when that failed its read-back or the row could not be repointed. Never the original.
      */
     private suspend fun copyIn(
         store: RemoteStore, mover: DriveMover, second: SecondSource, row: LedgerEntry, path: String, sha: String,
-        input: InputStream?, fromSecond: Boolean,
+        input: InputStream?, fromSecond: Boolean, network: Boolean = false,
     ): Attempt {
-        if (input == null) return Attempt.Unreadable
+        if (input == null) return Attempt.Unreadable(network)
         val dir = path.substringBeforeLast('\\', "")
         val name = path.substringAfterLast('\\')
         val target = try {
@@ -253,39 +288,59 @@ class HealthCheck(
         } catch (e: IOException) {
             input.close()
             if (e is RemoteException) throw e
-            return Attempt.Done(Outcome.LEFT)
+            return Attempt.Done(skip(row, path, sha))
         }
         if (target == null) {
             input.close()
-            return Attempt.Done(Outcome.LEFT)
+            return Attempt.Done(skip(row, path, sha))
         }
+        val part = RemotePathPlanner.partName(target)
         try {
-            val r = DriveCopy.copyVerified(
-                store, DriveCopy.source(input), RemotePathPlanner.partName(target), target, row.sizeBytes,
-                expectedSha = sha,
-            )
+            val r = try {
+                DriveCopy.copyVerified(store, DriveCopy.source(input), part, target, row.sizeBytes, expectedSha = sha)
+            } catch (e: CancellationException) {
+                // Stopped mid-copy: remove our own `.part` (best effort), then stop.
+                withContext(NonCancellable) { runCatching { DriveCopy.removeIfPresent(store, part) } }
+                throw e
+            }
             return when (r) {
                 is CopyResult.Verified -> {
                     val ms = if (row.dateTakenMs > 0) row.dateTakenMs else row.dateModifiedSec * 1000
                     DriveCopy.setTimesQuietly(store, target, ms)
-                    val moved = ledger.repoint(row.mediaId, path, target, sha, clock())
-                    Attempt.Done(if (moved) Outcome.REPAIRED else Outcome.LEFT)
-                }
-                is CopyResult.WrongSize, is CopyResult.WrongHash -> Attempt.BadSource
-                is CopyResult.WriteFailed -> {
-                    val e = r.error
-                    when {
-                        e is SourceReadException -> {
-                            if (fromSecond && e.reason is RemoteException) second.drop()
-                            Attempt.Unreadable
-                        }
-                        e is RemoteException -> throw e
-                        else -> Attempt.Done(Outcome.LEFT)
+                    if (ledger.repoint(row.mediaId, path, target, sha, clock())) {
+                        Attempt.Done(Outcome.REPAIRED)
+                    } else {
+                        // The row changed meanwhile: nothing points at the new copy, so it goes.
+                        DriveCopy.removeIfPresent(store, target)
+                        Attempt.Done(Outcome.WAITING)
                     }
                 }
-                is CopyResult.OpenFailed -> if (r.error is RemoteException) throw r.error else Attempt.Done(Outcome.LEFT)
-                is CopyResult.RenameFailed, is CopyResult.ReadBackFailed, is CopyResult.Mismatch ->
-                    Attempt.Done(Outcome.LEFT)
+                is CopyResult.WrongSize, is CopyResult.WrongHash -> {
+                    DriveCopy.removeIfPresent(store, part)
+                    Attempt.BadSource
+                }
+                is CopyResult.WriteFailed -> {
+                    val e = r.error
+                    if (e is RemoteException) throw e // the main drive dropped: nothing can be removed now
+                    DriveCopy.removeIfPresent(store, part)
+                    if (e is SourceReadException) {
+                        val dropped = fromSecond && e.reason is RemoteException
+                        if (dropped) second.drop()
+                        Attempt.Unreadable(dropped)
+                    } else {
+                        Attempt.Done(skip(row, path, sha))
+                    }
+                }
+                is CopyResult.OpenFailed ->
+                    if (r.error is RemoteException) throw r.error else Attempt.Done(skip(row, path, sha))
+                is CopyResult.RenameFailed -> {
+                    DriveCopy.removeIfPresent(store, part)
+                    Attempt.Done(skip(row, path, sha))
+                }
+                is CopyResult.ReadBackFailed, is CopyResult.Mismatch -> {
+                    DriveCopy.removeIfPresent(store, target)
+                    Attempt.Done(skip(row, path, sha))
+                }
             }
         } finally {
             mover.release(target)

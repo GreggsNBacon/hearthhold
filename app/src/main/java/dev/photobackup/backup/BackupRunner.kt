@@ -31,6 +31,16 @@ fun interface BackupRunner {
         onProgress: (done: Int, total: Int, bytes: Long, totalBytes: Long) -> Unit,
         onMoving: (count: Int) -> Unit,
     ): BackupResult = run(onProgress)
+
+    /**
+     * Like [run]; [onResult] gets the backup's result as soon as it is final, before any read-only tail (the health
+     * check) runs, so a cancel during the tail never loses it. Called at most once; the return value is the same result.
+     */
+    suspend fun run(
+        onProgress: (done: Int, total: Int, bytes: Long, totalBytes: Long) -> Unit,
+        onMoving: (count: Int) -> Unit,
+        onResult: suspend (BackupResult) -> Unit,
+    ): BackupResult = run(onProgress, onMoving).also { onResult(it) }
 }
 
 /** Process-wide runner factory so tests can swap the engine. No DI framework on purpose. */
@@ -84,6 +94,12 @@ class ProductionBackupRunner(private val context: Context) : BackupRunner {
     override suspend fun run(
         onProgress: (done: Int, total: Int, bytes: Long, totalBytes: Long) -> Unit,
         onMoving: (count: Int) -> Unit,
+    ): BackupResult = run(onProgress, onMoving) { }
+
+    override suspend fun run(
+        onProgress: (done: Int, total: Int, bytes: Long, totalBytes: Long) -> Unit,
+        onMoving: (count: Int) -> Unit,
+        onResult: suspend (BackupResult) -> Unit,
     ): BackupResult {
         val settings = SettingsStore(context, KeystoreCredentialCipher()).settings.first()
         val smb = settings.smb
@@ -114,6 +130,8 @@ class ProductionBackupRunner(private val context: Context) : BackupRunner {
             val result = secondStep(media, ledger, assignments).around(smb, store) {
                 engine.run(items, onMoving) { done, total, bytes -> onProgress(done, total, bytes, totalBytes) }
             }
+            // The result is final: publish it before the health check, so a cancel during the check never loses it.
+            onResult(result)
             // Health check last, in the same BackupLock hold, on the main store (still open after a Done run).
             if (result is BackupResult.Done) healthStep(media, ledger).runIfDue(store)
             return result
