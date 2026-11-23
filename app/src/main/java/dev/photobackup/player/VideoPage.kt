@@ -1,24 +1,38 @@
 package dev.photobackup.player
 
 import android.content.Context
+import android.net.Uri
 import android.view.LayoutInflater
 import dev.photobackup.R
 import androidx.annotation.OptIn
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -27,6 +41,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -34,10 +49,16 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
+import dev.photobackup.gallery.CopyToPhone
 import dev.photobackup.gallery.GalleryItem
 import dev.photobackup.gallery.SmbRoot
 import dev.photobackup.smb.RemoteStore
 import dev.photobackup.smb.SmbUri
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.Closeable
 
 /**
@@ -134,10 +155,14 @@ private fun ActivePlayer(
     // saved and recreated) and restored when the player is rebuilt.
     var snapshot by rememberSaveable(item.key, stateSaver = PlaybackSnapshot.Saver) { mutableStateOf(PlaybackSnapshot()) }
     var error by remember(item.key) { mutableStateOf<String?>(null) }
+    // The phone can't play this format (or has no decoder for its picture): offer another app instead of Retry.
+    var unsupported by remember(item.key) { mutableStateOf(false) }
+    var soundUnsupported by remember(item.key) { mutableStateOf(false) }
     val currentOnSpeed by rememberUpdatedState(onSpeedChange)
 
     val player = remember(item.key) {
-        ExoPlayer.Builder(context).setLoadControl(VideoCache.loadControl()).build().apply {
+        ExoPlayer.Builder(context, VideoCache.renderersFactory(context))
+            .setLoadControl(VideoCache.loadControl()).build().apply {
             setMediaSource(source)
             repeatMode = if (loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
             playbackParameters = PlaybackParameters(speed, 1f)
@@ -149,7 +174,23 @@ private fun ActivePlayer(
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onPlayerError(e: PlaybackException) {
-                error = viewerErrorMessage(e, fromDrive = fromDrive, isVideo = true)
+                if (PlaybackFallback.wantsFallback(e.errorCode)) {
+                    unsupported = true
+                } else {
+                    error = viewerErrorMessage(e, fromDrive = fromDrive, isVideo = true)
+                }
+            }
+
+            override fun onTracksChanged(tracks: Tracks) {
+                if (tracks.groups.isEmpty()) return // not known yet
+                when (PlaybackFallback.verdict(tracks)) {
+                    TrackVerdict.NO_VIDEO -> {
+                        unsupported = true
+                        player.pause() // no picture: don't play the sound alone behind the notice
+                    }
+                    TrackVerdict.NO_AUDIO -> soundUnsupported = true
+                    TrackVerdict.OK -> Unit
+                }
             }
 
             // PlayerView's own settings menu can change the speed too: keep the session speed in step.
@@ -202,11 +243,107 @@ private fun ActivePlayer(
         onRelease = { it.player = null },
         modifier = Modifier.fillMaxSize().safeDrawingPadding(),
     )
-    error?.let { msg ->
-        PageMessage(msg) {
+    val msg = error
+    when {
+        unsupported -> OpenElsewherePanel(item, store, MSG_FORMAT_UNSUPPORTED, compact = false)
+        msg != null -> PageMessage(msg) {
             error = null
             player.prepare()
             player.play()
+        }
+        soundUnsupported -> Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
+            OpenElsewherePanel(item, store, MSG_SOUND_UNSUPPORTED, compact = true)
+        }
+    }
+}
+
+/** Where "Open in another app" is: idle, copying a drive file into the cache, or showing why it can't. */
+private sealed interface OpenState {
+    data object Idle : OpenState
+    data class Copying(val copied: Long, val total: Long) : OpenState
+    data class Failed(val message: String) : OpenState
+}
+
+/**
+ * [message] + "Open in another app". A phone file opens straight away; a drive file is copied into the app's cache
+ * first (progress and Cancel; refused over 2 GB or without room on the phone). [compact]: a small notice (the
+ * picture plays, the sound can't) instead of the centred card.
+ */
+@Composable
+private fun OpenElsewherePanel(item: GalleryItem, store: PageStore, message: String, compact: Boolean) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var state by remember(item.key) { mutableStateOf<OpenState>(OpenState.Idle) }
+    var job by remember(item.key) { mutableStateOf<Job?>(null) }
+
+    fun open() {
+        val phone = item.phoneUri
+        if (phone != null) {
+            val uri = Uri.parse(phone)
+            OpenElsewhere.launch(context, uri, OpenElsewhere.mimeFor(context, uri, item.displayName))
+                ?.let { state = OpenState.Failed(it) }
+            return
+        }
+        val remote = item.remotePath ?: return
+        if (job?.isActive == true) return
+        job = scope.launch {
+            state = OpenState.Copying(0, item.sizeBytes)
+            state = try {
+                val dir = OpenElsewhere.cacheDir(context)
+                val drive = withContext(Dispatchers.IO) { store.get() }
+                val size = item.sizeBytes.takeIf { it > 0 }
+                    ?: withContext(Dispatchers.IO) { drive.stat(remote)?.sizeBytes ?: -1L }
+                val refused = withContext(Dispatchers.IO) {
+                    dir.mkdirs()
+                    OpenElsewhere.refusal(size, dir.usableSpace)
+                }
+                if (refused != null) {
+                    OpenState.Failed(refused)
+                } else {
+                    val file = OpenElsewhere.copyToCache(drive, remote, size, dir) { n -> state = OpenState.Copying(n, size) }
+                    val uri = OpenElsewhere.shareUri(context, file)
+                    OpenElsewhere.launch(context, uri, CopyToPhone.mimeType(file.name, isVideo = true))
+                        ?.let { OpenState.Failed(it) } ?: OpenState.Idle
+                }
+            } catch (e: CancellationException) {
+                OpenState.Idle
+            } catch (_: TooBigException) {
+                OpenState.Failed(MSG_TOO_BIG)
+            } catch (e: Exception) {
+                val why = viewerErrorMessage(e, fromDrive = true, isVideo = true) // never the exception text
+                OpenState.Failed(if (why == MSG_CANT_PLAY) MSG_COPY_FAILED else why)
+            }
+        }
+    }
+
+    Column(
+        Modifier.padding(if (compact) 8.dp else 24.dp)
+            .background(Color.Black.copy(alpha = 0.6f))
+            .padding(if (compact) 8.dp else 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(message, color = Color.White, textAlign = TextAlign.Center)
+        when (val s = state) {
+            is OpenState.Copying -> {
+                Spacer(Modifier.height(8.dp))
+                Text("Copying from the drive…", color = Color.White)
+                Spacer(Modifier.height(8.dp))
+                if (s.total > 0) {
+                    LinearProgressIndicator(
+                        progress = { (s.copied.toFloat() / s.total).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth(0.6f),
+                    )
+                } else {
+                    LinearProgressIndicator(Modifier.fillMaxWidth(0.6f))
+                }
+                TextButton(onClick = { job?.cancel() }) { Text("Cancel", color = Color.White) }
+            }
+            is OpenState.Failed -> {
+                Spacer(Modifier.height(8.dp))
+                Text(s.message, color = Color.White, textAlign = TextAlign.Center)
+                TextButton(onClick = { open() }) { Text(LABEL_OPEN_ELSEWHERE, color = Color.White) }
+            }
+            OpenState.Idle -> TextButton(onClick = { open() }) { Text(LABEL_OPEN_ELSEWHERE, color = Color.White) }
         }
     }
 }

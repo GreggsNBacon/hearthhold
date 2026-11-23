@@ -107,8 +107,20 @@ class RangeReader(private val open: (offset: Long) -> InputStream) : Closeable {
 /** A drive video for [MediaMetadataRetriever], read through the store (and its saved login). */
 private class StoreMediaDataSource(private val size: Long, open: (Long) -> InputStream) : MediaDataSource() {
     private val reader = RangeReader(open)
-    override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int =
+
+    /** A drive read failed (the retriever only sees "can't read"): tells a drive problem from an unreadable video. */
+    @Volatile var failed = false
+        private set
+
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int = try {
         reader.readAt(position, buffer, offset, size)
+    } catch (e: IOException) {
+        failed = true
+        throw e
+    } catch (e: RuntimeException) {
+        failed = true
+        throw e
+    }
 
     override fun getSize(): Long = size
     override fun close() = reader.close()
@@ -167,7 +179,9 @@ class SmbCoilFetcher(
             withRetry { withContext(Dispatchers.IO) { decode(loc, w, h) } }
         }
 
-        if (options.diskCachePolicy.writeEnabled && diskCache != null) {
+        // The placeholder is not cached on disk: a later app version (or decoder) may read the frame after all.
+        val placeholder = VideoPlaceholder.isPlaceholder(bitmap)
+        if (!placeholder && options.diskCachePolicy.writeEnabled && diskCache != null) {
             withContext(Dispatchers.IO) {
                 diskCache.openEditor(key)?.let { editor ->
                     try {
@@ -200,7 +214,7 @@ class SmbCoilFetcher(
 
     private suspend fun decode(loc: SmbLocation, w: Int, h: Int): Bitmap {
         val bmp = if (MediaKind.of(loc.path) == MediaKind.VIDEO) decodeVideo(loc.path, w, h) else decodeImage(loc.path, w, h)
-        return shrink(bmp, w, h)
+        return if (VideoPlaceholder.isPlaceholder(bmp)) bmp else shrink(bmp, w, h)
     }
 
     private suspend fun decodeImage(path: String, w: Int, h: Int): Bitmap {
@@ -249,12 +263,15 @@ class SmbCoilFetcher(
         val source = StoreMediaDataSource(size) { off -> runBlocking { store.openRead(path, off) } }
         val retriever = MediaMetadataRetriever()
         try {
-            retriever.setDataSource(source)
-            return retriever.getScaledFrameAtTime(-1, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, w, h)
-                ?: retriever.frameAtTime
-                ?: throw ImageDecodeException("Can't read a video frame")
-        } catch (e: RuntimeException) {
-            throw IOException("Can't read a video frame", e)
+            // A format the phone can't decode gets the neutral video tile, not an error badge (Task 2b).
+            return VideoPlaceholder.frameOrPlaceholder(
+                read = {
+                    retriever.setDataSource(source)
+                    retriever.getScaledFrameAtTime(-1, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, w, h)
+                        ?: retriever.frameAtTime
+                },
+                sourceFailed = { source.failed },
+            )
         } finally {
             runCatching { retriever.release() }
             runCatching { source.close() }

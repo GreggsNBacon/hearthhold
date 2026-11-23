@@ -83,6 +83,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import dev.photobackup.R
+import dev.photobackup.player.VideoCache
 import dev.photobackup.ui.Screen
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -553,7 +554,7 @@ private fun CardVideo(card: ReviewCard, video: VideoState) {
     // Made in an effect, not during composition, so an abandoned composition can't leak a player.
     var player by remember { mutableStateOf<ExoPlayer?>(null) }
     DisposableEffect(card.phone.uri) {
-        val p = ExoPlayer.Builder(context).build().apply {
+        val p = ExoPlayer.Builder(context, VideoCache.renderersFactory(context)).build().apply {
             volume = 0f
             repeatMode = Player.REPEAT_MODE_ONE
             setMediaItem(MediaItem.fromUri(card.phone.uri))

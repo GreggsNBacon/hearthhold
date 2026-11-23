@@ -73,7 +73,10 @@ enum class MediaKind {
 
     companion object {
         private val IMAGES = setOf("jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "avif")
-        private val VIDEOS = setOf("mp4", "m4v", "mov", "3gp", "3g2", "mkv", "webm", "avi", "ts")
+        private val VIDEOS = setOf(
+            "mp4", "m4v", "mov", "3gp", "3g2", "mkv", "webm", "avi", "ts",
+            "flv", "f4v", "mpg", "mpeg", "vob", "ogv", "m2ts", "mts", "wmv", "asf", "divx",
+        )
 
         fun extension(name: String): String =
             if ('.' in name) name.substringAfterLast('.').lowercase(Locale.ROOT) else ""

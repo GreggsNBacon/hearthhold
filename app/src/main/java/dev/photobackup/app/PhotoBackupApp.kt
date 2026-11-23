@@ -29,11 +29,13 @@ import dev.photobackup.gallery.GalleryViewModel
 import dev.photobackup.gallery.secondCopiesFlow
 import dev.photobackup.gallery.SmbCoilFetcher
 import dev.photobackup.gallery.SmbRoot
+import dev.photobackup.gallery.VideoPlaceholder
 import dev.photobackup.gallery.ViewerListHolder
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerDao
 import dev.photobackup.ledger.SecondCopy
 import dev.photobackup.media.LocalMediaSource
+import dev.photobackup.player.OpenElsewhere
 import dev.photobackup.player.PlayerSession
 import dev.photobackup.review.DEFAULT_GESTURES
 import dev.photobackup.review.RealReviewFinisher
@@ -91,6 +93,10 @@ class PhotoBackupApp : Application(), ImageLoaderFactory {
                 // Status is cosmetic here; the next run rewrites it.
             }
         }
+        // "Open in another app" copies of drive videos: kept a day, then removed. Never throws.
+        container.appScope.launch(Dispatchers.IO) {
+            OpenElsewhere.cleanup(OpenElsewhere.cacheDir(this@PhotoBackupApp), System.currentTimeMillis())
+        }
     }
 
     /** Coil: phone video frames, drive thumbnails (smb://), and a thumbnail cache the OS won't clear. */
@@ -103,7 +109,8 @@ class PhotoBackupApp : Application(), ImageLoaderFactory {
                     savedRoot = { container.driveRoot() },
                 )
             )
-            add(VideoFrameDecoder.Factory())
+            // A video the phone can't take a frame from shows a neutral video tile, not an error.
+            add(VideoPlaceholder.Factory(VideoFrameDecoder.Factory()))
         }
         .diskCache {
             DiskCache.Builder()

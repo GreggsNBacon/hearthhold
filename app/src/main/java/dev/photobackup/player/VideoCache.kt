@@ -7,6 +7,8 @@ import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.RenderersFactory
 import androidx.media3.exoplayer.LoadControl
 
 /**
@@ -36,4 +38,15 @@ object VideoCache {
             /* bufferForPlaybackAfterRebufferMs = */ 2_000,
         )
         .build()
+
+    /**
+     * The renderers every player here uses (viewer and review cards). If the primary decoder for a track fails to
+     * start, the next one on the phone is tried. Extension renderers are ON (after the phone's own decoders), so an
+     * FFmpeg audio decoder on the classpath would be picked up as a fallback; none is bundled yet (no build for
+     * media3 1.4.x on Maven Central).
+     */
+    @OptIn(UnstableApi::class)
+    fun renderersFactory(context: Context): RenderersFactory = DefaultRenderersFactory(context)
+        .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+        .setEnableDecoderFallback(true)
 }

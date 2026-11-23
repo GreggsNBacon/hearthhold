@@ -65,6 +65,9 @@ object CopyToPhone {
         "mp4" to "video/mp4", "m4v" to "video/mp4", "mov" to "video/quicktime", "3gp" to "video/3gpp",
         "3g2" to "video/3gpp2", "mkv" to "video/x-matroska", "webm" to "video/webm", "avi" to "video/x-msvideo",
         "ts" to "video/mp2t",
+        "flv" to "video/x-flv", "f4v" to "video/mp4", "mpg" to "video/mpeg", "mpeg" to "video/mpeg",
+        "vob" to "video/mpeg", "ogv" to "video/ogg", "m2ts" to "video/mp2t", "mts" to "video/mp2t",
+        "wmv" to "video/x-ms-wmv", "asf" to "video/x-ms-asf", "divx" to "video/x-msvideo",
     )
 
     fun mimeType(name: String, isVideo: Boolean): String =
