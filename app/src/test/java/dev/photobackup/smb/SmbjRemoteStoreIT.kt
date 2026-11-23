@@ -51,9 +51,29 @@ class SmbjRemoteStoreIT {
             assertEquals(setOf("x.jpg", "y.part"), store.list("$dir\\a\\b").map { it.name }.toSet())
             val tail = store.openRead("$dir\\a\\b\\x.jpg", 299_990).use { it.readBytes() }
             assertArrayEquals(data.copyOfRange(299_990, 300_000), tail)
+
+            // Cross-folder rename (every folder move depends on it): into another directory of the share.
+            store.mkdirs("$dir\\c")
+            store.rename("$dir\\a\\b\\x.jpg", "$dir\\c\\x.jpg")
+            assertNull(store.stat("$dir\\a\\b\\x.jpg"))
+            assertEquals(300_000L, store.stat("$dir\\c\\x.jpg")!!.sizeBytes)
+            assertArrayEquals(data, store.openRead("$dir\\c\\x.jpg", 0).use { it.readBytes() })
+
+            // ...and never onto an existing file in the other folder.
+            store.openWrite("$dir\\a\\b\\z.part").use { it.write(byteArrayOf(2)) }
+            try {
+                store.rename("$dir\\a\\b\\z.part", "$dir\\c\\x.jpg")
+                throw AssertionError("cross-folder rename onto existing must fail")
+            } catch (_: IOException) {
+            }
+            assertEquals(1L, store.stat("$dir\\a\\b\\z.part")!!.sizeBytes)
+            assertEquals(300_000L, store.stat("$dir\\c\\x.jpg")!!.sizeBytes)
         } finally {
             runCatching {
-                for (p in listOf("$dir\\a\\b\\x.jpg", "$dir\\a\\b\\y.part", "$dir\\a\\b", "$dir\\a", dir)) {
+                for (p in listOf(
+                    "$dir\\a\\b\\x.jpg", "$dir\\a\\b\\y.part", "$dir\\a\\b\\z.part", "$dir\\c\\x.jpg",
+                    "$dir\\a\\b", "$dir\\c", "$dir\\a", dir,
+                )) {
                     runCatching { store.delete(p) }
                 }
             }
