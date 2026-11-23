@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.ui.auth.DriveNotConfiguredException
+import dev.photobackup.ui.userMessage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +33,8 @@ data class GalleryUiState(
     /** No photo access: only drive items can be listed. */
     val phoneDenied: Boolean = false,
     val root: SmbRoot? = null,
+    /** Why the drive is not reachable (friendly text), when [drive] is [DriveState.UNREACHABLE]. */
+    val driveMessage: String? = null,
 ) {
     /** Drive-only items are greyed out ("Drive not reachable") unless the drive answered just now. */
     fun isAvailable(item: GalleryItem): Boolean = item.location != Location.DRIVE || drive == DriveState.REACHABLE
@@ -88,7 +91,7 @@ class GalleryViewModel(
         }
         driveJob?.cancel()
         driveJob = viewModelScope.launch {
-            extra.update { it.copy(drive = DriveState.CHECKING) }
+            extra.update { it.copy(drive = DriveState.CHECKING, driveMessage = null) }
             val root = try {
                 driveRoot()
             } catch (e: CancellationException) {
@@ -97,6 +100,7 @@ class GalleryViewModel(
                 null
             }
             extra.update { it.copy(root = root) }
+            var message: String? = null
             val result = try {
                 checkDrive()
                 DriveState.REACHABLE
@@ -104,10 +108,11 @@ class GalleryViewModel(
                 throw e
             } catch (_: DriveNotConfiguredException) {
                 DriveState.NOT_CONFIGURED
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                message = userMessage(e)
                 DriveState.UNREACHABLE
             }
-            extra.update { it.copy(drive = result) }
+            extra.update { it.copy(drive = result, driveMessage = message) }
         }
     }
 }

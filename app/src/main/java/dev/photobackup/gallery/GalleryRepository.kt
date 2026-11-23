@@ -10,6 +10,7 @@ import dev.photobackup.media.PhoneMedia
  * - `REMOVED_FROM_PHONE` → [Location.DRIVE]
  * - `VERIFIED` but no longer on the phone (deleted outside the app, or its folder was turned off) → [Location.DRIVE]
  * - phone item with any other status, or not in the ledger → [Location.PHONE]
+ * Each item carries its ledger status and last error (for the Gallery badges).
  * Ledger rows that are neither on the phone nor (with a remote path) on the drive are left out.
  * Sorted newest first. Pure, so it runs off the main thread and in JVM tests.
  */
@@ -35,6 +36,8 @@ object GalleryMerge {
                 location = if (both) Location.BOTH else Location.PHONE,
                 phoneUri = m.uri,
                 remotePath = if (both) e!!.remotePath else null,
+                status = e?.status,
+                lastError = e?.lastError,
             )
         }
         for (e in ledger) {
@@ -50,6 +53,8 @@ object GalleryMerge {
                 location = Location.DRIVE,
                 phoneUri = null,
                 remotePath = remote,
+                status = e.status,
+                lastError = e.lastError,
             )
         }
         out.sortWith(compareByDescending<GalleryItem> { it.dateMs }.thenBy { it.key })

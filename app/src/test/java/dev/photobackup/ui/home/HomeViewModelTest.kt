@@ -80,4 +80,26 @@ class HomeViewModelTest {
         settings.value = settings.value.copy(smb = SmbConfig("nas", "usb", null, null))
         assertFalse(vm.state.value.needsPassword) // guest
     }
+
+    @Test fun refreshFreeUpDoesNotTouchTheDrive() {
+        val vm = vm()
+        vm.refreshFreeUp()
+        assertEquals(0, checks)
+        assertEquals(3L shl 30, vm.state.value.freeUpBytes)
+        assertEquals(Reachability.UNKNOWN, vm.state.value.reach)
+    }
+
+    @Test fun reenterRunsCallbackOnlyOnSuccess() {
+        var done = 0
+        vm().reenter { done++ }
+        assertEquals(1, done)
+        assertEquals(0, checks) // the callback replaces the default drive re-check
+        val cancelling = HomeViewModel(
+            settings, status, counts, checkDrive = { checks++ },
+            reenterPassword = { throw IllegalStateException("cancelled") },
+            freeUpBytes = { 0 }, backup = backup,
+        )
+        cancelling.reenter { done++ }
+        assertEquals(1, done)
+    }
 }

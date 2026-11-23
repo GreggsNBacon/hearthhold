@@ -86,6 +86,17 @@ class GalleryViewModelTest {
         assertTrue(s.isAvailable(both))
     }
 
+    @Test fun unreachableKeepsFriendlyMessageAndRecheckClearsIt() {
+        driveError = RemoteException.Unreachable()
+        val vm = vm()
+        vm.refresh()
+        assertEquals("Can't reach the drive — check you're on home Wi-Fi", vm.state.value.driveMessage)
+        driveError = null
+        vm.refresh()
+        assertEquals(DriveState.REACHABLE, vm.state.value.drive)
+        assertEquals(null, vm.state.value.driveMessage)
+    }
+
     @Test fun cancelledPasswordPromptCountsAsUnreachable() {
         driveError = RemoteException.AuthFailed()
         val vm = vm()

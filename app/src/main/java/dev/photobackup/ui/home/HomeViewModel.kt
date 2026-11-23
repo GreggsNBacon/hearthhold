@@ -79,17 +79,7 @@ class HomeViewModel(
      * cancelled password dialog does not pop up again on every resume. The Refresh button always checks.
      */
     fun refresh(auto: Boolean = false) {
-        freeUpJob?.cancel()
-        freeUpJob = viewModelScope.launch {
-            val bytes = try {
-                freeUpBytes(currentSettings())
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                0L
-            }
-            _state.update { it.copy(freeUpBytes = bytes) }
-        }
+        refreshFreeUp()
         if (reachJob?.isActive == true || (auto && autoChecked)) return
         reachJob = viewModelScope.launch {
             currentSettings()
@@ -110,15 +100,34 @@ class HomeViewModel(
         }
     }
 
+    /**
+     * Re-computes only the "Free up" size. The Gallery (main screen) checks the drive itself and its result drives
+     * the status chip, so the status sheet uses this instead of [refresh] to avoid a second drive login.
+     */
+    fun refreshFreeUp() {
+        freeUpJob?.cancel()
+        freeUpJob = viewModelScope.launch {
+            val bytes = try {
+                freeUpBytes(currentSettings())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                0L
+            }
+            _state.update { it.copy(freeUpBytes = bytes) }
+        }
+    }
+
     fun backUpNow() {
         viewModelScope.launch { backup.runNow(currentSettings().chargingOnly) }
     }
 
-    fun reenter() {
+    /** Re-enter the drive password; on success runs [onDone] (default: [refresh]). A cancelled dialog does nothing. */
+    fun reenter(onDone: () -> Unit = { refresh() }) {
         viewModelScope.launch {
             try {
                 reenterPassword()
-                refresh()
+                onDone()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {

@@ -32,7 +32,6 @@ import dev.photobackup.gallery.SmbRoot
 import dev.photobackup.gallery.ViewerListHolder
 import dev.photobackup.player.ViewerScreen
 import dev.photobackup.settings.AppSettings
-import dev.photobackup.ui.home.HomeScreen
 import dev.photobackup.ui.settings.SettingsScreen
 import dev.photobackup.ui.setup.SetupScreen
 import kotlinx.coroutines.flow.first
@@ -40,7 +39,6 @@ import kotlinx.coroutines.flow.map
 
 object Routes {
     const val SETUP = "setup"
-    const val HOME = "home"
     const val GALLERY = "gallery"
     const val BROWSE = "browse?path={path}"
     const val VIEWER = "viewer/{source}/{index}"
@@ -50,8 +48,8 @@ object Routes {
     fun browse(path: String = "") = "browse?path=${Uri.encode(path)}"
     fun viewer(source: String, index: Int) = "viewer/${Uri.encode(source)}/$index"
 
-    /** Setup until a drive and a destination are saved. */
-    fun start(s: AppSettings): String = if (s.smb == null || s.destination.isNullOrBlank()) SETUP else HOME
+    /** Setup until a drive and a destination are saved; then the Gallery (the main screen). */
+    fun start(s: AppSettings): String = if (s.smb == null || s.destination.isNullOrBlank()) SETUP else GALLERY
 }
 
 @Composable
@@ -68,16 +66,7 @@ fun AppNav(container: AppContainer) {
             SetupScreen(
                 viewModel = viewModel(factory = container.setupFactory),
                 driveStore = container::driveStore,
-                onFinished = { nav.navigate(Routes.HOME) { popUpTo(Routes.SETUP) { inclusive = true } } },
-            )
-        }
-        composable(Routes.HOME) {
-            HomeScreen(
-                viewModel = viewModel(factory = container.homeFactory),
-                onFreeUp = { nav.navigate(Routes.FREEUP) },
-                onGallery = { nav.navigate(Routes.GALLERY) },
-                onBrowse = { nav.navigate(Routes.browse()) },
-                onSettings = { nav.navigate(Routes.SETTINGS) },
+                onFinished = { nav.navigate(Routes.GALLERY) { popUpTo(Routes.SETUP) { inclusive = true } } },
             )
         }
         composable(Routes.FREEUP) {
@@ -94,13 +83,17 @@ fun AppNav(container: AppContainer) {
             )
         }
         composable(Routes.GALLERY) {
+            // Start destination: Back from here leaves the app.
             GalleryScreen(
                 viewModel = viewModel(factory = container.galleryFactory),
-                onBack = { nav.popBackStack() },
+                status = viewModel(factory = container.homeFactory),
                 onOpen = { items, index ->
                     container.viewerLists.set(ViewerListHolder.GALLERY, items)
                     nav.navigate(Routes.viewer(ViewerListHolder.GALLERY, index))
                 },
+                onFreeUp = { nav.navigate(Routes.FREEUP) },
+                onBrowse = { nav.navigate(Routes.browse()) },
+                onSettings = { nav.navigate(Routes.SETTINGS) },
             )
         }
         composable(

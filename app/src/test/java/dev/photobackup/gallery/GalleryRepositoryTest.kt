@@ -27,6 +27,7 @@ class GalleryRepositoryTest {
         status: BackupStatus,
         takenMs: Long = 1_000L * id,
         remote: String? = "Photos\\Pixel\\Camera\\2026\\IMG_$id.jpg",
+        error: String? = null,
     ) = LedgerEntry(
         mediaId = id,
         localUri = "content://media/external/images/media/$id",
@@ -40,7 +41,7 @@ class GalleryRepositoryTest {
         remotePath = remote,
         partPath = null,
         status = status,
-        lastError = null,
+        lastError = error,
         updatedAtMs = 0,
     )
 
@@ -113,5 +114,29 @@ class GalleryRepositoryTest {
         val both = GalleryMerge.merge(listOf(phone(1)), listOf(ledger(1, BackupStatus.VERIFIED))).single()
         val drive = GalleryMerge.merge(emptyList(), listOf(ledger(1, BackupStatus.REMOVED_FROM_PHONE))).single()
         assertEquals(both.key, drive.key)
+    }
+
+    @Test fun phoneItemCarriesLedgerStatusAndError() {
+        val failed = GalleryMerge.merge(
+            listOf(phone(1)),
+            listOf(ledger(1, BackupStatus.FAILED, remote = null, error = "Drive is full")),
+        ).single()
+        assertEquals(Location.PHONE, failed.location)
+        assertEquals(BackupStatus.FAILED, failed.status)
+        assertEquals("Drive is full", failed.lastError)
+        assertEquals(Badge.FAILED, badgeFor(failed))
+    }
+
+    @Test fun phoneItemNotInLedgerHasNoStatus() {
+        val item = GalleryMerge.merge(listOf(phone(1)), emptyList()).single()
+        assertNull(item.status)
+        assertNull(item.lastError)
+    }
+
+    @Test fun driveAndBothItemsCarryStatus() {
+        val both = GalleryMerge.merge(listOf(phone(1)), listOf(ledger(1, BackupStatus.VERIFIED))).single()
+        val drive = GalleryMerge.merge(emptyList(), listOf(ledger(2, BackupStatus.REMOVED_FROM_PHONE))).single()
+        assertEquals(BackupStatus.VERIFIED, both.status)
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, drive.status)
     }
 }

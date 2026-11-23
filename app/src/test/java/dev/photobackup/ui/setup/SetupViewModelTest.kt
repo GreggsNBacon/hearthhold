@@ -148,7 +148,7 @@ class SetupViewModelTest {
         assertEquals("Phone backup", s.destination)
         assertEquals(listOf("scheduleAll(false)", "runNow(false)"), backup.calls)
         assertTrue(vm.state.value.finished)
-        assertEquals(Routes.HOME, Routes.start(s))
+        assertEquals(Routes.GALLERY, Routes.start(s))
     }
 
     @Test fun finishDoesNotOverwriteLoginUpdatedSinceTest() = runBlocking {
@@ -174,7 +174,7 @@ class SetupViewModelTest {
     @Test fun startRouteIsSetupUntilDriveAndDestinationSet() {
         assertEquals(Routes.SETUP, Routes.start(AppSettings(null, null)))
         assertEquals(Routes.SETUP, Routes.start(AppSettings(SmbConfig("h", "s", null, null), null)))
-        assertEquals(Routes.HOME, Routes.start(AppSettings(SmbConfig("h", "s", null, null), "Photos")))
+        assertEquals(Routes.GALLERY, Routes.start(AppSettings(SmbConfig("h", "s", null, null), "Photos")))
     }
 
     @Test fun permissionsDependOnSdk() {
