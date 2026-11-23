@@ -51,6 +51,8 @@ class FreeUpViewModel(
     private val makeDeleteRequest: (List<LedgerEntry>) -> IntentSender,
     private val clock: () -> Long = System::currentTimeMillis,
     private val zone: ZoneId = ZoneId.systemDefault(),
+    /** The "verified on both drives" gate: Off unless a second location is set and freeing up needs both. */
+    private val openSecondGate: suspend () -> SecondGateOpen = { SecondGateOpen.Off },
 ) : ViewModel() {
     private val _state = MutableStateFlow(FreeUpUiState())
     val state: StateFlow<FreeUpUiState> = _state.asStateFlow()
@@ -123,6 +125,8 @@ class FreeUpViewModel(
         sticky = false
         var damaged = 0
         var changed = 0
+        var waiting = 0
+        var secondDown = false
         _state.update { it.copy(busy = true, error = null, checking = null) }
         removalJob = viewModelScope.launch {
             var published = false
@@ -135,16 +139,35 @@ class FreeUpViewModel(
                 val phone = queryPhone().associateBy { it.mediaId }
                 val safe = store.use {
                     it.connect()
-                    repo.recheck(selected, it, phone, opener,
-                        onProgress = { c, t, b, tb ->
-                            _state.update { s -> s.copy(checking = CheckProgress(c, t, b, tb)) }
-                        },
-                        onFailed = { _, reason ->
-                            if (reason == FreeUpRepository.DAMAGED) damaged++ else changed++
-                        },
-                    )
+                    val gate = when (val g = openSecondGate()) {
+                        SecondGateOpen.Off -> null
+                        SecondGateOpen.Unreachable -> {
+                            showMessage(FreeUpRepository.SECOND_UNREACHABLE)
+                            return@launch // nothing is removed
+                        }
+                        is SecondGateOpen.Open -> g.gate
+                    }
+                    try {
+                        repo.recheck(selected, it, phone, opener,
+                            onProgress = { c, t, b, tb ->
+                                _state.update { s -> s.copy(checking = CheckProgress(c, t, b, tb)) }
+                            },
+                            onFailed = { _, reason ->
+                                when (reason) {
+                                    FreeUpRepository.DAMAGED -> damaged++
+                                    FreeUpRepository.WAITING_SECOND -> waiting++
+                                    FreeUpRepository.SECOND_UNREACHABLE -> secondDown = true
+                                    else -> changed++
+                                }
+                            },
+                            second = gate,
+                        )
+                    } finally {
+                        gate?.let { g -> runCatching { g.close() } }
+                    }
                 }
-                val summary = failureSummary(damaged, changed)
+                val summary = listOfNotNull(failureSummary(damaged, changed), secondSummary(waiting, secondDown))
+                    .joinToString("\n").ifEmpty { null }
                 if (safe.isEmpty()) {
                     showMessage(summary ?: "Nothing selected can be safely removed")
                     return@launch
@@ -157,7 +180,9 @@ class FreeUpViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                val msg = listOfNotNull(failureSummary(damaged, changed), describe(e)).joinToString("\n")
+                val msg = listOfNotNull(
+                    failureSummary(damaged, changed), secondSummary(waiting, secondDown), describe(e),
+                ).joinToString("\n")
                 showMessage(msg) { it.copy(driveReachable = e !is IOException && it.driveReachable) }
             } finally {
                 _state.update { it.copy(checking = null) }
@@ -184,6 +209,12 @@ class FreeUpViewModel(
         ).joinToString(", ")
         return "$n ${if (n == 1) "item" else "items"} failed the check \u2014 will back up again ($parts)"
     }
+
+    /** Items left on the phone because the second location does not have them (yet) or could not be reached. */
+    private fun secondSummary(waiting: Int, down: Boolean): String? = listOfNotNull(
+        if (waiting > 0) "${FreeUpRepository.WAITING_SECOND} ($waiting ${if (waiting == 1) "item" else "items"})" else null,
+        if (down) FreeUpRepository.SECOND_UNREACHABLE else null,
+    ).joinToString("\n").ifEmpty { null }
 
     /** Clears the message shown after a removal attempt. */
     fun dismissError() {

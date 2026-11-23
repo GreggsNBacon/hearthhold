@@ -21,6 +21,7 @@ import dev.photobackup.discovery.HostDiscovery
 import dev.photobackup.discovery.ShareLister
 import dev.photobackup.freeup.FreeUpRepository
 import dev.photobackup.freeup.FreeUpViewModel
+import dev.photobackup.freeup.SecondGateOpener
 import dev.photobackup.freeup.SuggestionRule
 import dev.photobackup.gallery.BrowseViewModel
 import dev.photobackup.gallery.CopyToPhone
@@ -315,10 +316,17 @@ class AppContainer(context: Context) {
                 ageMonths = { settings().freeUpAgeMonths },
                 opener = media.opener(),
                 makeDeleteRequest = { items -> repo.deleteRequest(app, items) },
+                openSecondGate = { secondGate().open() },
             )
         }
     }
 
+    /** The Free up / Finish "verified on both drives" gate; Off (no connection) unless the settings turn it on. */
+    private fun secondGate() = SecondGateOpener(
+        settings = { settings() },
+        openStore = storeFactory,
+        copies = LedgerDatabase.get(app).secondCopyDao(),
+    )
 
     /** Opens a store for the saved drive, or null when none is set up. */
     private suspend fun driveStoreOrNull(): RemoteStore? = if (settings().smb == null) null else driveStore()
@@ -335,6 +343,7 @@ class AppContainer(context: Context) {
                 openStore = { driveStoreOrNull() },
                 queryPhone = { media.query(settings().folders).associateBy { it.mediaId } },
                 phoneExists = { ids -> media.existingIds(ids) },
+                openSecondGate = { secondGate().open() },
                 opener = media.opener(),
                 makeDeleteRequest = { items -> repo.deleteRequest(app, items) },
                 runNow = {

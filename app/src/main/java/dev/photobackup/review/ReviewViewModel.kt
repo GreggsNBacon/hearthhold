@@ -2,6 +2,7 @@ package dev.photobackup.review
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import dev.photobackup.freeup.FreeUpRepository
 import dev.photobackup.freeup.formatSize
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.FolderAssignmentStore
@@ -316,10 +317,12 @@ class ReviewViewModel(
                 when (r) {
                     is PrepareResult.NothingToDelete -> setLeftAlone(r.failed)
                     is PrepareResult.Ready -> setLeftAlone(r.failed)
-                    PrepareResult.Offline -> Unit
+                    PrepareResult.Offline, PrepareResult.SecondUnreachable -> Unit
                 }
                 when (r) {
                     PrepareResult.Offline -> setFinish(FinishState.Error(CONNECT_TO_FINISH_MESSAGE))
+                    PrepareResult.SecondUnreachable ->
+                        setFinish(FinishState.Error(FreeUpRepository.SECOND_UNREACHABLE)) // decisions kept
                     is PrepareResult.NothingToDelete -> {
                         if (r.keepOnlyApplied || r.alreadyGone.isNotEmpty() || r.failed.isEmpty()) {
                             val junk = r.alreadyGone.count { it.action == ReviewAction.JUNK }

@@ -3,6 +3,9 @@ package dev.photobackup.freeup
 import dev.photobackup.backup.Hashing
 import dev.photobackup.backup.LocalOpener
 import dev.photobackup.backup.MemoryLedger
+import dev.photobackup.backup.MemorySecondCopies
+import dev.photobackup.ledger.SecondCopy
+import dev.photobackup.ledger.SecondStatus
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.ledger.LedgerStore
@@ -252,5 +255,106 @@ class FreeUpRepositoryTest {
         assertEquals(1, FreeUpRepository(ledger, clock = { 7L }).markRemoved(listOf(e)))
         assertEquals(BackupStatus.REMOVED_FROM_PHONE, ledger.get(1)!!.status)
         assertEquals(7L, ledger.get(1)!!.updatedAtMs)
+    }
+
+    // ---- Second-location gate ----
+
+    private val copies = MemorySecondCopies()
+    private val second = FakeRemoteStore()
+
+    /** A second copy of [e] in [status] (VERIFIED by default), its file on [second] unless [file] is false. */
+    private suspend fun secondCopy(
+        e: LedgerEntry, status: SecondStatus = SecondStatus.VERIFIED, sha: String? = e.localSha256, file: Boolean = true,
+    ) {
+        val path = "s\\f${e.mediaId}.jpg"
+        copies.upsert(SecondCopy(e.mediaId, path, null, null, status, e.sizeBytes, sha, null, 0))
+        if (file) second.files[path] = data(e.mediaId, e.sizeBytes.toInt())
+    }
+
+    private suspend fun gated(vararg es: LedgerEntry): Triple<MemoryLedger, FakeRemoteStore, MutableMap<Long, String>> {
+        val (ledger, store) = setup(*es)
+        return Triple(ledger, store, linkedMapOf())
+    }
+
+    private suspend fun recheckGated(
+        ledger: MemoryLedger, store: FakeRemoteStore, reasons: MutableMap<Long, String>, vararg es: LedgerEntry,
+    ) = FreeUpRepository(ledger).recheck(
+        es.toList(), store, es.associate { it.mediaId to phone(it) }, opener(),
+        onFailed = { id, r -> reasons[id] = r }, second = SecondGate(second, copies),
+    )
+
+    @Test fun gateOffNeedsNoSecondCopy() = runBlocking {
+        val e = entry(1)
+        val (ledger, store) = setup(e)
+        val kept = FreeUpRepository(ledger).recheck(listOf(e), store, mapOf(1L to phone(e)), opener(), second = null)
+        assertEquals(listOf(1L), kept.map { it.mediaId })
+    }
+
+    @Test fun gateVerifiedWithMatchingSizePasses() = runBlocking {
+        val e = entry(1)
+        val (ledger, store, reasons) = gated(e)
+        secondCopy(e)
+        assertEquals(listOf(1L), recheckGated(ledger, store, reasons, e).map { it.mediaId })
+        assertTrue(reasons.isEmpty())
+    }
+
+    @Test fun gateMissingUploadingOrFailedCopyWaitsAndIsNeverMarkedFailed() = runBlocking {
+        val none = entry(1); val uploading = entry(2); val failed = entry(3)
+        val (ledger, store, reasons) = gated(none, uploading, failed)
+        secondCopy(uploading, SecondStatus.UPLOADING)
+        secondCopy(failed, SecondStatus.FAILED)
+        assertTrue(recheckGated(ledger, store, reasons, none, uploading, failed).isEmpty())
+        assertEquals(
+            mapOf(1L to FreeUpRepository.WAITING_SECOND, 2L to FreeUpRepository.WAITING_SECOND,
+                3L to FreeUpRepository.WAITING_SECOND),
+            reasons,
+        )
+        listOf(1L, 2L, 3L).forEach { assertEquals(BackupStatus.VERIFIED, ledger.get(it)!!.status) }
+        assertEquals("Waiting for second copy", FreeUpRepository.WAITING_SECOND)
+    }
+
+    @Test fun gateHashMismatchWaits() = runBlocking {
+        val e = entry(1)
+        val (ledger, store, reasons) = gated(e)
+        secondCopy(e, sha = "older-version")
+        assertTrue(recheckGated(ledger, store, reasons, e).isEmpty())
+        assertEquals(FreeUpRepository.WAITING_SECOND, reasons[1L])
+        assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+    }
+
+    @Test fun gateSizeMismatchOrMissingSecondFileIsRefused() = runBlocking {
+        val wrong = entry(1); val gone = entry(2)
+        val (ledger, store, reasons) = gated(wrong, gone)
+        secondCopy(wrong); second.files["s\\f1.jpg"] = ByteArray(9)
+        secondCopy(gone, file = false)
+        assertTrue(recheckGated(ledger, store, reasons, wrong, gone).isEmpty())
+        assertEquals(FreeUpRepository.WAITING_SECOND, reasons[1L])
+        assertEquals(FreeUpRepository.WAITING_SECOND, reasons[2L])
+        assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+        assertEquals(BackupStatus.VERIFIED, ledger.get(2)!!.status)
+    }
+
+    @Test fun mainDamageStillFailsTheRowWithTheGateOn() = runBlocking {
+        val e = entry(1)
+        val (ledger, store, reasons) = gated(e)
+        secondCopy(e)
+        store.corruptReads = true
+        assertTrue(recheckGated(ledger, store, reasons, e).isEmpty())
+        assertEquals(FreeUpRepository.DAMAGED, reasons[1L])
+        assertEquals(BackupStatus.FAILED, ledger.get(1)!!.status)
+    }
+
+    @Test fun secondDropMidCheckLeavesTheRestNotRemovable() = runBlocking {
+        val a = entry(1); val b = entry(2); val c = entry(3)
+        val (ledger, store, reasons) = gated(a, b, c)
+        secondCopy(a); secondCopy(b); secondCopy(c)
+        second.failOn = { op, path -> if (op == "stat" && path == "s\\f2.jpg") RemoteException.Unreachable() else null }
+        val kept = recheckGated(ledger, store, reasons, a, b, c)
+        assertEquals(listOf(1L), kept.map { it.mediaId })
+        assertEquals(
+            mapOf(2L to FreeUpRepository.SECOND_UNREACHABLE, 3L to FreeUpRepository.SECOND_UNREACHABLE), reasons,
+        )
+        assertEquals("Second location not reachable", FreeUpRepository.SECOND_UNREACHABLE)
+        listOf(1L, 2L, 3L).forEach { assertEquals(BackupStatus.VERIFIED, ledger.get(it)!!.status) }
     }
 }

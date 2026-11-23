@@ -8,6 +8,10 @@ import androidx.test.core.app.ApplicationProvider
 import dev.photobackup.backup.Hashing
 import dev.photobackup.backup.LocalOpener
 import dev.photobackup.backup.MemoryLedger
+import dev.photobackup.backup.MemorySecondCopies
+import dev.photobackup.ledger.SecondCopy
+import dev.photobackup.ledger.SecondStatus
+import dev.photobackup.smb.RemoteException
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.media.PhoneMedia
@@ -69,6 +73,8 @@ class FreeUpViewModelTest {
     private var gate: CompletableDeferred<Unit>? = null
     private val phoneBytes = mutableMapOf<Long, ByteArray>()
 
+    private var secondGate: suspend () -> SecondGateOpen = { SecondGateOpen.Off }
+
     private fun vm(open: suspend () -> RemoteStore? = { store }) =
         FreeUpViewModel(
             repo = FreeUpRepository(ledger),
@@ -79,6 +85,7 @@ class FreeUpViewModelTest {
             makeDeleteRequest = { items -> requests.add(items.map { it.mediaId }); sender() },
             clock = { now },
             zone = ZoneOffset.UTC,
+            openSecondGate = { secondGate() },
         )
 
     /** The integrity check hashes on Dispatchers.IO, so wait for the removal to publish or finish. */
@@ -191,5 +198,90 @@ class FreeUpViewModelTest {
         v.refresh()
         assertEquals("Something went wrong", v.state.value.error) // never the exception text
         assertFalse(v.state.value.busy)
+    }
+
+    // ---- Second-location gate ----
+
+    private val copies = MemorySecondCopies()
+    private val second = FakeRemoteStore()
+    private var secondClosed = 0
+    private val secondStore = object : RemoteStore by second {
+        override fun close() { secondClosed++ }
+    }
+
+    private suspend fun secondCopy(e: LedgerEntry, status: SecondStatus = SecondStatus.VERIFIED) {
+        val path = "s\\f${e.mediaId}.jpg"
+        copies.upsert(SecondCopy(e.mediaId, path, null, null, status, e.sizeBytes, e.localSha256, null, 0))
+        second.files[path] = bytes(e.mediaId)
+    }
+
+    private fun gateOn() { secondGate = { SecondGateOpen.Open(SecondGate(secondStore, copies)) } }
+
+    @Test fun gateOnVerifiedOnBothIsRemovableAndClosesTheSecondStore() = kotlinx.coroutines.runBlocking {
+        seed(1).forEach { secondCopy(it) }
+        gateOn()
+        val v = vm().loadedAndSelected()
+        v.removeAndWait()
+        assertEquals(listOf(listOf(1L)), requests)
+        assertEquals(1, secondClosed)
+    }
+
+    @Test fun gateOnWaitingItemsAreLeftAloneWithTheReason() = kotlinx.coroutines.runBlocking {
+        val (a, b) = seed(1, 2)
+        secondCopy(a); secondCopy(b, SecondStatus.UPLOADING)
+        gateOn()
+        val v = vm().loadedAndSelected()
+        v.removeAndWait()
+        assertEquals(listOf(listOf(1L)), requests)
+        val msg = v.state.value.error!!
+        assertTrue(msg, msg.contains("Waiting for second copy"))
+        assertFalse(msg, msg.contains("failed the check"))
+        assertEquals(BackupStatus.VERIFIED, ledger.get(2)!!.status)
+        assertEquals(1, secondClosed)
+    }
+
+    @Test fun gateOnNothingOnTheSecondDriveRemovesNothing() = kotlinx.coroutines.runBlocking {
+        seed(1)
+        gateOn()
+        val v = vm().loadedAndSelected()
+        v.removeAndWait()
+        assertTrue(requests.isEmpty())
+        assertTrue(v.state.value.error!!.contains("Waiting for second copy"))
+        assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+        assertFalse(v.state.value.busy)
+    }
+
+    @Test fun secondUnreachableRemovesNothing() = kotlinx.coroutines.runBlocking {
+        seed(1).forEach { secondCopy(it) }
+        secondGate = { SecondGateOpen.Unreachable }
+        val v = vm().loadedAndSelected()
+        v.removeAndWait()
+        assertTrue(requests.isEmpty())
+        assertNull(v.state.value.pendingDelete)
+        assertEquals("Second location not reachable", v.state.value.error)
+        assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+        assertFalse(v.state.value.busy)
+    }
+
+    @Test fun secondDropMidCheckShowsUnreachable() = kotlinx.coroutines.runBlocking {
+        seed(1).forEach { secondCopy(it) }
+        second.failOn = { op, _ -> if (op == "stat") RemoteException.Unreachable() else null }
+        gateOn()
+        val v = vm().loadedAndSelected()
+        v.removeAndWait()
+        assertTrue(requests.isEmpty())
+        assertTrue(v.state.value.error!!.contains("Second location not reachable"))
+        assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+        assertEquals(1, secondClosed)
+    }
+
+    @Test fun gateOffNeedsNoSecondCopy() = kotlinx.coroutines.runBlocking {
+        seed(1)
+        var asked = 0
+        secondGate = { asked++; SecondGateOpen.Off }
+        val v = vm().loadedAndSelected()
+        v.removeAndWait()
+        assertEquals(listOf(listOf(1L)), requests)
+        assertEquals(1, asked)
     }
 }

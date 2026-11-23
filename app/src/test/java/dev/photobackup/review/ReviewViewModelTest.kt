@@ -267,6 +267,16 @@ class ReviewViewModelTest {
         assertEquals(listOf(1L), finisher.prepared?.map { it.mediaId })
     }
 
+    @Test fun finish_second_unreachable_reports_it_and_keeps_decisions() = runTest {
+        add(1)
+        val v = vm()
+        v.swipe(Swipe.LEFT)
+        finisher.prepareResult = PrepareResult.SecondUnreachable
+        v.startFinish()
+        assertEquals(FinishState.Error("Second location not reachable"), v.state.value.finish)
+        assertEquals(1, decisions.rows.size)
+    }
+
     @Test fun finish_ready_confirm_applies_and_refreshes() = runTest {
         add(1); add(2)
         val v = vm()

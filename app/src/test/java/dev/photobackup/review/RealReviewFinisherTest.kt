@@ -3,6 +3,12 @@ package dev.photobackup.review
 import dev.photobackup.backup.Hashing
 import dev.photobackup.backup.LocalOpener
 import dev.photobackup.backup.MemoryLedger
+import dev.photobackup.backup.MemorySecondCopies
+import dev.photobackup.freeup.SecondGate
+import dev.photobackup.freeup.SecondGateOpen
+import dev.photobackup.ledger.SecondCopy
+import dev.photobackup.ledger.SecondStatus
+import dev.photobackup.smb.RemoteStore
 import dev.photobackup.freeup.FreeUpRepository
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerEntry
@@ -77,7 +83,10 @@ class RealReviewFinisherTest {
         runNow = { runs++ },
         clock = { now },
         phoneExists = phoneExists,
+        openSecondGate = { secondGate() },
     )
+
+    private var secondGate: suspend () -> SecondGateOpen = { SecondGateOpen.Off }
 
     /** A VERIFIED, backed-up photo present on the phone and on the drive, with a decision. */
     private suspend fun photo(id: Long, action: ReviewAction, size: Int = 5): LedgerEntry {
@@ -487,5 +496,86 @@ class RealReviewFinisherTest {
         val f = finisher(spy)
         f.apply(f.prepare(decisions.all()) as PrepareResult.Ready)
         assertEquals(listOf("mark 1 $now"), writes)
+    }
+
+    // ---- Second-location gate ----
+
+    private val copies = MemorySecondCopies()
+    private val second = FakeRemoteStore()
+    private var secondClosed = 0
+    private val secondStore = object : RemoteStore by second {
+        override fun close() { secondClosed++ }
+    }
+
+    private suspend fun secondCopy(e: LedgerEntry, status: SecondStatus = SecondStatus.VERIFIED) {
+        val path = "s\\f${e.mediaId}.jpg"
+        copies.upsert(SecondCopy(e.mediaId, path, null, null, status, e.sizeBytes, e.localSha256, null, 0))
+        second.files[path] = data(e.mediaId, e.sizeBytes.toInt())
+    }
+
+    private fun gateOn() { secondGate = { SecondGateOpen.Open(SecondGate(secondStore, copies)) } }
+
+    @Test fun gateOnWaitingRowsAreListedNotFailedAndKeepTheirDecisions() = runBlocking {
+        secondCopy(photo(1, ReviewAction.JUNK))
+        secondCopy(photo(2, ReviewAction.DRIVE_ONLY), SecondStatus.FAILED)
+        photo(3, ReviewAction.JUNK) // no second copy at all
+        gateOn()
+        val f = finisher()
+        val r = f.prepare(decisions.all()) as PrepareResult.Ready
+        assertEquals(listOf(1L), r.passed.map { it.mediaId })
+        assertEquals(
+            listOf(FailedRow(2, FreeUpRepository.WAITING_SECOND), FailedRow(3, FreeUpRepository.WAITING_SECOND)),
+            r.failed,
+        )
+        f.apply(r)
+        assertEquals(setOf(2L, 3L), decisions.rows.keys)
+        assertEquals(BackupStatus.VERIFIED, ledger.get(2)!!.status)
+        assertEquals(BackupStatus.VERIFIED, ledger.get(3)!!.status)
+        assertEquals(1, secondClosed)
+    }
+
+    @Test fun gateOnAllWaitingDeletesNothingAndKeepsDecisions() = runBlocking {
+        photo(1, ReviewAction.DRIVE_ONLY)
+        gateOn()
+        val r = finisher().prepare(decisions.all()) as PrepareResult.NothingToDelete
+        assertEquals(listOf(FailedRow(1, FreeUpRepository.WAITING_SECOND)), r.failed)
+        assertTrue(requests.isEmpty())
+        assertEquals(setOf(1L), decisions.rows.keys)
+    }
+
+    @Test fun secondUnreachableRemovesNothingAndKeepsAllDecisions() = runBlocking {
+        secondCopy(photo(1, ReviewAction.JUNK))
+        photo(2, ReviewAction.KEEP)
+        secondGate = { SecondGateOpen.Unreachable }
+        val before = ledger.rows.value
+        assertEquals(PrepareResult.SecondUnreachable, finisher().prepare(decisions.all()))
+        assertEquals(before, ledger.rows.value)
+        assertEquals(setOf(1L, 2L), decisions.rows.keys)
+        assertTrue(keeps.rows.isEmpty())
+        assertTrue(requests.isEmpty())
+        assertEquals(0, runs)
+    }
+
+    @Test fun secondDropMidCheckListsUnreachableAndKeepsDecisions() = runBlocking {
+        secondCopy(photo(1, ReviewAction.JUNK))
+        secondCopy(photo(2, ReviewAction.JUNK))
+        second.failOn = { op, _ -> if (op == "stat") RemoteException.Unreachable() else null }
+        gateOn()
+        val r = finisher().prepare(decisions.all()) as PrepareResult.NothingToDelete
+        assertEquals(
+            listOf(FailedRow(1, FreeUpRepository.SECOND_UNREACHABLE), FailedRow(2, FreeUpRepository.SECOND_UNREACHABLE)),
+            r.failed,
+        )
+        assertEquals(setOf(1L, 2L), decisions.rows.keys)
+        assertEquals(1, secondClosed)
+    }
+
+    @Test fun gateOffFinishNeedsNoSecondCopy() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        var asked = 0
+        secondGate = { asked++; SecondGateOpen.Off }
+        val r = finisher().prepare(decisions.all()) as PrepareResult.Ready
+        assertEquals(listOf(1L), r.passed.map { it.mediaId })
+        assertEquals(1, asked)
     }
 }

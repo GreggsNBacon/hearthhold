@@ -8,6 +8,7 @@ import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.ledger.LedgerRules
 import dev.photobackup.ledger.LedgerStore
+import dev.photobackup.ledger.SecondStatus
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.smb.RemoteStore
 import dev.photobackup.backup.Hashing
@@ -16,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import java.io.IOException
 import kotlin.coroutines.CoroutineContext
 
 class FreeUpRepository(
@@ -32,6 +34,12 @@ class FreeUpRepository(
      * the recorded SHA-256, and the phone file re-hashed matches it too. Items failing a hash/size check are
      * upserted FAILED (so they get backed up again) and never returned. RemoteException/IOException from the
      * drive propagates; cancellation is checked per chunk.
+     *
+     * With [second] (the "verified on both drives" gate; null = off), an item that passed every main check is
+     * returned only if its SecondCopy is VERIFIED with the recorded hash and the second file stats with the right
+     * size. A miss is reported as [WAITING_SECOND] and never marks the row FAILED. If the second store fails
+     * (IOException) the item and every later one that passes the main pre-checks are reported as
+     * [SECOND_UNREACHABLE] without being checked.
      */
     suspend fun recheck(
         selected: List<LedgerEntry>,
@@ -40,12 +48,14 @@ class FreeUpRepository(
         opener: LocalOpener,
         onProgress: (checked: Int, total: Int, bytesChecked: Long, totalBytes: Long) -> Unit = { _, _, _, _ -> },
         onFailed: (mediaId: Long, reason: String) -> Unit = { _, _ -> },
+        second: SecondGate? = null,
     ): List<LedgerEntry> {
         val ctx = currentCoroutineContext()
         val total = selected.size
         val totalBytes = selected.sumOf { it.sizeBytes }
         var doneBytes = 0L
         val ok = ArrayList<LedgerEntry>()
+        var secondDown = false
         onProgress(0, total, 0L, totalBytes)
         selected.forEachIndexed { i, sel ->
             ctx.ensureActive()
@@ -53,11 +63,25 @@ class FreeUpRepository(
             val m = phone[sel.mediaId]
             val path = e?.remotePath
             if (e != null && path != null && e.movingTo == null && LedgerRules.isSafeToRemove(e, m)) {
+                if (secondDown) {
+                    onFailed(e.mediaId, SECOND_UNREACHABLE) // second store dropped: no point hashing the rest
+                    doneBytes += sel.sizeBytes
+                    onProgress(i + 1, total, doneBytes, totalBytes)
+                    return@forEachIndexed
+                }
                 val reason = integrityFailure(e, path, m!!, store, opener, ctx) { n ->
                     onProgress(i, total, doneBytes + n, totalBytes)
                 }
                 when (reason) {
-                    null -> ok.add(e)
+                    null -> {
+                        val miss = if (second == null) null else try {
+                            secondMiss(e, second)
+                        } catch (_: IOException) { // includes RemoteException; never shown or logged
+                            secondDown = true
+                            SECOND_UNREACHABLE
+                        }
+                        if (miss == null) ok.add(e) else onFailed(e.mediaId, miss)
+                    }
                     GONE -> Unit // vanished from the phone meanwhile: drive copy is still valid, just skip it
                     else -> {
                         markFailed(e, reason)
@@ -110,6 +134,21 @@ class FreeUpRepository(
         return if (phoneHash != recorded) PHONE_CHANGED else null
     }
 
+    /**
+     * Null if [e] has a usable second copy: VERIFIED, same hash as the ledger (Task 3's "done" rule), settled (no
+     * move in flight) and its file on the second store with the right size. Else [WAITING_SECOND].
+     * IOException from the second store propagates.
+     */
+    private suspend fun secondMiss(e: LedgerEntry, gate: SecondGate): String? {
+        val c = gate.copies.get(e.mediaId) ?: return WAITING_SECOND
+        if (c.status != SecondStatus.VERIFIED || c.sha256 == null || c.sha256 != e.localSha256 ||
+            c.movingTo != null || c.sizeBytes != e.sizeBytes
+        ) return WAITING_SECOND
+        val path = c.remotePath ?: return WAITING_SECOND
+        val remote = gate.store.stat(path)
+        return if (remote == null || remote.isDirectory || remote.sizeBytes != e.sizeBytes) WAITING_SECOND else null
+    }
+
     fun deleteRequest(context: Context, items: List<LedgerEntry>): IntentSender =
         MediaStore.createDeleteRequest(context.contentResolver, items.map { Uri.parse(it.localUri) }).intentSender
 
@@ -125,6 +164,8 @@ class FreeUpRepository(
     companion object {
         const val DAMAGED = "Drive copy is damaged \u2014 will back up again"
         const val PHONE_CHANGED = "Phone file changed \u2014 will back up again"
+        const val WAITING_SECOND = "Waiting for second copy"
+        const val SECOND_UNREACHABLE = "Second location not reachable"
         private const val GONE = "gone"
     }
 }

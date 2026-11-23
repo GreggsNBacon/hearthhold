@@ -2,6 +2,7 @@ package dev.photobackup.review
 
 import dev.photobackup.backup.LocalOpener
 import dev.photobackup.freeup.FreeUpRepository
+import dev.photobackup.freeup.SecondGateOpen
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.ledger.LedgerRules
@@ -23,6 +24,9 @@ data class FailedRow(val mediaId: Long, val reason: String)
 sealed interface PrepareResult {
     /** The drive is not reachable; decisions are kept. */
     data object Offline : PrepareResult
+
+    /** "Verified on both drives" is on but the second location is not reachable: nothing applied, decisions kept. */
+    data object SecondUnreachable : PrepareResult
 
     /**
      * Nothing needs the system delete dialog. [keepOnlyApplied] is true when Keep decisions were applied anyway.
@@ -99,6 +103,8 @@ class RealReviewFinisher(
      * leaves out items in unticked folders, which are not gone. Throws if it can't tell.
      */
     private val phoneExists: suspend (Collection<Long>) -> Set<Long>,
+    /** The "verified on both drives" gate: Off unless a second location is set and freeing up needs both. */
+    private val openSecondGate: suspend () -> SecondGateOpen = { SecondGateOpen.Off },
 ) : ReviewFinisher {
 
     override suspend fun prepare(decisions: List<ReviewDecision>): PrepareResult {
@@ -115,8 +121,20 @@ class RealReviewFinisher(
             phone = queryPhone()
             passed = store.use {
                 it.connect()
-                rows = toDelete.mapNotNull { d -> ledger.get(d.mediaId) }.associateBy { e -> e.mediaId }
-                repo.recheck(rows.values.toList(), it, phone, opener, onFailed = { id, reason -> failedIds[id] = reason })
+                val gate = when (val g = openSecondGate()) {
+                    SecondGateOpen.Off -> null
+                    SecondGateOpen.Unreachable -> return PrepareResult.SecondUnreachable
+                    is SecondGateOpen.Open -> g.gate
+                }
+                try {
+                    rows = toDelete.mapNotNull { d -> ledger.get(d.mediaId) }.associateBy { e -> e.mediaId }
+                    repo.recheck(
+                        rows.values.toList(), it, phone, opener,
+                        onFailed = { id, reason -> failedIds[id] = reason }, second = gate,
+                    )
+                } finally {
+                    gate?.let { g -> runCatching { g.close() } }
+                }
             }
         } catch (e: IOException) { // includes RemoteException; never shown or logged
             return PrepareResult.Offline
