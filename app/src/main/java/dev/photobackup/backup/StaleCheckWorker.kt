@@ -84,7 +84,8 @@ class StaleCheckWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     applicationContext,
                     if (d.waiting == null) BackupMessages.STALE_NO_COUNT else BackupMessages.stale(d.days, d.waiting),
                 )
-                repo.update { it.copy(lastStaleWarnMs = now) }
+                // A run that succeeded meanwhile has cleared the warning: don't stamp a newer one over it.
+                repo.update { if ((it.lastSuccessMs ?: 0L) > now) it else it.copy(lastStaleWarnMs = now) }
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e

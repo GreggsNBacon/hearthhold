@@ -30,6 +30,12 @@ object BackupEta {
     }
 }
 
+/**
+ * A run that resets the stale-backup clock: it uploaded something, or it had nothing wrong (no failures, drive not
+ * full). A Done run where everything failed or the drive was full is not a success.
+ */
+fun BackupResult.Done.countsAsSuccess(): Boolean = uploaded > 0 || (failed == 0 && noRoom == 0)
+
 object BackupMessages {
     const val UNREACHABLE = "Drive not reachable — not at home?"
     const val AUTH = "Wrong username or password"
@@ -213,15 +219,15 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 idle(repo) {
                     it.copy(
                         lastRunMs = now,
-                        lastSuccessMs = now,
-                        lastStaleWarnMs = null,
+                        lastSuccessMs = if (r.countsAsSuccess()) now else it.lastSuccessMs,
+                        lastStaleWarnMs = if (r.countsAsSuccess()) null else it.lastStaleWarnMs,
                         lastResult = BackupMessages.summary(r.uploaded, r.failed, r.moved, r.moveFailed),
                         lastError = err,
                         driveFreeBytes = r.driveFreeBytes ?: it.driveFreeBytes,
                         secondStatus = secondStatus,
                     )
                 }
-                BackupNotifications.clearStale(applicationContext)
+                if (r.countsAsSuccess()) BackupNotifications.clearStale(applicationContext)
                 // A full drive is a persistent problem (spec: Home + notification); other item failures show in-app.
                 if (r.noRoom > 0) {
                     BackupNotifications.error(applicationContext, BackupMessages.noRoom(r.noRoom))

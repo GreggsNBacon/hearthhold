@@ -143,6 +143,59 @@ class StaleCheckWorkerTest {
         assertNotNull(status().lastSuccessMs)
     }
 
+    private fun runBackup(r: BackupResult) {
+        BackupRunnerFactory.create = { BackupRunner { _ -> r } }
+        BackupRunnerFactory.notifyOnComplete = { false }
+        BackupRunnerFactory.overnightWindow = { null }
+        BackupRunnerFactory.secondWaiting = { 0 }
+        try {
+            runBlocking { TestListenableWorkerBuilder<BackupWorker>(app).build().doWork() }
+        } finally {
+            BackupRunnerFactory.create = BackupRunnerFactory.defaultCreate
+            BackupRunnerFactory.notifyOnComplete = BackupRunnerFactory.defaultNotifyOnComplete
+            BackupRunnerFactory.overnightWindow = BackupRunnerFactory.defaultOvernightWindow
+            BackupRunnerFactory.secondWaiting = BackupRunnerFactory.defaultSecondWaiting
+        }
+    }
+
+    private fun warnedThenRun(r: BackupResult) {
+        runBlocking { repo.update { it.copy(lastSuccessMs = now - 5 * day) } }
+        check()
+        assertEquals(1, posted().size)
+        runBackup(r)
+    }
+
+    @Test fun doneWhereEverythingFailedDoesNotResetTheClock() {
+        warnedThenRun(BackupResult.Done(uploaded = 0, skipped = 0, failed = 3))
+        assertEquals(now - 5 * day, status().lastSuccessMs)
+        assertNotNull(status().lastStaleWarnMs)
+        assertEquals(1, posted().filter { it.extras.getCharSequence(Notification.EXTRA_TEXT).toString().contains("waiting") }.size)
+    }
+
+    @Test fun doneWithDriveFullAndNothingUploadedDoesNotResetTheClock() {
+        warnedThenRun(BackupResult.Done(uploaded = 0, skipped = 0, failed = 2, noRoom = 2))
+        assertEquals(now - 5 * day, status().lastSuccessMs)
+    }
+
+    @Test fun doneWithSomeUploadsCountsEvenIfOthersFailed() {
+        warnedThenRun(BackupResult.Done(uploaded = 1, skipped = 0, failed = 2))
+        assertTrue(status().lastSuccessMs!! > now - 5 * day || status().lastSuccessMs != now - 5 * day)
+        assertNull(status().lastStaleWarnMs)
+    }
+
+    @Test fun doneWithNothingToDoCounts() {
+        warnedThenRun(BackupResult.Done(uploaded = 0, skipped = 4, failed = 0))
+        assertNull(status().lastStaleWarnMs)
+        assertTrue(posted().isEmpty())
+    }
+
+    @Test fun enqueuingTheStaleCheckTwiceLeavesOneWorkItem() {
+        BackupScheduler.enqueueStaleCheck(app)
+        BackupScheduler.enqueueStaleCheck(app)
+        val infos = WorkManager.getInstance(app).getWorkInfosForUniqueWork(BackupScheduler.STALE_CHECK).get()
+        assertEquals(1, infos.size)
+    }
+
     @Test fun dailyCheckIsScheduled() {
         BackupScheduler.scheduleAll(app, chargingOnly = false)
         val infos = WorkManager.getInstance(app).getWorkInfosForUniqueWork(BackupScheduler.STALE_CHECK).get()

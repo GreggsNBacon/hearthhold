@@ -93,6 +93,12 @@ class PhotoBackupApp : Application(), ImageLoaderFactory {
                 // Status is cosmetic here; the next run rewrites it.
             }
         }
+        // Daily stale-backup check: also here so users who upgraded get it (KEEP: idempotent). Never throws.
+        try {
+            BackupScheduler.enqueueStaleCheck(this)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+        }
         // "Open in another app" copies of drive videos: kept a day, then removed. Never throws.
         container.appScope.launch(Dispatchers.IO) {
             OpenElsewhere.cleanup(OpenElsewhere.cacheDir(this@PhotoBackupApp), System.currentTimeMillis())
