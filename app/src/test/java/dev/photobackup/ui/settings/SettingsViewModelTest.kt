@@ -1,6 +1,8 @@
 package dev.photobackup.ui.settings
 
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.Preferences
 import androidx.test.core.app.ApplicationProvider
 import dev.photobackup.backup.MemoryAssignments
 import dev.photobackup.backup.MemoryLedger
@@ -36,6 +38,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.IOException
 
 private class PlainCipher : CredentialCipher {
     override fun encrypt(plain: String) = "x$plain"
@@ -48,13 +51,14 @@ private class PlainCipher : CredentialCipher {
 class SettingsViewModelTest {
     @get:Rule val tmp = TemporaryFolder()
     private lateinit var settings: SettingsStore
+    private lateinit var ds: DataStore<Preferences>
     private val store = FakeRemoteStore()
     private val backup = FakeBackupControl()
     private val opened = mutableListOf<SmbConfig>()
 
     @Before fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
-        val ds = PreferenceDataStoreFactory.create { File(tmp.root, "s.preferences_pb") }
+        ds = PreferenceDataStoreFactory.create { File(tmp.root, "s.preferences_pb") }
         settings = SettingsStore(ApplicationProvider.getApplicationContext(), PlainCipher(), ds)
         runBlocking { settings.update { it.copy(smb = SmbConfig("nas", "usb", "greg", "pw"), destination = "Photos") } }
     }
@@ -222,6 +226,7 @@ class SettingsViewModelTest {
         vm.saveRule("Pictures/WhatsApp", "Family", { called = true }, { called = true }).join()
         assertFalse(called)
         assertFalse(vm.state.value.ruleBusy)
+        assertEquals(SettingsViewModel.SAVE_FAILED, vm.state.value.ruleMessage)
     }
 
     @Test fun addRuleWithoutMovingPinsExistingRows() = runBlocking {
@@ -304,6 +309,132 @@ class SettingsViewModelTest {
         assertEquals(2, vm.countOnDrive("Pictures/WhatsApp/", "Family"))
         vm.addRule("Pictures/WhatsApp/", "Family", moveExisting = false).join()
         assertEquals(setOf(1L, 2L), assigns.rows.value.keys)
+    }
+
+    // --- Failures never crash and never leave pins without their rule ---
+
+    /** A settings store over [ds] whose writes throw while [failWrites] is true (reads keep working). */
+    private var failWrites = false
+
+    private fun failingVm(
+        assignments: FolderAssignmentStore = assigns,
+        control: dev.photobackup.app.BackupControl = backup,
+    ): Pair<SettingsViewModel, SettingsStore> {
+        runBlocking { settings.update { it.copy(deviceName = "Dev") } }
+        val wrapped = object : DataStore<Preferences> {
+            override val data = ds.data
+            override suspend fun updateData(transform: suspend (Preferences) -> Preferences): Preferences {
+                if (failWrites) throw IOException("disk /secret/path")
+                return ds.updateData(transform)
+            }
+        }
+        val s = SettingsStore(ApplicationProvider.getApplicationContext(), PlainCipher(), wrapped)
+        return SettingsViewModel(s, { opened += it; store }, control, ledger = ledger, assignments = assignments) to s
+    }
+
+    @Test fun addRuleSettingsWriteFailureUndoesPinsAndShowsMessage() = runBlocking {
+        seedRows()
+        val (vm, s) = failingVm()
+        failWrites = true
+        vm.addRule("Pictures/WhatsApp", "Family", moveExisting = false).join()
+        assertEquals(emptyMap<String, String>(), s.settings.first().folderRules)
+        assertEquals(emptyMap<Long, FolderAssignment>(), assigns.rows.value)
+        assertEquals(SettingsViewModel.SAVE_FAILED, vm.state.value.ruleMessage)
+        assertEquals(emptyList<String>(), backup.calls)
+    }
+
+    @Test fun addRulePinFailureSavesNoRuleAndUndoesEarlierPins() = runBlocking {
+        seedRows()
+        var sets = 0
+        val failing = object : FolderAssignmentStore by assigns {
+            override suspend fun set(a: FolderAssignment) {
+                if (++sets == 2) throw IllegalStateException("db")
+                assigns.set(a)
+            }
+        }
+        val (vm, s) = failingVm(assignments = failing)
+        vm.addRule("Pictures/WhatsApp", "Family", moveExisting = false).join()
+        assertEquals(emptyMap<String, String>(), s.settings.first().folderRules)
+        assertEquals(emptyMap<Long, FolderAssignment>(), assigns.rows.value)
+        assertEquals(SettingsViewModel.SAVE_FAILED, vm.state.value.ruleMessage)
+    }
+
+    @Test fun addRuleYesWhenTheRunCannotStartKeepsTheRuleAndSaysSo() = runBlocking {
+        val control = object : dev.photobackup.app.BackupControl {
+            override fun scheduleAll(chargingOnly: Boolean, night: dev.photobackup.backup.OvernightWindow?) {}
+            override fun runNow(chargingOnly: Boolean) = throw IllegalStateException("wm")
+        }
+        val (vm, s) = failingVm(control = control)
+        vm.addRule("Pictures/WhatsApp", "Family", moveExisting = true).join()
+        assertEquals(mapOf("Pictures/WhatsApp/" to "Family"), s.settings.first().folderRules)
+        assertEquals(SettingsViewModel.RUN_FAILED, vm.state.value.ruleMessage)
+    }
+
+    @Test fun removeRuleSettingsWriteFailureKeepsRuleUndoesPinsAndShowsMessage() = runBlocking {
+        seedRows()
+        val (vm, s) = failingVm()
+        vm.addRule("Pictures/WhatsApp/", "Family", moveExisting = true).join()
+        ledger.upsert(row(1, "Pictures/WhatsApp/", "Photos\\Dev\\Family\\2026\\1.jpg"))
+        failWrites = true
+        vm.removeRule("Pictures/WhatsApp/", moveBack = false).join()
+        assertEquals(mapOf("Pictures/WhatsApp/" to "Family"), s.settings.first().folderRules)
+        assertEquals(emptyMap<Long, FolderAssignment>(), assigns.rows.value)
+        assertEquals(SettingsViewModel.REMOVE_FAILED, vm.state.value.ruleMessage)
+    }
+
+    @Test fun askRemoveRuleRemovesAtOnceWhenNothingWouldMove() = runBlocking {
+        val vm = ruleVm()
+        vm.addRule("Pictures/WhatsApp/", "Family", moveExisting = true).join()
+        var asked = -1
+        vm.askRemoveRule("Pictures/WhatsApp/") { asked = it }.join()
+        assertEquals(-1, asked)
+        assertEquals(emptyMap<String, String>(), settings.settings.first().folderRules)
+    }
+
+    @Test fun askRemoveRuleAsksWhenFilesWouldMoveBack() = runBlocking {
+        seedRows()
+        val vm = ruleVm()
+        vm.addRule("Pictures/WhatsApp/", "Family", moveExisting = true).join()
+        ledger.upsert(row(1, "Pictures/WhatsApp/", "Photos\\Dev\\Family\\2026\\1.jpg"))
+        var asked = -1
+        vm.askRemoveRule("Pictures/WhatsApp/") { asked = it }.join()
+        assertEquals(1, asked)
+        assertEquals("Family", settings.settings.first().folderRules["Pictures/WhatsApp/"])
+    }
+
+    @Test fun askRemoveRuleCheckFailureShowsMessageAndKeepsRule() = runBlocking {
+        runBlocking { settings.update { it.copy(deviceName = "Dev", folderRules = mapOf("Pictures/WhatsApp/" to "Family")) } }
+        val failing = object : FolderAssignmentStore by assigns {
+            override suspend fun all(): List<FolderAssignment> = throw IllegalStateException("db")
+        }
+        val vm = SettingsViewModel(settings, { opened += it; store }, backup, ledger = ledger, assignments = failing)
+        var asked = -1
+        vm.askRemoveRule("Pictures/WhatsApp/") { asked = it }.join()
+        assertEquals(-1, asked)
+        assertEquals(SettingsViewModel.REMOVE_FAILED, vm.state.value.ruleMessage)
+        assertEquals("Family", settings.settings.first().folderRules["Pictures/WhatsApp/"])
+        vm.ruleMessageShown()
+        assertNull(vm.state.value.ruleMessage)
+    }
+
+    @Test fun saveRuleOnAnEmptyPathNeitherSavesNorCloses() = runBlocking {
+        val vm = ruleVm()
+        var called = false
+        vm.saveRule("/", "Family", { called = true }, { called = true }).join()
+        assertFalse(called)
+        assertEquals(SettingsViewModel.CHOOSE_FOLDER, vm.state.value.ruleMessage)
+        assertEquals(emptyMap<String, String>(), settings.settings.first().folderRules)
+        assertFalse(vm.state.value.ruleBusy)
+    }
+
+    @Test fun saveRuleWhenTheSaveFailsDoesNotClose() = runBlocking {
+        val (vm, s) = failingVm()
+        failWrites = true
+        var added = false
+        vm.saveRule("Pictures/WhatsApp", "Family", { added = true }, { }).join()
+        assertFalse(added)
+        assertEquals(SettingsViewModel.SAVE_FAILED, vm.state.value.ruleMessage)
+        assertEquals(emptyMap<String, String>(), s.settings.first().folderRules)
     }
 
     @Test fun rowsAlreadyInTheTargetFolderAreNotCounted() = runBlocking {

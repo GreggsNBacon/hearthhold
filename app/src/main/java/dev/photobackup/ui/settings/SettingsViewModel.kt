@@ -21,12 +21,14 @@ import dev.photobackup.smb.SmbConfig
 import dev.photobackup.ui.userMessage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class SettingsUiState(
     val settings: AppSettings? = null,
@@ -36,6 +38,8 @@ data class SettingsUiState(
     val phoneFolders: PhoneFolderList? = null,
     /** True while a new rule is being checked against the drive files it would move. */
     val ruleBusy: Boolean = false,
+    /** A short fixed message after a rule could not be saved or removed (never exception text); null when none. */
+    val ruleMessage: String? = null,
 )
 
 sealed interface PhoneFolderList {
@@ -163,12 +167,62 @@ class SettingsViewModel(
     private fun currentFolder(e: LedgerEntry, s: AppSettings): String? =
         DrivePaths.parse(e, DrivePaths.deviceRoot(s.destination, s.deviceName))?.folder
 
-    private suspend fun pin(rows: List<LedgerEntry>, s: AppSettings) {
+    /** Pins [rows] to their current folder, adding each pinned id to [pinned] so a later failure can undo them. */
+    private suspend fun pin(rows: List<LedgerEntry>, s: AppSettings, pinned: MutableList<Long>) {
         val a = assignments ?: return
-        for (r in rows) currentFolder(r, s)?.let { a.set(FolderAssignment(r.mediaId, it)) }
+        for (r in rows) currentFolder(r, s)?.let {
+            a.set(FolderAssignment(r.mediaId, it))
+            pinned += r.mediaId
+        }
+    }
+
+    /** Best effort: removes pins this call added (affected rows never had a pin before). */
+    private suspend fun unpin(ids: List<Long>) {
+        val a = assignments ?: return
+        for (id in ids) {
+            try {
+                a.clear(id)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+        }
     }
 
     private suspend fun runNowFromSettings() = backup.runNow(store.settings.first().chargingOnly)
+
+    fun ruleMessageShown() = _state.update { it.copy(ruleMessage = null) }
+
+    private fun showRuleMessage(m: String) = _state.update { it.copy(ruleMessage = m) }
+
+    /**
+     * Runs a rule change: [work] pins first (so after a "No" a backup run can never move those files before their
+     * pins exist), then writes the settings, and returns whether it changed anything. If [work] fails, the pins it
+     * added are undone, so items are never left pinned without the rule change they belong to. Never throws (except
+     * cancellation); shows [failMessage] instead. The run started afterwards ([runAfter]) is separate: the rule is
+     * already saved by then, so its failure only shows a message.
+     */
+    private suspend fun ruleChange(
+        failMessage: String,
+        runAfter: Boolean,
+        work: suspend (pinned: MutableList<Long>) -> Boolean,
+    ) {
+        val pinned = ArrayList<Long>()
+        val changed = try {
+            work(pinned)
+        } catch (e: Exception) {
+            withContext(NonCancellable) { unpin(pinned) }
+            if (e is CancellationException) throw e
+            showRuleMessage(failMessage)
+            return
+        }
+        if (!changed || !runAfter) return
+        try {
+            runNowFromSettings()
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            showRuleMessage(RUN_FAILED)
+        }
+    }
 
     /**
      * Saves a new rule when no existing drive file would move ([onAdded]); otherwise calls [onAsk] with how many
@@ -176,16 +230,22 @@ class SettingsViewModel(
      */
     fun saveRule(path: String, name: String, onAdded: () -> Unit, onAsk: (Int) -> Unit): Job {
         if (_state.value.ruleBusy) return Job().apply { complete() }
-        _state.update { it.copy(ruleBusy = true) }
+        if (PhoneFolders.normalise(path).isEmpty()) {
+            showRuleMessage(CHOOSE_FOLDER)
+            return Job().apply { complete() }
+        }
+        if (nameError(name) != null) return Job().apply { complete() }
+        _state.update { it.copy(ruleBusy = true, ruleMessage = null) }
         return viewModelScope.launch {
             try {
                 val n = countOnDrive(path, name)
                 if (n == 0) {
                     addRule(path, name, moveExisting = false).join()
-                    onAdded()
+                    if (_state.value.ruleMessage != SAVE_FAILED) onAdded()
                 } else onAsk(n)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
+                showRuleMessage(SAVE_FAILED)
             } finally {
                 _state.update { it.copy(ruleBusy = false) }
             }
@@ -200,25 +260,51 @@ class SettingsViewModel(
         val key = PhoneFolders.normalise(path).takeIf { it.isNotEmpty() }
         val folder = FolderRules.canonical(name)
         if (key == null || folder == null || nameError(name) != null) return Job().apply { complete() }
+        _state.update { it.copy(ruleMessage = null) }
         return viewModelScope.launch {
-            val s = store.settings.first()
-            if (!moveExisting) pin(affectedRows(key, s.folderRules, folder, s), s)
-            store.update { cur ->
-                cur.copy(folderRules = cur.folderRules.filterKeys { !it.equals(key, ignoreCase = true) } + (key to folder))
+            ruleChange(SAVE_FAILED, runAfter = moveExisting) { pinned ->
+                val s = store.settings.first()
+                if (!moveExisting) pin(affectedRows(key, s.folderRules, folder, s), s, pinned)
+                store.update { cur ->
+                    cur.copy(folderRules = cur.folderRules.filterKeys { !it.equals(key, ignoreCase = true) } + (key to folder))
+                }
+                true
             }
-            if (moveExisting) runNowFromSettings()
         }
     }
 
     /** Removes the rule on [path]. [moveBack] false pins the covered files where they are; true runs a backup now. */
-    fun removeRule(path: String, moveBack: Boolean): Job = viewModelScope.launch {
-        val s = store.settings.first()
-        val target = PhoneFolders.normalise(path)
-        val keys = s.folderRules.keys.filter { PhoneFolders.normalise(it).equals(target, ignoreCase = true) }
-        if (keys.isEmpty()) return@launch
-        if (!moveBack) pin(affectedRows(path, s.folderRules, null, s), s)
-        store.update { cur -> cur.copy(folderRules = cur.folderRules - keys.toSet()) }
-        if (moveBack) runNowFromSettings()
+    fun removeRule(path: String, moveBack: Boolean): Job {
+        _state.update { it.copy(ruleMessage = null) }
+        return viewModelScope.launch {
+            ruleChange(REMOVE_FAILED, runAfter = moveBack) { pinned ->
+                val s = store.settings.first()
+                val target = PhoneFolders.normalise(path)
+                val keys = s.folderRules.keys.filter { PhoneFolders.normalise(it).equals(target, ignoreCase = true) }
+                if (keys.isEmpty()) return@ruleChange false
+                if (!moveBack) pin(affectedRows(path, s.folderRules, null, s), s, pinned)
+                store.update { cur -> cur.copy(folderRules = cur.folderRules - keys.toSet()) }
+                true
+            }
+        }
+    }
+
+    /**
+     * The Remove button: removes the rule on [path] straight away when no drive file would move back, else calls
+     * [onAsk] with how many would. Never throws; a failed check shows a message instead.
+     */
+    fun askRemoveRule(path: String, onAsk: (Int) -> Unit): Job {
+        _state.update { it.copy(ruleMessage = null) }
+        return viewModelScope.launch {
+            val n = try {
+                countOnDrive(path)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                showRuleMessage(REMOVE_FAILED)
+                return@launch
+            }
+            if (n == 0) removeRule(path, false).join() else onAsk(n)
+        }
     }
 
     /** Only updates settings; the ledger is never touched. */
@@ -260,7 +346,11 @@ class SettingsViewModel(
         }
     }
 
-    private companion object {
-        const val INVALID_NAME_CHARS = "\\/:*?\"<>|"
+    companion object {
+        private const val INVALID_NAME_CHARS = "\\/:*?\"<>|"
+        const val SAVE_FAILED = "Couldn't save the rule"
+        const val REMOVE_FAILED = "Couldn't remove the rule"
+        const val RUN_FAILED = "Rule saved — the move starts with the next backup"
+        const val CHOOSE_FOLDER = "Choose a phone folder"
     }
 }

@@ -30,8 +30,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.rememberCoroutineScope
-import kotlinx.coroutines.launch
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -54,7 +52,6 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
     var addingRule by remember { mutableStateOf(false) }
     var rulePath by remember { mutableStateOf<String?>(null) }
     var confirm by remember { mutableStateOf<RuleConfirm?>(null) }
-    val scope = rememberCoroutineScope()
     val s = state.settings
 
     BackHandler(enabled = picking || addingFolder || addingRule) {
@@ -112,7 +109,10 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
                     actionLabel = "Choose",
                 )
             } else {
-                RuleNameEntry(path, s.folderRules.values.distinct().sortedBy { it.lowercase() }, viewModel, state.ruleBusy) { name ->
+                RuleNameEntry(
+                    path, s.folderRules.values.distinct().sortedBy { it.lowercase() }, viewModel, state.ruleBusy,
+                    state.ruleMessage,
+                ) { name ->
                     viewModel.saveRule(
                         path, name,
                         onAdded = { rulePath = null; addingRule = false },
@@ -156,11 +156,8 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
             HorizontalDivider()
             Folders(s, viewModel) { viewModel.loadPhoneFolders(); addingFolder = true }
             HorizontalDivider()
-            FolderRulesSection(s, onAdd = { viewModel.loadPhoneFolders(); addingRule = true }) { path ->
-                scope.launch {
-                    val n = viewModel.countOnDrive(path)
-                    if (n == 0) viewModel.removeRule(path, false) else confirm = RuleConfirm.Remove(path, n)
-                }
+            FolderRulesSection(s, state.ruleMessage, onAdd = { viewModel.loadPhoneFolders(); addingRule = true }) { path ->
+                viewModel.askRemoveRule(path) { n -> confirm = RuleConfirm.Remove(path, n) }
             }
             RuleDialog(confirm, { confirm = null }) { c, yes ->
                 confirm = null
@@ -295,9 +292,10 @@ private fun RuleDialog(c: RuleConfirm?, onDismiss: () -> Unit, onAnswer: (RuleCo
 }
 
 @Composable
-private fun FolderRulesSection(s: AppSettings, onAdd: () -> Unit, onRemove: (String) -> Unit) {
+private fun FolderRulesSection(s: AppSettings, message: String?, onAdd: () -> Unit, onRemove: (String) -> Unit) {
     Section("Folder rules")
     Text("Send a phone folder's backups to a drive folder with a name you choose.", style = MaterialTheme.typography.bodySmall)
+    message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     for ((path, name) in s.folderRules.entries.sortedBy { it.key.lowercase() }) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("${path.removeSuffix("/")} \u2192 $name", Modifier.weight(1f))
@@ -309,7 +307,14 @@ private fun FolderRulesSection(s: AppSettings, onAdd: () -> Unit, onRemove: (Str
 
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun RuleNameEntry(path: String, existing: List<String>, vm: SettingsViewModel, busy: Boolean, onSave: (String) -> Unit) {
+private fun RuleNameEntry(
+    path: String,
+    existing: List<String>,
+    vm: SettingsViewModel,
+    busy: Boolean,
+    message: String?,
+    onSave: (String) -> Unit,
+) {
     var name by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -328,5 +333,6 @@ private fun RuleNameEntry(path: String, existing: List<String>, vm: SettingsView
             val err = vm.nameError(name)
             if (err != null) error = err else onSave(name)
         }) { Text("Save rule") }
+        message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
 }

@@ -49,7 +49,9 @@ fun PhoneFolderBrowser(
                 typed, { typed = it }, singleLine = true, modifier = Modifier.weight(1f),
                 label = { Text("Or type a path, e.g. Pictures/WhatsApp") },
             )
-            TextButton(onClick = { onAdd(typed); typed = "" }, enabled = typed.isNotBlank()) { Text(actionLabel) }
+            TextButton(onClick = { onAdd(typed); typed = "" }, enabled = PhoneFolders.normalise(typed).isNotEmpty()) {
+                Text(actionLabel)
+            }
         }
         HorizontalDivider()
         when (list) {
