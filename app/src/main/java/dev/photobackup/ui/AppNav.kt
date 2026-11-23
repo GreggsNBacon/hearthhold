@@ -24,6 +24,10 @@ import androidx.navigation.navArgument
 import dev.photobackup.app.AppContainer
 import dev.photobackup.freeup.FreeUpScreen
 import dev.photobackup.freeup.FreeUpViewModel
+import dev.photobackup.gallery.BrowseScreen
+import dev.photobackup.gallery.GalleryScreen
+import dev.photobackup.gallery.SmbRoot
+import dev.photobackup.gallery.ViewerListHolder
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.ui.home.HomeScreen
 import dev.photobackup.ui.settings.SettingsScreen
@@ -85,12 +89,34 @@ fun AppNav(container: AppContainer) {
                 onBack = { nav.popBackStack() },
             )
         }
-        // Placeholders: Tasks 10/11 replace these.
-        composable(Routes.GALLERY) { ComingSoon("Gallery") { nav.popBackStack() } }
+        composable(Routes.GALLERY) {
+            GalleryScreen(
+                viewModel = viewModel(factory = container.galleryFactory),
+                onBack = { nav.popBackStack() },
+                onOpen = { items, index ->
+                    container.viewerLists.set(ViewerListHolder.GALLERY, items)
+                    nav.navigate(Routes.viewer(ViewerListHolder.GALLERY, index))
+                },
+            )
+        }
         composable(
             Routes.BROWSE,
             arguments = listOf(navArgument("path") { type = NavType.StringType; defaultValue = "" }),
-        ) { ComingSoon("Browse drive") { nav.popBackStack() } }
+        ) { entry ->
+            val path = entry.arguments?.getString("path").orEmpty()
+            val root by produceState<SmbRoot?>(null) { value = container.driveRoot() }
+            BrowseScreen(
+                viewModel = viewModel(factory = container.browseFactory(path)),
+                root = root,
+                onBack = { nav.popBackStack() },
+                onOpenFolder = { nav.navigate(Routes.browse(it)) },
+                onOpen = { items, index ->
+                    container.viewerLists.set(ViewerListHolder.BROWSE, items)
+                    nav.navigate(Routes.viewer(ViewerListHolder.BROWSE, index))
+                },
+            )
+        }
+        // Placeholder: Task 11 replaces this. It reads its list from container.viewerLists.get(source).
         composable(
             Routes.VIEWER,
             arguments = listOf(

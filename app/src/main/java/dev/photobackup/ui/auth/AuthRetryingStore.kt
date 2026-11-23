@@ -7,6 +7,7 @@ import dev.photobackup.smb.RemoteStore
 import dev.photobackup.smb.SmbConfig
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 
@@ -19,14 +20,26 @@ class AuthRetryingStore(
     private val auth: AuthPrompt,
     private val factory: (SmbConfig) -> RemoteStore,
 ) : RemoteStore {
+    /** Serialises connecting (suspends; may wait for the password dialog). */
     private val mutex = Mutex()
-    @Volatile private var current: Pair<SmbConfig, RemoteStore>? = null
+
+    /**
+     * Guards [current] and [generation] for short, non-suspending sections, so [close] (not suspending, may run on
+     * the main thread) never waits for a connect in progress. A connect that finishes after [close] sees the
+     * generation changed, closes its new connection and fails instead of leaking it.
+     */
+    private val state = Any()
+    private var current: Pair<SmbConfig, RemoteStore>? = null
+    private var generation = 0L
 
     /** Open (or reuse) a connection for [cfg]. */
     private suspend fun session(cfg: SmbConfig, fresh: Boolean): Pair<RemoteStore, DriveInfo?> = mutex.withLock {
-        val cur = current
-        if (!fresh && cur != null && cur.first == cfg) return cur.second to null
-        current = null
+        val (cur, gen) = synchronized(state) {
+            val c = current
+            if (!fresh && c != null && c.first == cfg) return c.second to null
+            current = null
+            c to generation
+        }
         cur?.second?.let { runCatching { it.close() } }
         val s = factory(cfg)
         val info = try {
@@ -35,16 +48,32 @@ class AuthRetryingStore(
             runCatching { s.close() }
             throw e
         }
-        current = cfg to s
+        val closedMeanwhile = synchronized(state) {
+            if (generation != gen) {
+                true
+            } else {
+                current = cfg to s
+                false
+            }
+        }
+        if (closedMeanwhile) {
+            runCatching { s.close() }
+            throw IOException("Drive connection closed")
+        }
         s to info
     }
 
     private fun drop(s: RemoteStore) {
-        val cur = current
-        if (cur != null && cur.second === s) {
-            current = null
-            runCatching { s.close() }
+        val dropped = synchronized(state) {
+            val cur = current
+            if (cur != null && cur.second === s) {
+                current = null
+                true
+            } else {
+                false
+            }
         }
+        if (dropped) runCatching { s.close() }
     }
 
     private suspend fun <T> op(block: suspend (RemoteStore) -> T): T = auth.withAuthRetry { cfg ->
@@ -66,9 +95,15 @@ class AuthRetryingStore(
     override suspend fun rename(from: String, to: String) = op { it.rename(from, to) }
     override suspend fun delete(path: String) = op { it.delete(path) }
 
+    /**
+     * Closes the open connection (and any connection still being opened). The store stays usable: the next call
+     * reconnects. Streams from [openRead] die with their connection, so a long-lived stream should use its own store.
+     */
     override fun close() {
-        val cur = current
-        current = null
+        val cur = synchronized(state) {
+            generation++
+            current.also { current = null }
+        }
         cur?.second?.let { runCatching { it.close() } }
     }
 }

@@ -5,6 +5,10 @@ import android.content.Context
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.decode.VideoFrameDecoder
+import coil.disk.DiskCache
 import dev.photobackup.backup.BackupNotifications
 import dev.photobackup.backup.BackupScheduler
 import dev.photobackup.backup.BackupStatusRepository
@@ -14,6 +18,12 @@ import dev.photobackup.discovery.ShareLister
 import dev.photobackup.freeup.FreeUpRepository
 import dev.photobackup.freeup.FreeUpViewModel
 import dev.photobackup.freeup.SuggestionRule
+import dev.photobackup.gallery.BrowseViewModel
+import dev.photobackup.gallery.CopyToPhone
+import dev.photobackup.gallery.GalleryViewModel
+import dev.photobackup.gallery.SmbCoilFetcher
+import dev.photobackup.gallery.SmbRoot
+import dev.photobackup.gallery.ViewerListHolder
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerDao
 import dev.photobackup.media.LocalMediaSource
@@ -43,8 +53,23 @@ interface BackupControl {
     fun runNow(chargingOnly: Boolean)
 }
 
-class PhotoBackupApp : Application() {
+class PhotoBackupApp : Application(), ImageLoaderFactory {
     val container: AppContainer by lazy { AppContainer(this) }
+
+    /** Coil: phone video frames, drive thumbnails (smb://), and a thumbnail cache the OS won't clear. */
+    override fun newImageLoader(): ImageLoader = ImageLoader.Builder(this)
+        .components {
+            add(SmbCoilFetcher.Factory { container.thumbnailStore })
+            add(VideoFrameDecoder.Factory())
+        }
+        .diskCache {
+            DiskCache.Builder()
+                .directory(noBackupFilesDir.resolve("thumbnails"))
+                .maxSizeBytes(256L * 1024 * 1024)
+                .build()
+        }
+        .crossfade(true)
+        .build()
 }
 
 /** Manual DI: the app's singletons and ViewModel factories. Everything is lazy so process start stays cheap. */
@@ -81,6 +106,22 @@ class AppContainer(context: Context) {
 
     /** A store for the saved drive; every call re-prompts on a refused login. Caller closes it. */
     fun driveStore(): RemoteStore = AuthRetryingStore(authPrompt, storeFactory)
+
+    /** Hands the Gallery/Browse list to the viewer (`viewer/{source}/{index}`). */
+    val viewerLists = ViewerListHolder()
+
+    /**
+     * The one store all drive thumbnails go through (SmbCoilFetcher serialises its calls), kept open for the app's
+     * life. Screens use their own [driveStore], so a reconnect there never kills a thumbnail stream or vice versa.
+     */
+    val thumbnailStore: RemoteStore by lazy { driveStore() }
+
+    /** Copy to phone streams the whole file, so it gets its own connection, closed afterwards. */
+    suspend fun copyToPhone(remotePath: String, isVideo: Boolean) {
+        driveStore().use { CopyToPhone.copy(app, it, remotePath, isVideo) }
+    }
+
+    suspend fun driveRoot(): SmbRoot? = settings().smb?.let { SmbRoot(it.host, it.share) }
 
     /** Connects and logs in to the saved drive (via the auth prompt); throws on failure. */
     suspend fun checkDrive() {
@@ -165,6 +206,22 @@ class AppContainer(context: Context) {
 
     val settingsFactory: ViewModelProvider.Factory = viewModelFactory {
         initializer { SettingsViewModel(settingsStore, storeFactory, backup) }
+    }
+
+    val galleryFactory: ViewModelProvider.Factory = viewModelFactory {
+        initializer {
+            GalleryViewModel(
+                queryPhone = { media.query(settings().folders) },
+                ledger = ledger.observeAll(),
+                checkDrive = { checkDrive() },
+                driveRoot = { driveRoot() },
+            )
+        }
+    }
+
+    /** Browse one folder; each `browse?path=` back-stack entry gets its own ViewModel and connection. */
+    fun browseFactory(path: String): ViewModelProvider.Factory = viewModelFactory {
+        initializer { BrowseViewModel(path, driveStore()) { remote, video -> copyToPhone(remote, video) } }
     }
 
     val freeUpFactory: ViewModelProvider.Factory = viewModelFactory {
