@@ -7,6 +7,7 @@ import dev.photobackup.ledger.LedgerStore
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.smb.RemoteException
 import dev.photobackup.smb.RemoteStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -83,6 +84,7 @@ class BackupEngine(
         var uploaded = 0
         var skipped = 0
         var failed = 0
+        var bytesUploaded = 0L
         var free = drive.freeBytes
         val state = RunState(drive.freeBytes, work.size)
 
@@ -113,13 +115,13 @@ class BackupEngine(
                 }
             }
             when (outcome) {
-                Outcome.UPLOADED -> { uploaded++; free -= m.sizeBytes }
+                Outcome.UPLOADED -> { uploaded++; bytesUploaded += m.sizeBytes; free -= m.sizeBytes }
                 Outcome.SKIPPED -> skipped++
                 Outcome.FAILED -> failed++
             }
             onProgress(i + 1, work.size, state.bytesDone)
         }
-        BackupResult.Done(uploaded, skipped, failed)
+        BackupResult.Done(uploaded, skipped, failed, bytesUploaded)
     }
 
     /** Deletes each row's own tracked `.part`, then resets interrupted rows to PENDING. */
@@ -251,9 +253,25 @@ class BackupEngine(
         }
         if (remoteSha == sha) {
             ledger.upsert(entry(m, BackupStatus.VERIFIED, sha = sha, remote = final))
+            setDriveTime(m, final)
             return Outcome.UPLOADED
         }
         return failAndRemoveFinal(m, final, VERIFY_ERROR)
+    }
+
+    /**
+     * Gives the copy we just wrote and verified the photo's date (date taken, else date added), so the drive sorts
+     * by when it was taken. Metadata only, never content; adopted files are never touched. Cosmetic: any failure
+     * is ignored (a real drive problem shows up on the next item).
+     */
+    private suspend fun setDriveTime(m: PhoneMedia, path: String) {
+        val ms = if (m.dateTakenMs > 0) m.dateTakenMs else m.dateAddedSec * 1000
+        if (ms <= 0) return
+        try {
+            store.setTimes(path, ms)
+        } catch (e: Throwable) {
+            if (e is CancellationException) throw e
+        }
     }
 
     /** Deletes the copy this item just renamed into place (it failed a check), then marks FAILED. */

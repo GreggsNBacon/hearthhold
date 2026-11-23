@@ -94,6 +94,7 @@ class AuthRetryingStore(
     override suspend fun openRead(path: String, offset: Long): InputStream = op { it.openRead(path, offset) }
     override suspend fun rename(from: String, to: String) = op { it.rename(from, to) }
     override suspend fun delete(path: String) = op { it.delete(path) }
+    override suspend fun setTimes(path: String, modifiedMs: Long) = op { it.setTimes(path, modifiedMs) }
 
     /**
      * Closes the open connection (and any connection still being opened). The store stays usable: the next call

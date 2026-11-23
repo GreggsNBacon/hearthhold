@@ -37,6 +37,7 @@ class BackupWorkerTest {
     @get:Rule val tmp = TemporaryFolder()
     private lateinit var app: Application
     private lateinit var repo: BackupStatusRepository
+    private var notifyEnabled = true
     private var runner: BackupRunner = BackupRunner { _ -> BackupResult.Done(0, 0, 0) }
 
     @Before fun setUp() {
@@ -46,11 +47,13 @@ class BackupWorkerTest {
         repo = BackupStatusRepository(PreferenceDataStoreFactory.create { File(tmp.root, "status.preferences_pb") })
         BackupStatusRepository.provider = { repo }
         BackupRunnerFactory.create = { runner }
+        BackupRunnerFactory.notifyOnComplete = { notifyEnabled }
     }
 
     @After fun tearDown() {
         BackupStatusRepository.provider = BackupStatusRepository.defaultProvider
         BackupRunnerFactory.create = BackupRunnerFactory.defaultCreate
+        BackupRunnerFactory.notifyOnComplete = BackupRunnerFactory.defaultNotifyOnComplete
     }
 
     private fun runWorker(): ListenableWorker.Result = runBlocking {
@@ -301,5 +304,46 @@ class BackupWorkerTest {
         assertTrue(during!!.inProgress)
         assertNull(during!!.lastError)
         assertEquals("Backed up 1, failed 0", during!!.lastResult)
+    }
+
+    private fun doneNotifications(): List<Notification> {
+        val nm = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        return shadowOf(nm).allNotifications.filter { it.channelId == BackupNotifications.CHANNEL_DONE }
+    }
+
+    @Test fun completionNotificationWhenFilesUploaded() {
+        runner = BackupRunner { _ -> BackupResult.Done(3, 1, 0, bytesUploaded = 5L * 1024 * 1024) }
+        runWorker()
+        val n = doneNotifications().single()
+        assertEquals("Backup complete", n.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
+        assertEquals("3 files backed up (5 MB)", text(n))
+        val nm = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        assertEquals(NotificationManager.IMPORTANCE_LOW, nm.getNotificationChannel(BackupNotifications.CHANNEL_DONE).importance)
+    }
+
+    @Test fun completionNotificationSingularAndGigabytes() {
+        runner = BackupRunner { _ -> BackupResult.Done(1, 0, 0, bytesUploaded = 3L * 1024 * 1024 * 1024 / 2) }
+        runWorker()
+        assertEquals("1 file backed up (1.5 GB)", text(doneNotifications().single()))
+    }
+
+    @Test fun noCompletionNotificationWhenNothingUploaded() {
+        runner = BackupRunner { _ -> BackupResult.Done(0, 4, 0) }
+        runWorker()
+        assertTrue(doneNotifications().isEmpty())
+    }
+
+    @Test fun noCompletionNotificationWhenDisabled() {
+        notifyEnabled = false
+        runner = BackupRunner { _ -> BackupResult.Done(2, 0, 0, bytesUploaded = 100) }
+        runWorker()
+        assertTrue(doneNotifications().isEmpty())
+    }
+
+    @Test fun noCompletionNotificationWithoutPermission() {
+        shadowOf(app).denyPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        runner = BackupRunner { _ -> BackupResult.Done(2, 0, 0, bytesUploaded = 100) }
+        assertEquals(ListenableWorker.Result.success(), runWorker())
+        assertTrue(doneNotifications().isEmpty())
     }
 }

@@ -78,6 +78,7 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
             DeviceName(s, viewModel)
             HorizontalDivider()
             SwitchRow("Only back up while charging", s.chargingOnly) { viewModel.setChargingOnly(it) }
+            SwitchRow("Notify when a backup finishes", s.notifyOnComplete) { viewModel.setNotifyOnComplete(it) }
             HorizontalDivider()
             FreeUpAge(s, viewModel)
             HorizontalDivider()

@@ -142,6 +142,9 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                     it.copy(lastRunMs = now, lastResult = "Backed up ${r.uploaded}, failed ${r.failed}", lastError = err)
                 }
                 BackupNotifications.clearError(applicationContext)
+                if (r.uploaded > 0 && notifyEnabled()) {
+                    BackupNotifications.complete(applicationContext, r.uploaded, r.bytesUploaded)
+                }
             }
             is BackupResult.Stopped -> when (val e = r.reason) {
                 is RemoteException.Unreachable -> {
@@ -162,6 +165,14 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             }
         }
         return Result.success()
+    }
+
+    /** The Settings toggle; a settings read failure must not fail a finished run, so it defaults to on. */
+    private suspend fun notifyEnabled(): Boolean = try {
+        BackupRunnerFactory.notifyOnComplete(applicationContext)
+    } catch (e: Exception) {
+        if (e is CancellationException) throw e
+        true
     }
 
     /** Writes a final status with the progress fields cleared; survives cancellation. */

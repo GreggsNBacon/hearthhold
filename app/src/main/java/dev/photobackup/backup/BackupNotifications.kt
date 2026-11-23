@@ -11,13 +11,17 @@ import android.content.pm.PackageManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.photobackup.MainActivity
+import dev.photobackup.freeup.formatSize
 
 object BackupNotifications {
     const val CHANNEL_PROGRESS = "backup_progress"
     const val CHANNEL_ERRORS = "backup_errors"
+    const val CHANNEL_DONE = "backup_done"
     const val PROGRESS_ID = 1001
     const val ERROR_ID = 1002
+    const val DONE_ID = 1003
     private const val REQ_REAUTH = 2001
+    private const val REQ_OPEN = 2002
 
     private fun manager(context: Context) =
         context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -29,6 +33,9 @@ object BackupNotifications {
         )
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_ERRORS, "Backup problems", NotificationManager.IMPORTANCE_DEFAULT)
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_DONE, "Backup finished", NotificationManager.IMPORTANCE_LOW)
         )
     }
 
@@ -67,6 +74,37 @@ object BackupNotifications {
         } catch (_: SecurityException) {
             // Permission revoked between the check and the post.
         }
+    }
+
+    /** "Backup complete: N files backed up (size)". Quiet channel; posts only with POST_NOTIFICATIONS; never throws. */
+    fun complete(context: Context, files: Int, bytes: Long) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) return
+        try {
+            ensureChannels(context)
+            val n = NotificationCompat.Builder(context, CHANNEL_DONE)
+                .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+                .setContentTitle("Backup complete")
+                .setContentText(completeText(files, bytes))
+                .setAutoCancel(true)
+                .setContentIntent(openAppIntent(context))
+                .build()
+            manager(context).notify(DONE_ID, n)
+        } catch (_: SecurityException) {
+            // Permission revoked between the check and the post.
+        }
+    }
+
+    fun completeText(files: Int, bytes: Long): String =
+        "$files ${if (files == 1) "file" else "files"} backed up (${formatSize(bytes)})"
+
+    private fun openAppIntent(context: Context): PendingIntent {
+        val intent = Intent(context, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        return PendingIntent.getActivity(
+            context, REQ_OPEN, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
     }
 
     fun clearError(context: Context) = manager(context).cancel(ERROR_ID)

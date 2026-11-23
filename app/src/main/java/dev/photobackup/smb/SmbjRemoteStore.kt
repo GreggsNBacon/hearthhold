@@ -1,7 +1,9 @@
 package dev.photobackup.smb
 
 import com.hierynomus.mserref.NtStatus
+import com.hierynomus.msdtyp.FileTime
 import com.hierynomus.msfscc.FileAttributes
+import com.hierynomus.msfscc.fileinformation.FileBasicInformation
 import com.hierynomus.mssmb2.SMB2Dialect
 import com.hierynomus.mssmb2.SMBApiException
 import com.hierynomus.protocol.transport.TransportException
@@ -193,6 +195,19 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
     override suspend fun delete(path: String) = io {
         val s = requireShare()
         if (s.folderExists(path)) s.rmdir(path, false) else s.rm(path)
+    }
+
+    override suspend fun setTimes(path: String, modifiedMs: Long) = io {
+        val t = FileTime.ofEpochMillis(modifiedMs)
+        // Handle opened with FILE_WRITE_ATTRIBUTES only; attributes 0 and DONT_SET leave everything else alone.
+        val entry = SmbOpenArgs.setTimes().open(requireShare(), path)
+        try {
+            entry.setFileInformation(
+                FileBasicInformation(t, FileBasicInformation.DONT_SET, t, FileBasicInformation.DONT_SET, 0L)
+            )
+        } finally {
+            runCatching { entry.close() }
+        }
     }
 
     override fun close() = closeQuietly()

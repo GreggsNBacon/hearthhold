@@ -12,4 +12,5 @@ data class AppSettings(
     val freeUpAgeMonths: Int = 6,
     val folders: SourceFolders = SourceFolders(),
     val loopVideos: Boolean = true,
+    val notifyOnComplete: Boolean = true,
 )

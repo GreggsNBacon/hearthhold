@@ -42,6 +42,13 @@ class SettingsStoreTest {
         assertNull(s.smb)
         assertNull(s.destination)
         assertTrue(s.folders.camera)
+        assertTrue(s.notifyOnComplete)
+    }
+
+    @Test fun notifyOnCompletePersists() = runBlocking {
+        val (store, _) = newStore()
+        store.update { it.copy(notifyOnComplete = false) }
+        assertFalse(store.settings.first().notifyOnComplete)
     }
 
     @Test fun passwordStoredEncrypted() = runBlocking {

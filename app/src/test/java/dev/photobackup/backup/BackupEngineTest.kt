@@ -64,7 +64,7 @@ class BackupEngineTest {
     @Test fun uploadsAndVerifiesNewItem() = runBlocking {
         val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(5000)
         val r = engine(store, ledger, data).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(1, 0, 0), r)
+        assertEquals(BackupResult.Done(1, 0, 0), counts(r))
         assertArrayEquals(data, store.files[final])
         val e = ledger.get(1)!!
         assertEquals(BackupStatus.VERIFIED, e.status)
@@ -80,7 +80,7 @@ class BackupEngineTest {
         val other = bytes(5000, seed = 99) // same size, different content
         store.mkdirs(dir); store.files[final] = other
         val r = engine(store, ledger, data).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(1, 0, 0), r)
+        assertEquals(BackupResult.Done(1, 0, 0), counts(r))
         assertArrayEquals(other, store.files[final])
         assertArrayEquals(data, store.files["$dir\\IMG (1).jpg"])
         assertEquals("$dir\\IMG (1).jpg", ledger.get(1)!!.remotePath)
@@ -91,7 +91,7 @@ class BackupEngineTest {
         val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(5000)
         store.mkdirs(dir); store.files[final] = data.copyOf()
         val r = engine(store, ledger, data).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(0, 1, 0), r)
+        assertEquals(BackupResult.Done(0, 1, 0), counts(r))
         val e = ledger.get(1)!!
         assertEquals(BackupStatus.VERIFIED, e.status)
         assertEquals(final, e.remotePath)
@@ -118,7 +118,7 @@ class BackupEngineTest {
 
         store.failOn = null
         val r2 = engine(store, ledger, data).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(1, 0, 0), r2)
+        assertEquals(BackupResult.Done(1, 0, 0), counts(r2))
         assertEquals(listOf(part), store.deletes) // leftover cleaned, nothing else deleted
         assertFalse(part in store.files)
         assertArrayEquals(data, store.files[final])
@@ -130,7 +130,7 @@ class BackupEngineTest {
     @Test fun verificationMismatchDeletesCopyAndFails() = runBlocking {
         val store = FakeRemoteStore(corruptReads = true); val ledger = MemoryLedger(); val data = bytes(5000)
         val r = engine(store, ledger, data).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(0, 0, 1), r)
+        assertEquals(BackupResult.Done(0, 0, 1), counts(r))
         val e = ledger.get(1)!!
         assertEquals(BackupStatus.FAILED, e.status)
         assertEquals("verification failed", e.lastError)
@@ -152,7 +152,7 @@ class BackupEngineTest {
     @Test fun itemMissingOnPhoneIsSkipped() = runBlocking {
         val store = FakeRemoteStore(); val ledger = MemoryLedger()
         val r = engine(store, ledger, null).run(listOf(media(100)))
-        assertEquals(BackupResult.Done(0, 1, 0), r)
+        assertEquals(BackupResult.Done(0, 1, 0), counts(r))
         assertNull(ledger.get(1))
         assertTrue(store.files.isEmpty())
         assertTrue(store.deletes.isEmpty())
@@ -161,7 +161,7 @@ class BackupEngineTest {
     @Test fun fat32OversizeIsFailedWithReason() = runBlocking {
         val store = FakeRemoteStore(fileSystem = "FAT32"); val ledger = MemoryLedger()
         val r = engine(store, ledger, ByteArray(0)).run(listOf(media(5L * 1024 * 1024 * 1024)))
-        assertEquals(BackupResult.Done(0, 0, 1), r)
+        assertEquals(BackupResult.Done(0, 0, 1), counts(r))
         val e = ledger.get(1)!!
         assertEquals(BackupStatus.FAILED, e.status)
         assertEquals(fat32Msg, e.lastError)
@@ -185,7 +185,7 @@ class BackupEngineTest {
         )
         val edited = bytes(5000, seed = 42)
         val r = engine(store, ledger, edited).run(listOf(media(5000, dateModifiedSec = 20)))
-        assertEquals(BackupResult.Done(1, 0, 0), r)
+        assertEquals(BackupResult.Done(1, 0, 0), counts(r))
         assertArrayEquals(old, store.files[final])
         assertArrayEquals(edited, store.files["$dir\\IMG (1).jpg"])
         val e = ledger.get(1)!!
@@ -205,7 +205,7 @@ class BackupEngineTest {
         val store = FakeRemoteStore(fileSystem = "UNKNOWN", truncateWritesAfter = threshold)
         val ledger = MemoryLedger()
         val r1 = engine(store, ledger, data, fat32Max = threshold).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(0, 0, 1), r1)
+        assertEquals(BackupResult.Done(0, 0, 1), counts(r1))
         val e = ledger.get(1)!!
         assertEquals(BackupStatus.FAILED, e.status)
         assertEquals(fat32Msg, e.lastError)
@@ -216,13 +216,13 @@ class BackupEngineTest {
         store.truncateWritesAfter = null
         val writesBefore = store.writes.size
         val r2 = engine(store, ledger, data, fat32Max = threshold).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(0, 1, 0), r2)
+        assertEquals(BackupResult.Done(0, 1, 0), counts(r2))
         assertEquals(writesBefore, store.writes.size)
         assertEquals(BackupStatus.FAILED, ledger.get(1)!!.status)
 
         // A changed file (new dateModified) is retried.
         val r3 = engine(store, ledger, data, fat32Max = threshold).run(listOf(media(data.size.toLong(), dateModifiedSec = 99)))
-        assertEquals(BackupResult.Done(1, 0, 0), r3)
+        assertEquals(BackupResult.Done(1, 0, 0), counts(r3))
     }
 
     @Test fun genericWriteErrorFailsItemAndContinues() = runBlocking {
@@ -230,7 +230,7 @@ class BackupEngineTest {
         val store = FakeRemoteStore(truncateWritesAfter = 500)
         val ledger = MemoryLedger()
         val r = engine(store, ledger, data, fat32Max = 1000).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(0, 0, 1), r)
+        assertEquals(BackupResult.Done(0, 0, 1), counts(r))
         val e = ledger.get(1)!!
         assertEquals(BackupStatus.FAILED, e.status)
         assertTrue(e.lastError!!.contains("Simulated write failure"))
@@ -247,7 +247,7 @@ class BackupEngineTest {
         })
         val ledger = MemoryLedger()
         val r1 = engine(store, ledger, data, fat32Max = threshold).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(0, 0, 1), r1)
+        assertEquals(BackupResult.Done(0, 0, 1), counts(r1))
         val e = ledger.get(1)!!
         assertEquals(BackupStatus.FAILED, e.status)
         assertEquals(fat32Msg, e.lastError)
@@ -258,7 +258,7 @@ class BackupEngineTest {
         store.failOn = null
         val writesBefore = store.writes.size
         val r2 = engine(store, ledger, data, fat32Max = threshold).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(0, 1, 0), r2)
+        assertEquals(BackupResult.Done(0, 1, 0), counts(r2))
         assertEquals(writesBefore, store.writes.size)
     }
 
@@ -282,7 +282,7 @@ class BackupEngineTest {
         val store = FakeRemoteStore(fileSystem = "UNKNOWN", truncateWritesAfter = 5000)
         val ledger = MemoryLedger()
         val r1 = engine(store, ledger, data, fat32Max = threshold, slack = 100).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(0, 0, 1), r1)
+        assertEquals(BackupResult.Done(0, 0, 1), counts(r1))
         val e = ledger.get(1)!!
         assertEquals(BackupStatus.FAILED, e.status)
         assertTrue(e.lastError!!.contains("Simulated write failure"))
@@ -290,7 +290,7 @@ class BackupEngineTest {
 
         store.truncateWritesAfter = null
         val r2 = engine(store, ledger, data, fat32Max = threshold, slack = 100).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(1, 0, 0), r2)
+        assertEquals(BackupResult.Done(1, 0, 0), counts(r2))
         assertArrayEquals(data, store.files[final])
     }
 
@@ -298,7 +298,7 @@ class BackupEngineTest {
         val store = FakeRemoteStore(); val ledger = MemoryLedger()
         val data = bytes(4000) // phone claims 5000 bytes but delivers 4000
         val r = engine(store, ledger, data).run(listOf(media(5000)))
-        assertEquals(BackupResult.Done(0, 0, 1), r)
+        assertEquals(BackupResult.Done(0, 0, 1), counts(r))
         val e = ledger.get(1)!!
         assertEquals(BackupStatus.FAILED, e.status)
         assertEquals("size mismatch", e.lastError)
@@ -322,7 +322,7 @@ class BackupEngineTest {
         store.files[part] = foreign
         store.failOn = null
         val r2 = engine(store, ledger, data).run(listOf(media(data.size.toLong())))
-        assertEquals(BackupResult.Done(1, 0, 0), r2)
+        assertEquals(BackupResult.Done(1, 0, 0), counts(r2))
         assertTrue(store.deletes.isEmpty())
         assertArrayEquals(foreign, store.files[part])
         assertArrayEquals(data, store.files["$dir\\IMG (1).jpg"])
@@ -372,5 +372,46 @@ class BackupEngineTest {
         assertEquals(BackupStatus.VERIFIED, ledger.get(2)!!.status)
     }
 
-    private fun counts(r: BackupResult) = if (r is BackupResult.Done) r.copy() else r
+    /** Compares counts only; bytesUploaded has its own test. */
+    private fun counts(r: BackupResult) = if (r is BackupResult.Done) r.copy(bytesUploaded = 0) else r
+
+    @Test fun uploadedFileGetsDateTakenAsDriveTime() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(5000)
+        val r = engine(store, ledger, data).run(listOf(media(5000)))
+        assertEquals(BackupResult.Done(1, 0, 0, bytesUploaded = 5000), r)
+        assertEquals(mapOf(final to march2026), store.times)
+    }
+
+    @Test fun driveTimeFallsBackToDateAdded() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(5000)
+        val m = media(5000).copy(dateTakenMs = 0, dateAddedSec = 1_700_000_000)
+        engine(store, ledger, data).run(listOf(m))
+        assertEquals(1_700_000_000_000L, store.times.values.single()) // 2023 folder
+    }
+
+    @Test fun adoptedFileIsNotTouched() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(5000)
+        store.mkdirs(dir); store.files[final] = data.copyOf()
+        val r = engine(store, ledger, data).run(listOf(media(5000)))
+        assertEquals(BackupResult.Done(0, 1, 0, bytesUploaded = 0), r)
+        assertTrue(store.times.isEmpty())
+    }
+
+    @Test fun failedVerifyDoesNotSetTimes() = runBlocking {
+        val store = FakeRemoteStore(corruptReads = true); val ledger = MemoryLedger(); val data = bytes(5000)
+        engine(store, ledger, data).run(listOf(media(5000)))
+        assertTrue(store.times.isEmpty())
+    }
+
+    @Test fun setTimesFailureIsCosmetic() = runBlocking {
+        for (err in listOf<Throwable>(IllegalStateException("x"), java.io.IOException("x"), RemoteException.Unreachable())) {
+            val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(5000)
+            store.setTimesError = err
+            val second = media(5000, id = 2).copy(displayName = "IMG2.jpg") // not adoptable as a copy of the first
+            val r = engine(store, ledger, data).run(listOf(media(5000, id = 1), second))
+            assertEquals(err.javaClass.simpleName, BackupResult.Done(2, 0, 0, bytesUploaded = 10_000), r)
+            assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+            assertEquals(BackupStatus.VERIFIED, ledger.get(2)!!.status)
+        }
+    }
 }

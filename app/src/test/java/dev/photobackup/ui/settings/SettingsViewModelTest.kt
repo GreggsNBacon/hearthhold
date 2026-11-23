@@ -58,6 +58,12 @@ class SettingsViewModelTest {
         assertEquals(listOf("scheduleAll(true)"), backup.calls)
     }
 
+    @Test fun notifyOnCompleteToggleIsSaved() = runBlocking {
+        assertEquals(true, settings.settings.first().notifyOnComplete)
+        vm().setNotifyOnComplete(false).join()
+        assertEquals(false, settings.settings.first().notifyOnComplete)
+    }
+
     @Test fun freeUpAgeIsClampedTo1To36() = runBlocking {
         val vm = vm()
         vm.setFreeUpAge(0).join()

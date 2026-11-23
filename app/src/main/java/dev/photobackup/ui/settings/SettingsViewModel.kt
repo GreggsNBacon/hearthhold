@@ -49,6 +49,8 @@ class SettingsViewModel(
         return edit { it.copy(deviceName = n) }
     }
 
+    fun setNotifyOnComplete(on: Boolean): Job = edit { it.copy(notifyOnComplete = on) }
+
     fun setFreeUpAge(months: Int): Job = edit { it.copy(freeUpAgeMonths = months.coerceIn(1, 36)) }
 
     fun setCamera(on: Boolean): Job = edit { it.copy(folders = it.folders.copy(camera = on)) }

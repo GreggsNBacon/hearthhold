@@ -20,6 +20,12 @@ class FakeRemoteStore(
     /** Paths opened for write, in order. */
     val writes: MutableList<String> = mutableListOf()
 
+    /** setTimes calls: path -> modifiedMs. */
+    val times: MutableMap<String, Long> = linkedMapOf()
+
+    /** Thrown (any type) by setTimes, to check the engine treats it as cosmetic. */
+    var setTimesError: Throwable? = null
+
     /** Paths passed to delete, in order. */
     val deletes: MutableList<String> = mutableListOf()
 
@@ -108,6 +114,13 @@ class FakeRemoteStore(
         check("delete", path)
         deletes.add(path)
         if (files.remove(path) == null && !dirs.remove(path)) throw FileNotFoundException(path)
+    }
+
+    override suspend fun setTimes(path: String, modifiedMs: Long) {
+        setTimesError?.let { throw it }
+        check("setTimes", path)
+        if (path !in files) throw FileNotFoundException(path)
+        times[path] = modifiedMs
     }
 
     override fun close() {}

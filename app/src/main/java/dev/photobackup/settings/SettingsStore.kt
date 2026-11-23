@@ -49,6 +49,7 @@ class SettingsStore internal constructor(
                 extraRelativePaths = p[EXTRA_PATHS] ?: emptySet(),
             ),
             loopVideos = p[LOOP_VIDEOS] ?: true,
+            notifyOnComplete = p[NOTIFY_ON_COMPLETE] ?: true,
         )
     }
 
@@ -69,6 +70,7 @@ class SettingsStore internal constructor(
         p[SCREENSHOTS] = s.folders.screenshots
         p[EXTRA_PATHS] = s.folders.extraRelativePaths
         p[LOOP_VIDEOS] = s.loopVideos
+        p[NOTIFY_ON_COMPLETE] = s.notifyOnComplete
     }
 
     private fun <T> MutablePreferences.putOrRemove(key: Preferences.Key<T>, value: T?) {
@@ -88,5 +90,6 @@ class SettingsStore internal constructor(
         val SCREENSHOTS = booleanPreferencesKey("folder_screenshots")
         val EXTRA_PATHS = stringSetPreferencesKey("folder_extra_paths")
         val LOOP_VIDEOS = booleanPreferencesKey("loop_videos")
+        val NOTIFY_ON_COMPLETE = booleanPreferencesKey("notify_on_complete")
     }
 }

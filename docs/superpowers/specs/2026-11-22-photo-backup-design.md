@@ -67,7 +67,7 @@ Remote access (Immich on a spare PC, router WireGuard VPN) and Google Photos are
 4. **Gallery**: one date-sorted grid of everything, whether it's on the phone, on the drive, or both. A small badge shows where each item lives (phone / drive / both). Tap to open the viewer. Drive-only items appear only when the drive is reachable. The app keeps a cached list and thumbnails, so it can show "on drive (not reachable now)" greyed out.
 5. **Browse drive**: folder view of the share, for files the app didn't put there. Tap opens the viewer. Overflow menu: "Copy to phone".
 6. **Viewer / player**: see below.
-7. **Settings**: drive/share/folder, credentials, charging-only toggle (default off), age threshold N, which phone folders to include.
+7. **Settings**: drive/share/folder, credentials, charging-only toggle (default off), "Notify when a backup finishes" toggle (default on: a quiet "Backup complete — N files backed up (size)" notification when a run uploads at least one file), age threshold N, which phone folders to include.
 
 ### Backup behaviour
 - **Source:** MediaStore images and videos. *My call:* by default include the camera folder (DCIM/Camera) and Screenshots. Other folders (e.g. WhatsApp) can be turned on in Settings.
@@ -78,6 +78,7 @@ Remote access (Immich on a spare PC, router WireGuard VPN) and Google Photos are
 - **Name clash:** if a file with the same name exists and has the same size and hash, mark it as already backed up. If it differs, upload as `name (1).ext` etc. Never overwrite.
 - **Upload:** write to `<name>.part` and rename when complete, so a half-copied file never looks finished. Resume isn't required: an interrupted file restarts.
 - **Verify:** compute SHA-256 of the local file while uploading. After the rename, read the remote file back and compare its SHA-256. Only a match marks the item **verified**.
+- **Drive file dates** *(owner's request)*: after an upload is verified, set the drive file's modified (and created) time to the date taken (falling back to date added). Metadata only, on a file the app just wrote; adopted existing files are never touched, and a failure here never fails the item.
 - **Ledger (Room):** MediaStore id, local path, size, date taken, local hash, remote path, status (`pending` / `uploading` / `verified` / `failed` / `removed_from_phone`), last error, timestamps.
 - *My call:* **Leftovers.** On restart, delete any `.part` file the ledger says this app started. If a renamed copy fails verification, delete it and retry under the same name.
 - *My call:* **Edited files.** The ledger records MediaStore id + size + date modified. If a backed-up file changes on the phone, it goes back to `pending` and uploads as a new copy (`name (1).ext`). The old copy on the drive stays. "Verified" always means *the version on the phone right now* is on the drive.

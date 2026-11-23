@@ -32,4 +32,10 @@ interface RemoteStore : Closeable {
     /** Fails if [to] exists. */
     suspend fun rename(from: String, to: String)
     suspend fun delete(path: String)
+
+    /**
+     * Sets the file's last-write (and creation) time. Metadata only: the content is never touched. Used only on a
+     * file this app has just written and verified.
+     */
+    suspend fun setTimes(path: String, modifiedMs: Long)
 }

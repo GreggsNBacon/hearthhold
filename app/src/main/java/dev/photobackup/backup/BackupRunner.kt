@@ -24,6 +24,13 @@ object BackupRunnerFactory {
     val defaultCreate: (Context) -> BackupRunner = { ctx -> ProductionBackupRunner(ctx.applicationContext) }
 
     @Volatile var create: (Context) -> BackupRunner = defaultCreate
+
+    /** Whether to post "Backup complete" (Settings toggle). */
+    val defaultNotifyOnComplete: suspend (Context) -> Boolean = { ctx ->
+        SettingsStore(ctx.applicationContext, KeystoreCredentialCipher()).settings.first().notifyOnComplete
+    }
+
+    @Volatile var notifyOnComplete: suspend (Context) -> Boolean = defaultNotifyOnComplete
 }
 
 object LedgerDatabase {
