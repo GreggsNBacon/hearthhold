@@ -21,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
@@ -58,6 +59,9 @@ class ZoomState {
 
     /** Applies one gesture step: zoom about [centroid] (a pointer position), then [pan]. */
     fun transform(zoom: Float, pan: Offset, centroid: Offset) {
+        // The event that lifts the last finger has no pointer down: an unspecified (NaN) centroid. Ignore it, or
+        // the offset becomes NaN and the photo is drawn nowhere (black screen).
+        if (!centroid.isSpecified || !zoom.isFinite() || !pan.isSpecified) return
         val c = centroid - Offset(size.width / 2f, size.height / 2f)
         val newScale = (scale * zoom).coerceIn(MIN, MAX)
         val o = c - (c - offset) * (newScale / scale) + pan
@@ -144,7 +148,7 @@ fun PhotoPage(item: GalleryItem, root: SmbRoot?, active: Boolean, onZoomChange: 
                     do {
                         val event = awaitPointerEvent()
                         val pressed = event.changes.count { it.pressed }
-                        if (pressed > 1 || zoom.zoomed) {
+                        if (pressed > 1 || (pressed == 1 && zoom.zoomed)) {
                             zoom.transform(event.calculateZoom(), event.calculatePan(), event.calculateCentroid())
                             event.changes.forEach { if (it.positionChanged()) it.consume() }
                         }

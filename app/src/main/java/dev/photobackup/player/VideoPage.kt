@@ -26,6 +26,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
@@ -70,7 +71,12 @@ private fun mediaSource(context: Context, item: GalleryItem, root: SmbRoot?, sto
     if (phone != null) return DefaultMediaSourceFactory(context).createMediaSource(MediaItem.fromUri(phone))
     val remote = item.remotePath ?: return null
     root ?: return null
-    return ProgressiveMediaSource.Factory(SmbDataSource.Factory { store.get() })
+    // Cached on the phone as it streams: loops and re-opens don't download again.
+    val cached = CacheDataSource.Factory()
+        .setCache(VideoCache.get(context))
+        .setUpstreamDataSourceFactory(SmbDataSource.Factory { store.get() })
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+    return ProgressiveMediaSource.Factory(cached)
         .setLoadErrorHandlingPolicy(SmbDataSource.loadErrorPolicy())
         .createMediaSource(MediaItem.fromUri(SmbUri.build(root.host, root.share, remote)))
 }
@@ -129,7 +135,7 @@ private fun ActivePlayer(
     val currentOnSpeed by rememberUpdatedState(onSpeedChange)
 
     val player = remember(item.key) {
-        ExoPlayer.Builder(context).build().apply {
+        ExoPlayer.Builder(context).setLoadControl(VideoCache.loadControl()).build().apply {
             setMediaSource(source)
             repeatMode = if (loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
             playbackParameters = PlaybackParameters(speed, 1f)

@@ -18,6 +18,15 @@ class SmbCoilFetcherTest {
         assertEquals(1, Thumbnails.sampleSize(4000, 3000, 0, 0))
     }
 
+    /** Pixel photos carry a ~380x500 preview in their first 32 KB: enough for a 384 px grid cell, not the viewer. */
+    @Test fun embeddedPreviewUsedOnlyWhenBigEnough() {
+        assertTrue(Thumbnails.embeddedIsEnough(362, 481, 384, 384))
+        assertTrue(Thumbnails.embeddedIsEnough(510, 384, 384, 384))
+        assertFalse(Thumbnails.embeddedIsEnough(160, 120, 384, 384)) // classic tiny EXIF thumbnail
+        assertFalse(Thumbnails.embeddedIsEnough(384, 510, 1080, 1080)) // full-screen viewer
+        assertFalse(Thumbnails.embeddedIsEnough(0, 0, 384, 384))
+    }
+
     @Test fun cacheKeyIncludesPathAndSize() {
         val a = Thumbnails.cacheKey("smb://nas/usb/a.jpg", 256, 256)
         assertEquals("smb-thumb:smb://nas/usb/a.jpg@256x256", a)

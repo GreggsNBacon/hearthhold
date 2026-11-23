@@ -54,6 +54,16 @@ object Thumbnails {
     fun onSavedDrive(loc: SmbLocation, root: SmbRoot?): Boolean =
         root != null && loc.host.equals(root.host, ignoreCase = true) && loc.share.equals(root.share, ignoreCase = true)
 
+    /**
+     * Whether a photo's embedded EXIF preview ([thumbW]×[thumbH]) can stand in for decoding the whole file at
+     * [reqW]×[reqH]: its short side must reach 85% of the requested short side (a crop-filled grid cell stays
+     * sharp). Camera photos average several MB, and the preview sits in the first 32 KB already read.
+     */
+    fun embeddedIsEnough(thumbW: Int, thumbH: Int, reqW: Int, reqH: Int): Boolean {
+        if (thumbW <= 0 || thumbH <= 0 || reqW <= 0 || reqH <= 0) return false
+        return minOf(thumbW, thumbH) >= 0.85 * minOf(reqW, reqH)
+    }
+
     /** Disk-cache key: the `smb://` URI (host, share, path) plus the requested size. */
     fun cacheKey(uri: String, w: Int, h: Int) = "smb-thumb:$uri@${w}x$h"
 }
@@ -195,6 +205,14 @@ class SmbCoilFetcher(
 
     private suspend fun decodeImage(path: String, w: Int, h: Int): Bitmap {
         val head = store.openRead(path).use { readUpTo(it, HEAD_BYTES) }
+        val exif = runCatching { ExifInterface(ByteArrayInputStream(head)) }.getOrNull()
+        val orientation = exif?.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            ?: ExifInterface.ORIENTATION_NORMAL
+        // Grid thumbnails: the embedded preview (already in the head) instead of downloading the whole photo.
+        val embedded = runCatching { exif?.thumbnailBitmap }.getOrNull()
+        if (embedded != null && Thumbnails.embeddedIsEnough(embedded.width, embedded.height, w, h)) {
+            return rotate(embedded, orientation)
+        }
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(head, 0, head.size, bounds)
         val whole = head.size < HEAD_BYTES
@@ -208,14 +226,12 @@ class SmbCoilFetcher(
         val bmp = if (whole) {
             BitmapFactory.decodeByteArray(head, 0, head.size, opts)
         } else {
-            store.openRead(path).use { BitmapFactory.decodeStream(it.buffered(64 * 1024), null, opts) }
+            store.openRead(path).use { BitmapFactory.decodeStream(it.buffered(256 * 1024), null, opts) }
         } ?: throw ImageDecodeException()
-        val orientation = runCatching {
-            ExifInterface(ByteArrayInputStream(head)).getAttributeInt(
-                ExifInterface.TAG_ORIENTATION,
-                ExifInterface.ORIENTATION_NORMAL,
-            )
-        }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+        return rotate(bmp, orientation)
+    }
+
+    private fun rotate(bmp: Bitmap, orientation: Int): Bitmap {
         val degrees = when (orientation) {
             ExifInterface.ORIENTATION_ROTATE_90 -> 90f
             ExifInterface.ORIENTATION_ROTATE_180 -> 180f

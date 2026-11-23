@@ -165,28 +165,24 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
         }
     }
 
+    /**
+     * Reads go through [ReadAheadInputStream]: [READ_AHEAD_DEPTH] requests of the server's max read size stay in
+     * flight, so a thumbnail, a video or a backup's read-back hash isn't one round trip per 64 KB.
+     */
     override suspend fun openRead(path: String, offset: Long): InputStream = io {
         val file = SmbOpenArgs.read().openFile(requireShare(), path)
-        object : InputStream() {
-            private var pos = offset
-            private var closed = false
-            override fun read(): Int {
-                val one = ByteArray(1)
-                return if (read(one, 0, 1) < 0) -1 else one[0].toInt() and 0xFF
-            }
-
-            override fun read(b: ByteArray, off: Int, len: Int): Int {
-                if (len == 0) return 0
-                val n = try { file.read(b, pos, off, len) } catch (e: Throwable) { throw mapOp(e) }
-                if (n <= 0) return -1
-                pos += n
-                return n
-            }
-
-            override fun close() {
-                if (!closed) { closed = true; runCatching { file.close() } }
-            }
-        }
+        val chunk = (connection?.negotiatedProtocol?.maxReadSize ?: MIN_READ).coerceIn(MIN_READ, MAX_READ)
+        ReadAheadInputStream(
+            reader = { pos, buf, len ->
+                val n = try { file.read(buf, pos, 0, len) } catch (e: Throwable) { throw mapOp(e) }
+                if (n <= 0) -1 else n
+            },
+            start = offset,
+            chunkSize = chunk,
+            depth = READ_AHEAD_DEPTH,
+            executor = readPool,
+            onClose = { runCatching { file.close() } },
+        )
     }
 
     override suspend fun rename(from: String, to: String) = io {
@@ -230,6 +226,14 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
     companion object {
         private const val CONNECT_TIMEOUT_S = 5L
         private const val OP_TIMEOUT_S = 60L
+        private const val MIN_READ = 64 * 1024
+        private const val MAX_READ = 1024 * 1024
+        private const val READ_AHEAD_DEPTH = 4
+
+        /** Runs read-ahead requests (queued when busy, never rejected); idle threads end. Shared by all stores. */
+        private val readPool: java.util.concurrent.ExecutorService = java.util.concurrent.ThreadPoolExecutor(
+            16, 16, 30L, TimeUnit.SECONDS, java.util.concurrent.LinkedBlockingQueue(),
+        ) { r -> Thread(r, "smb-read").apply { isDaemon = true } }.apply { allowCoreThreadTimeOut(true) }
         private const val FS_UNKNOWN = "UNKNOWN"
 
         /** SMB 2.0.2 is needed for routers whose "SMB2" means 2.0.2 (e.g. some consumer routers' USB shares). */
