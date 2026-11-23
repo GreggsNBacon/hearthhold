@@ -128,29 +128,45 @@ class SettingsViewModel(
         return null
     }
 
-    /** Existing drive files a rule on [path] would (or does) govern: no hand-picked folder, longest-prefix match. */
-    private suspend fun affectedRows(path: String, rules: Map<String, String>): List<LedgerEntry> {
+    /**
+     * Existing drive files whose folder would change if the rule on [path] ended up naming [target] (null = the rule is
+     * removed, so each file's default folder). Mirrors what the engine can move: no hand-picked folder, longest-prefix
+     * match, and a path of today's `<destination>\<device>\<folder>\<year>\<name>` shape.
+     */
+    private suspend fun affectedRows(path: String, rules: Map<String, String>, target: String?, s: AppSettings): List<LedgerEntry> {
         val l = ledger ?: return emptyList()
         val key = PhoneFolders.normalise(path)
         val marked = rules.keys.map { PhoneFolders.normalise(it) }.filter { !it.equals(key, ignoreCase = true) }
             .associateWith { "other" } + (key to "this")
         val pinned = assignments?.all()?.mapTo(HashSet()) { it.mediaId }.orEmpty()
-        return (l.byStatus(BackupStatus.VERIFIED) + l.byStatus(BackupStatus.REMOVED_FROM_PHONE))
-            .filter { it.remotePath != null && it.mediaId !in pinned && FolderRules.ruleFor(it.relativePath, marked) == "this" }
+        return (l.byStatus(BackupStatus.VERIFIED) + l.byStatus(BackupStatus.REMOVED_FROM_PHONE)).filter { e ->
+            if (e.mediaId in pinned || e.movingTo != null || e.partPath != null) return@filter false
+            if (FolderRules.ruleFor(e.relativePath, marked) != "this") return@filter false
+            val current = currentFolder(e, s) ?: return@filter false
+            !FolderRules.same(current, target ?: RemotePathPlanner.sourceFolder(e.relativePath))
+        }
     }
 
-    /** How many already-backed-up items a rule on [path] covers (for the "also move them?" question). */
-    suspend fun countOnDrive(path: String): Int = affectedRows(path, store.settings.first().folderRules).size
+    /**
+     * How many already-backed-up items would move if the rule on [path] named [name] ([name] null: the rule is being
+     * removed). Used for the "also move them?" question.
+     */
+    suspend fun countOnDrive(path: String, name: String? = null): Int {
+        val s = store.settings.first()
+        return affectedRows(path, s.folderRules, name?.let { FolderRules.canonical(it) }, s).size
+    }
 
-    /** The first drive folder segment under "destination\device\", or null if the path is not under it. */
+    /** The folder segment of a drive path shaped `<destination>\<device>\<folder>\<year>\<name>`, else null. */
     private fun currentFolder(e: LedgerEntry, s: AppSettings): String? {
         val dest = (s.destination ?: "").replace('/', SEP).trim(SEP)
         val prefix = listOf(dest, RemotePathPlanner.sanitise(s.deviceName)).filter { it.isNotEmpty() }.joinToString(SEP.toString()) + SEP
-        val full = e.remotePath?.replace('/', SEP)?.trimStart(SEP) ?: return null
+        val full = e.remotePath ?: return null
         if (!full.startsWith(prefix, ignoreCase = true)) return null
-        val rest = full.substring(prefix.length)
-        if (!rest.contains(SEP)) return null
-        return rest.substringBefore(SEP).ifEmpty { null }
+        val parts = full.substring(prefix.length).split(SEP)
+        if (parts.size != 3 || parts.any { it.isEmpty() }) return null
+        val year = parts[1]
+        if (year.length != 4 || !year.all { it in '0'..'9' }) return null
+        return parts[0]
     }
 
     private suspend fun pin(rows: List<LedgerEntry>, s: AppSettings) {
@@ -170,7 +186,7 @@ class SettingsViewModel(
         if (key == null || folder == null || nameError(name) != null) return Job().apply { complete() }
         return viewModelScope.launch {
             val s = store.settings.first()
-            if (!moveExisting) pin(affectedRows(key, s.folderRules), s)
+            if (!moveExisting) pin(affectedRows(key, s.folderRules, folder, s), s)
             store.update { cur ->
                 cur.copy(folderRules = cur.folderRules.filterKeys { !it.equals(key, ignoreCase = true) } + (key to folder))
             }
@@ -184,7 +200,7 @@ class SettingsViewModel(
         val target = PhoneFolders.normalise(path)
         val keys = s.folderRules.keys.filter { PhoneFolders.normalise(it).equals(target, ignoreCase = true) }
         if (keys.isEmpty()) return@launch
-        if (!moveBack) pin(affectedRows(path, s.folderRules), s)
+        if (!moveBack) pin(affectedRows(path, s.folderRules, null, s), s)
         store.update { cur -> cur.copy(folderRules = cur.folderRules - keys.toSet()) }
         if (moveBack) runNowFromSettings()
     }

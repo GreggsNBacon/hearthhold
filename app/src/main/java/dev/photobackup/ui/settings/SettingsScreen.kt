@@ -114,7 +114,7 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
             } else {
                 RuleNameEntry(path, s.folderRules.values.distinct().sortedBy { it.lowercase() }, viewModel) { name ->
                     scope.launch {
-                        val n = viewModel.countOnDrive(path)
+                        val n = viewModel.countOnDrive(path, name)
                         if (n == 0) {
                             viewModel.addRule(path, name, moveExisting = false)
                             rulePath = null; addingRule = false
@@ -314,6 +314,7 @@ private fun FolderRulesSection(s: AppSettings, onAdd: () -> Unit, onRemove: (Str
 private fun RuleNameEntry(path: String, existing: List<String>, vm: SettingsViewModel, onSave: (String) -> Unit) {
     var name by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(path.removeSuffix("/"), style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(
@@ -326,9 +327,9 @@ private fun RuleNameEntry(path: String, existing: List<String>, vm: SettingsView
                 for (e in existing) AssistChip(onClick = { name = e; error = null }, label = { Text(e) })
             }
         }
-        Button(onClick = {
+        Button(enabled = !busy, onClick = {
             val err = vm.nameError(name)
-            if (err != null) error = err else onSave(name)
+            if (err != null) error = err else { busy = true; onSave(name) }
         }) { Text("Save rule") }
     }
 }

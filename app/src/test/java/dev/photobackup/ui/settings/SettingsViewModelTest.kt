@@ -192,7 +192,7 @@ class SettingsViewModelTest {
     @Test fun addRuleWithoutMovingPinsExistingRows() = runBlocking {
         seedRows()
         val vm = ruleVm()
-        assertEquals(2, vm.countOnDrive("Pictures/WhatsApp"))
+        assertEquals(2, vm.countOnDrive("Pictures/WhatsApp", "Family"))
         vm.addRule("Pictures/WhatsApp", "Family", moveExisting = false).join()
         assertEquals(mapOf("Pictures/WhatsApp/" to "Family"), settings.settings.first().folderRules)
         assertEquals(mapOf(1L to "WhatsApp", 2L to "Sent"), assigns.rows.value.mapValues { it.value.folder })
@@ -242,13 +242,13 @@ class SettingsViewModelTest {
         seedRows()
         val vm = ruleVm()
         vm.addRule("Pictures/WhatsApp/Sent/", "Out", moveExisting = true).join()
-        assertEquals(1, vm.countOnDrive("Pictures/WhatsApp/")) // row 2 belongs to the deeper rule
+        assertEquals(1, vm.countOnDrive("Pictures/WhatsApp/", "Family")) // row 2 belongs to the deeper rule
     }
 
     @Test fun rowsWithAHandPickedFolderAreNotCounted() = runBlocking {
         seedRows()
         assigns.set(FolderAssignment(1, "Mine"))
-        assertEquals(1, ruleVm().countOnDrive("Pictures/WhatsApp/"))
+        assertEquals(1, ruleVm().countOnDrive("Pictures/WhatsApp/", "Family"))
     }
 
     @Test fun badNamesAreRejected() = runBlocking {
@@ -259,5 +259,21 @@ class SettingsViewModelTest {
         }
         assertEquals(emptyMap<String, String>(), settings.settings.first().folderRules)
         assertNull(vm.nameError("Family"))
+    }
+
+    @Test fun rowsOutsideTheCurrentRootAreNotCountedOrPinned() = runBlocking {
+        seedRows()
+        ledger.upsert(row(5, "Pictures/WhatsApp/", "Old\\Dev\\WhatsApp\\2026\\5.jpg"))
+        ledger.upsert(row(6, "Pictures/WhatsApp/", "Photos\\Dev\\WhatsApp\\07\\6.jpg")) // old YYYY/MM layout
+        val vm = ruleVm()
+        assertEquals(2, vm.countOnDrive("Pictures/WhatsApp/", "Family"))
+        vm.addRule("Pictures/WhatsApp/", "Family", moveExisting = false).join()
+        assertEquals(setOf(1L, 2L), assigns.rows.value.keys)
+    }
+
+    @Test fun rowsAlreadyInTheTargetFolderAreNotCounted() = runBlocking {
+        seedRows()
+        val vm = ruleVm()
+        assertEquals(1, vm.countOnDrive("Pictures/WhatsApp/", "whatsapp")) // row 1 stays; row 2 (Sent) would move
     }
 }
