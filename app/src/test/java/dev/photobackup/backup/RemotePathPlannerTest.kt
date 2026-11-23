@@ -47,6 +47,13 @@ class RemotePathPlannerTest {
 
     private fun dirFor(rel: String) = targetDir("B", "P", phone(dateTakenMs = ms(2026, 3, 14), relativePath = rel), UTC)
 
+    /** `.Bin` is reserved for the drive bin: a phone folder of that name never uploads into it. */
+    @Test fun phoneFolderNamedBinNeverUploadsIntoTheBin() {
+        assertEquals("_Bin", RemotePathPlanner.sourceFolder("DCIM/.Bin/"))
+        assertEquals("_bin", RemotePathPlanner.sourceFolder("DCIM/.bin/"))
+        assertEquals("B\\P\\_Bin\\2026", dirFor("Pictures/.Bin/"))
+    }
+
     @Test fun sourceFolderCamera() = assertEquals("B\\P\\Camera\\2026", dirFor("DCIM/Camera/"))
     @Test fun sourceFolderScreenshots() = assertEquals("B\\P\\Screenshots\\2026", dirFor("Pictures/Screenshots/"))
     @Test fun sourceFolderWhatsApp() = assertEquals("B\\P\\WhatsApp Images\\2026", dirFor("Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/"))

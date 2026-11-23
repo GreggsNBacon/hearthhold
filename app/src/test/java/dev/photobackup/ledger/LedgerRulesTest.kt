@@ -25,6 +25,12 @@ class LedgerRulesTest {
         assertFalse(LedgerRules.isSafeToRemove(entry(BINNED), phone()))
     }
 
+    /** A Junk row on its way to the bin is not waiting, even if the phone still lists the item. */
+    @Test fun binRequestedRowNeverNeedsUpload() {
+        assertFalse(LedgerRules.needsUpload(entry(REMOVED_FROM_PHONE).copy(binRequestedAt = 1), phone()))
+        assertTrue(LedgerRules.needsUpload(entry(REMOVED_FROM_PHONE), phone()))
+    }
+
     @Test fun safeOnlyWhenVerifiedAndUnchanged() {
         assertTrue(LedgerRules.isSafeToRemove(entry(VERIFIED), phone()))
         assertFalse(LedgerRules.isSafeToRemove(entry(PENDING), phone()))

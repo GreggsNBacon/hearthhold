@@ -301,6 +301,17 @@ class SettingsViewModelTest {
         assertNull(vm.nameError("Family"))
     }
 
+    @Test fun binRowsAreNotCountedOrPinned() = runBlocking {
+        seedRows()
+        ledger.upsert(row(5, "Pictures/WhatsApp/", "Photos\\Dev\\WhatsApp\\2026\\5.jpg", BackupStatus.REMOVED_FROM_PHONE).copy(binRequestedAt = 1))
+        ledger.upsert(row(6, "Pictures/WhatsApp/", "Photos\\Dev\\.Bin\\WhatsApp\\2026\\6.jpg", BackupStatus.BINNED).copy(binRequestedAt = 1))
+        ledger.upsert(row(7, "Pictures/WhatsApp/", "Photos\\Dev\\WhatsApp\\2026\\7.jpg", BackupStatus.BINNED).copy(binRequestedAt = 1))
+        val vm = ruleVm()
+        assertEquals(2, vm.countOnDrive("Pictures/WhatsApp/", "Family"))
+        vm.addRule("Pictures/WhatsApp/", "Family", moveExisting = false).join()
+        assertEquals(setOf(1L, 2L), assigns.rows.value.keys)
+    }
+
     @Test fun rowsOutsideTheCurrentRootAreNotCountedOrPinned() = runBlocking {
         seedRows()
         ledger.upsert(row(5, "Pictures/WhatsApp/", "Old\\Dev\\WhatsApp\\2026\\5.jpg"))

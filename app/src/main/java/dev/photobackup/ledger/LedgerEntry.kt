@@ -21,10 +21,18 @@ data class LedgerEntry(
     val updatedAtMs: Long,
     /** New drive path while a move is in flight (set before the rename, cleared after remotePath is updated). */
     val movingTo: String? = null,
-    /** When review asked for this item to go to the bin (before the move on the drive). */
+    /**
+     * When review's Junk asked for this item to go to the drive bin. Set together with REMOVED_FROM_PHONE; kept while
+     * BINNED; cleared by restore. A row with it set is a bin row: hidden from the Gallery, counts, Free up, folder
+     * reconcile, pinning and rule counts.
+     */
     val binRequestedAt: Long? = null,
-    /** Where the file sits in the drive's .Bin folder. */
+    /**
+     * The ORIGINAL drive path, where restore puts the file back (clash-safe). Recorded in the same write that sets
+     * movingTo when the bin move begins. [remotePath] is always the file's real current location (inside
+     * `<destination>\<device>\.Bin\` once binned).
+     */
     val binPath: String? = null,
-    /** When the file landed in the bin; auto-empty counts from here. */
+    /** When the row became BINNED; auto-empty deletes the file once this is more than 30 days ago. */
     val binnedAt: Long? = null,
 )

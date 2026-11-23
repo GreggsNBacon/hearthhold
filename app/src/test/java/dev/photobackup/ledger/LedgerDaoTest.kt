@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
@@ -128,5 +129,98 @@ class LedgerDaoTest {
         assertNull(e.lastError)
         assertEquals(9L, e.updatedAtMs)
         assertEquals(BackupStatus.REMOVED_FROM_PHONE, e.status)
+    }
+
+    // ---- bin ----
+
+    private fun junk(id: Long, path: String) =
+        entry(id, BackupStatus.REMOVED_FROM_PHONE).copy(remotePath = path, binRequestedAt = 7)
+
+    @Test fun withBinRequestListsOnlyWaitingJunkRows() = runBlocking {
+        dao.upsert(junk(1, "a\\1.jpg"))
+        dao.upsert(entry(2, BackupStatus.REMOVED_FROM_PHONE).copy(remotePath = "a\\2.jpg"))
+        dao.upsert(junk(3, "a\\3.jpg").copy(status = BackupStatus.BINNED))
+        assertEquals(listOf(1L), dao.withBinRequest().map { it.mediaId })
+    }
+
+    @Test fun beginBinMoveRecordsTargetAndOriginalTogether() = runBlocking {
+        dao.upsert(junk(1, "a\\1.jpg"))
+        dao.upsert(entry(2, BackupStatus.REMOVED_FROM_PHONE).copy(remotePath = "a\\2.jpg")) // no bin request
+        dao.upsert(junk(3, "a\\3.jpg").copy(movingTo = "x\\3.jpg"))
+        dao.upsert(junk(4, "a\\4.jpg"))
+        assertEquals(true, dao.beginBinMove(1, "a\\1.jpg", "b\\1.jpg", 5))
+        assertEquals(false, dao.beginBinMove(2, "a\\2.jpg", "b\\2.jpg", 5))
+        assertEquals(false, dao.beginBinMove(3, "a\\3.jpg", "b\\3.jpg", 5))
+        assertEquals(false, dao.beginBinMove(4, "a\\other.jpg", "b\\4.jpg", 5))
+        val e = dao.get(1)!!
+        assertEquals("b\\1.jpg", e.movingTo)
+        assertEquals("a\\1.jpg", e.binPath)
+        assertEquals("a\\1.jpg", e.remotePath)
+        assertNull(dao.get(2)!!.binPath)
+        assertNull(dao.get(4)!!.movingTo)
+    }
+
+    @Test fun markBinnedOnlyWhenSettledAtThatPath() = runBlocking {
+        dao.upsert(junk(1, "b\\1.jpg").copy(binPath = "a\\1.jpg"))
+        dao.upsert(junk(2, "b\\2.jpg")) // no binPath
+        dao.upsert(junk(3, "b\\3.jpg").copy(binPath = "a\\3.jpg", movingTo = "c\\3.jpg"))
+        assertEquals(true, dao.markBinned(1, "b\\1.jpg", 8))
+        assertEquals(false, dao.markBinned(1, "b\\1.jpg", 8)) // already BINNED
+        assertEquals(false, dao.markBinned(2, "b\\2.jpg", 8))
+        assertEquals(false, dao.markBinned(3, "b\\3.jpg", 8))
+        val e = dao.get(1)!!
+        assertEquals(BackupStatus.BINNED, e.status)
+        assertEquals(8L, e.binnedAt)
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, dao.get(2)!!.status)
+    }
+
+    @Test fun finishRestoreClearsTheBinColumnsInOneWrite() = runBlocking {
+        val b = junk(1, "b\\1.jpg").copy(status = BackupStatus.BINNED, binPath = "a\\1.jpg", binnedAt = 3)
+        dao.upsert(b.copy(movingTo = "a\\1 (1).jpg", lastError = "e"))
+        dao.upsert(b.copy(mediaId = 2))
+        assertEquals(true, dao.finishRestore(1, "a\\1 (1).jpg", 9))
+        assertEquals(false, dao.finishRestore(2, "a\\1.jpg", 9)) // no restore recorded
+        val e = dao.get(1)!!
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, e.status)
+        assertEquals("a\\1 (1).jpg", e.remotePath)
+        assertNull(e.movingTo); assertNull(e.lastError)
+        assertNull(e.binRequestedAt); assertNull(e.binPath); assertNull(e.binnedAt)
+        assertEquals(BackupStatus.BINNED, dao.get(2)!!.status)
+    }
+
+    @Test fun cancelBinRequestOnlyForWaitingRows() = runBlocking {
+        dao.upsert(junk(1, "a\\1.jpg"))
+        dao.upsert(junk(2, "a\\2.jpg").copy(movingTo = "b\\2.jpg"))
+        dao.upsert(junk(3, "b\\3.jpg").copy(status = BackupStatus.BINNED))
+        assertEquals(true, dao.cancelBinRequest(1, 4))
+        assertEquals(false, dao.cancelBinRequest(2, 4))
+        assertEquals(false, dao.cancelBinRequest(3, 4))
+        assertNull(dao.get(1)!!.binRequestedAt)
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, dao.get(1)!!.status)
+        assertEquals(7L, dao.get(2)!!.binRequestedAt)
+    }
+
+    @Test fun deleteBinnedOnlyDeletesASettledBinnedRowAtThatPath() = runBlocking {
+        dao.upsert(junk(1, "b\\1.jpg").copy(status = BackupStatus.BINNED))
+        dao.upsert(junk(2, "b\\2.jpg")) // waiting, not BINNED
+        dao.upsert(junk(3, "b\\3.jpg").copy(status = BackupStatus.BINNED, movingTo = "a\\3.jpg"))
+        assertEquals(false, dao.deleteBinned(1, "b\\other.jpg"))
+        assertEquals(true, dao.deleteBinned(1, "b\\1.jpg"))
+        assertEquals(false, dao.deleteBinned(2, "b\\2.jpg"))
+        assertEquals(false, dao.deleteBinned(3, "b\\3.jpg"))
+        assertNull(dao.get(1))
+        assertNotNull(dao.get(2)); assertNotNull(dao.get(3))
+    }
+
+    /** Bin rows (waiting or BINNED) are neither backed up nor waiting on the home screen. */
+    @Test fun observeCountsLeavesBinRowsOut() = runBlocking {
+        dao.upsert(entry(1, BackupStatus.VERIFIED))
+        dao.upsert(entry(2, BackupStatus.REMOVED_FROM_PHONE))
+        dao.upsert(junk(3, "a\\3.jpg"))
+        dao.upsert(junk(4, "b\\4.jpg").copy(status = BackupStatus.BINNED))
+        assertEquals(
+            mapOf(BackupStatus.VERIFIED to 1, BackupStatus.REMOVED_FROM_PHONE to 1),
+            dao.observeCounts().first(),
+        )
     }
 }

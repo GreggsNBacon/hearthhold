@@ -21,7 +21,8 @@ data class BackupCounts(val waiting: Int, val tooBig: Int)
  * - `VERIFIED` but no longer on the phone (deleted outside the app, or its folder was turned off) → [Location.DRIVE]
  * - phone item with any other status, or not in the ledger → [Location.PHONE]
  * Each item carries its ledger status and last error (for the Gallery badges).
- * Ledger rows that are neither on the phone nor (with a remote path) on the drive are left out.
+ * Ledger rows that are neither on the phone nor (with a remote path) on the drive are left out, and so are bin rows
+ * (binRequestedAt set, or BINNED): the Bin screen lists those.
  * Sorted newest first. Pure, so it runs off the main thread and in JVM tests.
  */
 object GalleryMerge {
@@ -35,6 +36,8 @@ object GalleryMerge {
             val e = byId[m.mediaId]
             // Listed as a drive item from the ledger below.
             if (e?.status == BackupStatus.REMOVED_FROM_PHONE && e.remotePath != null) continue
+            // Bin rows (Junk waiting for the bin, or binned) are shown on the Bin screen only.
+            if (e != null && (e.binRequestedAt != null || e.status == BackupStatus.BINNED)) continue
             onPhone += m.mediaId
             // Only a backup of the phone file as it is now counts (an edited photo is waiting again).
             val both = e != null && e.remotePath != null && LedgerRules.isSafeToRemove(e, m)
@@ -55,6 +58,7 @@ object GalleryMerge {
             if (e.mediaId in onPhone) continue
             val remote = e.remotePath ?: continue
             if (e.status != BackupStatus.REMOVED_FROM_PHONE && e.status != BackupStatus.VERIFIED) continue
+            if (e.binRequestedAt != null) continue
             out += GalleryItem(
                 key = key(e.mediaId),
                 displayName = e.displayName,

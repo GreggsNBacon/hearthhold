@@ -362,6 +362,21 @@ class GalleryViewModelTest {
         assertNull(vm.notice.value)
     }
 
+    @Test fun folderNamesNeverOfferTheBinOrBinRows() {
+        ledger.value = listOf(
+            entry(1, BackupStatus.BINNED, 10).copy(remotePath = "Backups\\Pixel 7\\.Bin\\Junk\\2024\\a.jpg"),
+            entry(2, BackupStatus.VERIFIED, 10).copy(remotePath = "Backups\\Pixel 7\\.Bin\\2024\\b.jpg"),
+            entry(3, BackupStatus.REMOVED_FROM_PHONE, 10)
+                .copy(remotePath = "Backups\\Pixel 7\\Waiting\\2024\\c.jpg", binRequestedAt = 1),
+            entry(4, BackupStatus.BINNED, 10).copy(remotePath = "Backups\\Pixel 7\\Old\\2024\\d.jpg"),
+            entry(5, BackupStatus.VERIFIED, 10).copy(remotePath = "Backups\\Pixel 7\\Dog\\2024\\e.jpg"),
+        )
+        val vm = foldersVm(FakeAssignments())
+        var names = emptyList<String>()
+        kotlinx.coroutines.runBlocking { names = vm.folderNames() }
+        assertEquals(listOf("Dog"), names)
+    }
+
     @Test fun folderNamesSurviveDatabaseFailuresWithAFixedNotice() {
         var collects = 0
         val flaky = kotlinx.coroutines.flow.flow {

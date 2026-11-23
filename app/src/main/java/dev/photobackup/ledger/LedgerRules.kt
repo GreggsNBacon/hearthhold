@@ -11,6 +11,7 @@ object LedgerRules {
         existing == null -> true
         existing.status == BackupStatus.VERIFIED -> changed(existing, phone)
         existing.status == BackupStatus.BINNED -> false
+        existing.binRequestedAt != null -> false // Junk on its way to the bin: not waiting
         else -> true
     }
 

@@ -19,7 +19,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
@@ -27,7 +26,6 @@ import java.io.FileNotFoundException
 import java.io.IOException
 import java.io.InputStream
 import java.time.ZoneId
-import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
 fun interface LocalOpener {
@@ -43,8 +41,12 @@ data class BackupSettings(val destination: String, val deviceName: String, val z
  * Safety rules:
  * - Never overwrites: uploads go to a fresh `.part` and are renamed onto a name that does not exist.
  * - Only marks VERIFIED after the remote SHA-256 matches the local SHA-256.
- * - Only ever deletes the item's own `.part` (tracked in the ledger) or a just-renamed copy that
- *   failed verification.
+ * - Only ever deletes the item's own `.part` (tracked in the ledger), a just-renamed copy that
+ *   failed verification, or (auto-empty, through [BinFiles]) a BINNED file inside the current `<dest>\<device>\.Bin\`
+ *   binned more than 30 days ago.
+ *
+ * Run order: connect, leftover cleanup, move recovery, bin moves (review's Junk), auto-empty, folder reconcile, uploads,
+ * then a late bin + reconcile pass for requests made during the run.
  *
  * Any [RemoteException] (auth, unreachable, share missing, SMB1-only, drive full) stops the run and
  * leaves the in-flight row as-is for the next run's leftover cleanup. Other IOExceptions fail the
@@ -98,6 +100,7 @@ class BackupEngine(
         const val LEFTOVER_ERROR = "Couldn't remove an unfinished copy on the drive — will try again"
         const val MOVE_ERROR = "Couldn't move to the chosen folder — will try again"
         const val MOVE_CONFLICT_ERROR = "An interrupted move left two files with this name — kept the original"
+        const val BIN_MOVE_ERROR = "Couldn't move to the bin on the drive — will try again"
 
         /**
          * The text stored as an item's lastError (shown in the Gallery's failed-item dialog). Never the exception
@@ -136,13 +139,11 @@ class BackupEngine(
         var bytesUploaded = 0L
     }
 
-    /** Target names (and their `.part`), lowercase since SMB names are case-insensitive, held by in-flight items. */
-    private val reserved = mutableSetOf<String>()
+    /** Moves and the target-name reservations shared by moves and uploads (see [DriveMover]). */
+    private val mover = DriveMover(store, ledger, clock)
+    private val nameLock get() = mover.nameLock
 
-    /** Serialises "is this name free?" checks with the reservation that follows. */
-    private val nameLock = Mutex()
-
-    private fun key(path: String) = path.lowercase(Locale.ROOT)
+    private val root = DrivePaths.deviceRoot(settings.destination, settings.deviceName)
 
     suspend fun run(
         items: List<PhoneMedia>,
@@ -165,9 +166,13 @@ class BackupEngine(
 
         // 2b. Move drive files into their desired folder (every run, even with nothing to upload), after finishing
         // any move a crash interrupted.
+        // Then review's Junk goes into the bin, and bin files older than 30 days are deleted.
         val unsettled: Set<Long>
+        val binFailed: Set<Long>
         val moves = try {
             unsettled = recoverMoves()
+            binFailed = binMoves(unsettled)
+            autoEmpty()
             reconcile(unsettled, onMoving)
         } catch (e: RemoteException) {
             return@withContext BackupResult.Stopped(e)
@@ -201,6 +206,7 @@ class BackupEngine(
         // run, or found the lock held) happen now instead of waiting for the next run. Rows that failed or could not
         // be settled earlier in this run are not tried again.
         val lateMoves = try {
+            binMoves(unsettled + binFailed)
             reconcile(unsettled + moves.failedIds, onMoving)
         } catch (e: RemoteException) {
             return@withContext BackupResult.Stopped(e)
@@ -306,6 +312,8 @@ class BackupEngine(
      * - only the old path: the rename never happened, forget the move;
      * - both: keep the old path, flag a conflict;
      * - neither (or the new path holds something else): leave the row as it is, flag an error.
+     * A BINNED row found only at the new path was being restored: [LedgerStore.finishRestore] completes the restore.
+     * A bin move found only at the new path just points the row at it; [binMoves] then marks it BINNED.
      * Returns the rows not settled cleanly; this run's moves leave them alone. A path still recorded in movingTo stays
      * reserved for the whole run, so no move or upload takes that name meanwhile.
      */
@@ -323,7 +331,14 @@ class BackupEngine(
                 if (e is RemoteException) throw e
                 ledger.setLastError(row.mediaId, MOVE_ERROR, clock())
                 unsettled += row.mediaId
-                synchronized(reserved) { reserved += key(to) }
+                mover.reserveExact(to)
+                continue
+            }
+            // An interrupted restore (BinRepository) whose rename landed: finish it, so the row leaves the bin.
+            if (row.status == BackupStatus.BINNED && !oldExists && newEntry != null &&
+                newEntry.sizeBytes == row.sizeBytes
+            ) {
+                if (!ledger.finishRestore(row.mediaId, to, clock())) unsettled += row.mediaId
                 continue
             }
             val priorMoveError = row.lastError == MOVE_ERROR || row.lastError == MOVE_CONFLICT_ERROR
@@ -338,7 +353,7 @@ class BackupEngine(
                 else -> row.copy(lastError = MOVE_ERROR)
             }
             if (fixed.lastError == MOVE_CONFLICT_ERROR || fixed.lastError == MOVE_ERROR) unsettled += row.mediaId
-            fixed.movingTo?.let { synchronized(reserved) { reserved += key(it) } }
+            fixed.movingTo?.let { mover.reserveExact(it) }
             ledger.endMove(row.mediaId, fixed.remotePath, fixed.movingTo, fixed.lastError, clock())
         }
         return unsettled
@@ -351,7 +366,6 @@ class BackupEngine(
      * [RemoteException] stops the run.
      */
     private suspend fun reconcile(skip: Set<Long>, onMoving: (Int) -> Unit): Moves {
-        val root = DrivePaths.deviceRoot(settings.destination, settings.deviceName)
         val rows = (ledger.byStatus(BackupStatus.VERIFIED) + ledger.byStatus(BackupStatus.REMOVED_FROM_PHONE))
             .sortedBy { it.mediaId }
         val todo = mutableListOf<Triple<LedgerEntry, DriveFile, String>>()
@@ -372,7 +386,16 @@ class BackupEngine(
             coroutineContext.ensureActive()
             if (pauseFirst && itemPauseMs > 0) pause(itemPauseMs)
             pauseFirst = true
-            when (moveOne(row, row.remotePath!!, "$root\\$desired\\${file.year}", file.name)) {
+            val from = row.remotePath!!
+            val outcome = mover.move(
+                row, from, "$root\\$desired\\${file.year}", file.name, MOVE_ERROR,
+                begin = { target -> ledger.beginMove(row.mediaId, from, target, clock()) },
+                finish = { target ->
+                    ledger.endMove(row.mediaId, remotePath = target, movingTo = null, lastError = null, nowMs = clock())
+                    true
+                },
+            )
+            when (outcome) {
                 MoveOutcome.MOVED -> moved++
                 MoveOutcome.FAILED -> failed += row.mediaId
                 MoveOutcome.SKIPPED -> {}
@@ -384,72 +407,65 @@ class BackupEngine(
     /** How many moved, and which rows failed to move in this pass. */
     private class Moves(val moved: Int, val failedIds: Set<Long>)
 
-    private enum class MoveOutcome { MOVED, FAILED, SKIPPED }
-
     /**
-     * mkdirs, reserve a free name (clash scheme, never an existing name), record movingTo, rename, then record the new
-     * path. On failure the file stays where it was: movingTo is cleared only once a stat confirms the file is still at
-     * its recorded path (otherwise the next run's recovery settles it), and the row gets [MOVE_ERROR]. Every ledger
-     * write is a targeted update, so a concurrent change to another column (Free up's markRemoved) is never undone. A
-     * row whose path or marker changed after reconcile read it is skipped untouched (the next run plans it afresh).
+     * Moves review's Junk (REMOVED_FROM_PHONE rows with binRequestedAt) into `<root>\.Bin\<folder>\<year>\<name>` with
+     * the movingTo sequence: [LedgerStore.beginBinMove] records movingTo and binPath (the original path) in one write,
+     * then the rename, endMove, and a conditional mark BINNED (binnedAt = now). A row already sitting in the current bin
+     * (a crash between the rename and the mark) is just marked. Rows not in today's shape under the current root (old
+     * layout, destination or device name changed) are left alone; so are rows in [skip] and rows with a move or
+     * `.part` pending. Returns the rows that failed. A [RemoteException] stops the run.
      */
-    private suspend fun moveOne(row: LedgerEntry, from: String, dir: String, name: String): MoveOutcome {
-        var target: String? = null
-        var renameTried = false
-        var keepReserved = false
-        try {
-            store.mkdirs(dir)
-            target = reserveFreeName(dir, name)
-            if (target == null) {
-                ledger.setLastError(row.mediaId, MOVE_ERROR, clock())
-                return MoveOutcome.FAILED
+    private suspend fun binMoves(skip: Set<Long>): Set<Long> {
+        val failed = mutableSetOf<Long>()
+        var pauseFirst = false
+        for (row in ledger.withBinRequest().sortedBy { it.mediaId }) {
+            coroutineContext.ensureActive()
+            if (row.mediaId in skip || row.movingTo != null || row.partPath != null) continue
+            val from = row.remotePath ?: continue
+            if (DrivePaths.isInBin(from, root)) {
+                if (row.binPath != null) ledger.markBinned(row.mediaId, from, clock())
+                continue
             }
-            if (!ledger.beginMove(row.mediaId, from, target, clock())) return MoveOutcome.SKIPPED
-            renameTried = true
-            store.rename(from, target)
-            ledger.endMove(row.mediaId, remotePath = target, movingTo = null, lastError = null, nowMs = clock())
-            return MoveOutcome.MOVED
-        } catch (e: IOException) {
-            if (e is RemoteException) throw e
-            if (!renameTried) {
-                ledger.setLastError(row.mediaId, MOVE_ERROR, clock())
-                return MoveOutcome.FAILED
-            }
-            val stillThere = try {
+            val (dir, name) = DrivePaths.binTarget(from, root) ?: continue
+            if (pauseFirst && itemPauseMs > 0) pause(itemPauseMs)
+            pauseFirst = true
+            val there = try {
                 store.stat(from)?.isDirectory == false
-            } catch (s: IOException) {
-                if (s is RemoteException) throw s
+            } catch (e: IOException) {
+                if (e is RemoteException) throw e
                 false
             }
-            // Still recorded in movingTo: keep the name reserved for the rest of the run, as recovery does.
-            if (!stillThere) keepReserved = true
-            ledger.endMove(
-                row.mediaId,
-                remotePath = from,
-                movingTo = if (stillThere) null else target,
-                lastError = MOVE_ERROR,
-                nowMs = clock(),
+            if (!there) {
+                ledger.setLastError(row.mediaId, BIN_MOVE_ERROR, clock())
+                failed += row.mediaId
+                continue
+            }
+            val outcome = mover.move(
+                row, from, dir, name, BIN_MOVE_ERROR,
+                begin = { target -> ledger.beginBinMove(row.mediaId, from, target, clock()) },
+                finish = { target ->
+                    ledger.endMove(row.mediaId, remotePath = target, movingTo = null, lastError = null, nowMs = clock())
+                    // If this mark is lost (crash), the next run sees the row in the bin and marks it then.
+                    ledger.markBinned(row.mediaId, target, clock())
+                    true
+                },
             )
-            return MoveOutcome.FAILED
-        } finally {
-            if (!keepReserved) target?.let { release(it) }
+            if (outcome == MoveOutcome.FAILED) failed += row.mediaId
         }
+        return failed
     }
 
-    /** First name in [dir] (clash scheme) that exists neither on the drive (nor its `.part`) nor in [reserved]. */
-    private suspend fun reserveFreeName(dir: String, name: String): String? {
-        for (n in 0..MAX_CLASH) {
-            val candidate = "$dir\\" + if (n == 0) name else RemotePathPlanner.clashName(name, n)
-            val part = RemotePathPlanner.partName(candidate)
-            val claimed = nameLock.withLock {
-                val taken = synchronized(reserved) { key(candidate) in reserved || key(part) in reserved }
-                if (taken || store.stat(candidate) != null || store.stat(part) != null) return@withLock false
-                synchronized(reserved) { reserved += key(candidate); reserved += key(part) }
-                true
-            }
-            if (claimed) return candidate
+    /**
+     * Deletes bin files BINNED more than 30 days ago (strictly), through [BinFiles.empty]: only paths inside the
+     * current `<root>\.Bin\`, never anything else. A failed delete keeps the row for the next run.
+     */
+    private suspend fun autoEmpty() {
+        val now = clock()
+        for (row in ledger.byStatus(BackupStatus.BINNED).sortedBy { it.mediaId }) {
+            coroutineContext.ensureActive()
+            if (!BinFiles.isExpired(row, now)) continue
+            BinFiles.empty(row, root, store, ledger) { assignments?.clear(it) }
         }
-        return null
     }
 
     private suspend fun processItem(
@@ -493,11 +509,10 @@ class BackupEngine(
                 val part = RemotePathPlanner.partName(candidate)
                 var found: RemoteEntry? = null
                 val claimed = nameLock.withLock {
-                    val taken = synchronized(reserved) { key(candidate) in reserved || key(part) in reserved }
-                    if (taken) return@withLock false
+                    if (mover.isReserved(candidate)) return@withLock false
                     found = store.stat(candidate)
                     if (found != null || store.stat(part) != null) return@withLock false
-                    synchronized(reserved) { reserved += key(candidate); reserved += key(part) }
+                    mover.reserve(candidate)
                     true
                 }
                 if (claimed) {
@@ -525,12 +540,7 @@ class BackupEngine(
         }
     }
 
-    private fun release(candidate: String) {
-        synchronized(reserved) {
-            reserved.remove(key(candidate))
-            reserved.remove(key(RemotePathPlanner.partName(candidate)))
-        }
-    }
+    private fun release(candidate: String) = mover.release(candidate)
 
     /** Steps 5-7 for a reserved [final] name: upload to `.part`, rename, verify. */
     private suspend fun uploadTo(

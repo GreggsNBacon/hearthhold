@@ -64,6 +64,16 @@ class GalleryRepositoryTest {
         assertEquals(2000L, it.dateMs)
     }
 
+    @Test fun binRowsAreHidden() {
+        val waiting = ledger(1, BackupStatus.REMOVED_FROM_PHONE).copy(binRequestedAt = 5)
+        val binned = ledger(2, BackupStatus.BINNED, remote = "Photos\\Pixel\\.Bin\\Camera\\2026\\IMG_2.jpg")
+            .copy(binRequestedAt = 5, binnedAt = 6)
+        assertTrue(GalleryMerge.merge(emptyList(), listOf(waiting, binned)).isEmpty())
+        // Even if the phone still lists the item, a Junk row is not offered as a phone photo waiting for backup.
+        assertTrue(GalleryMerge.merge(listOf(phone(1)), listOf(waiting)).isEmpty())
+        assertEquals(0, GalleryMerge.counts(listOf(phone(1), phone(2)), listOf(waiting, binned)).waiting)
+    }
+
     @Test fun pendingIsPhoneOnly() {
         val items = GalleryMerge.merge(listOf(phone(3)), listOf(ledger(3, BackupStatus.PENDING, remote = null)))
         val it = items.single()

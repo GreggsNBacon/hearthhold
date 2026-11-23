@@ -1,5 +1,6 @@
 package dev.photobackup.backup
 
+import dev.photobackup.media.FolderRules
 import dev.photobackup.media.PhoneMedia
 import java.time.Instant
 import java.time.ZoneId
@@ -18,10 +19,14 @@ object RemotePathPlanner {
         return parts.filter { it.isNotEmpty() }.joinToString("\\")
     }
 
-    /** The default folder segment: the phone folder's own name, sanitised. */
+    /**
+     * The default folder segment: the phone folder's own name, sanitised. A phone folder named `.Bin` becomes `_Bin`:
+     * that name is reserved for the drive bin.
+     */
     fun sourceFolder(relativePath: String): String {
         val last = relativePath.split('/').lastOrNull { it.isNotBlank() } ?: return "Other"
-        return sanitise(last)
+        val s = sanitise(last)
+        return if (s.equals(FolderRules.BIN_FOLDER, ignoreCase = true)) "_" + s.substring(1) else s
     }
 
     fun sanitise(name: String): String {

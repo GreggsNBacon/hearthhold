@@ -55,7 +55,61 @@ interface LedgerDao : LedgerStore {
     )
     override suspend fun endMove(mediaId: Long, remotePath: String?, movingTo: String?, lastError: String?, nowMs: Long)
 
-    @Query("SELECT status AS status, COUNT(*) AS n FROM LedgerEntry GROUP BY status")
+    @Query("SELECT * FROM LedgerEntry WHERE status = 'REMOVED_FROM_PHONE' AND binRequestedAt IS NOT NULL")
+    override suspend fun withBinRequest(): List<LedgerEntry>
+
+    @Query(
+        "UPDATE LedgerEntry SET movingTo = :target, binPath = :from, updatedAtMs = :nowMs " +
+            "WHERE mediaId = :mediaId AND status = 'REMOVED_FROM_PHONE' AND binRequestedAt IS NOT NULL " +
+            "AND movingTo IS NULL AND partPath IS NULL AND remotePath = :from"
+    )
+    suspend fun beginBinMoveCount(mediaId: Long, from: String, target: String, nowMs: Long): Int
+
+    override suspend fun beginBinMove(mediaId: Long, from: String, target: String, nowMs: Long): Boolean =
+        beginBinMoveCount(mediaId, from, target, nowMs) > 0
+
+    @Query(
+        "UPDATE LedgerEntry SET status = 'BINNED', binnedAt = :nowMs, updatedAtMs = :nowMs " +
+            "WHERE mediaId = :mediaId AND status = 'REMOVED_FROM_PHONE' AND binRequestedAt IS NOT NULL " +
+            "AND binPath IS NOT NULL AND movingTo IS NULL AND remotePath = :path"
+    )
+    suspend fun markBinnedCount(mediaId: Long, path: String, nowMs: Long): Int
+
+    override suspend fun markBinned(mediaId: Long, path: String, nowMs: Long): Boolean =
+        markBinnedCount(mediaId, path, nowMs) > 0
+
+    @Query(
+        "UPDATE LedgerEntry SET status = 'REMOVED_FROM_PHONE', remotePath = :restoredPath, movingTo = NULL, " +
+            "lastError = NULL, binRequestedAt = NULL, binPath = NULL, binnedAt = NULL, updatedAtMs = :nowMs " +
+            "WHERE mediaId = :mediaId AND status = 'BINNED' AND movingTo = :restoredPath"
+    )
+    suspend fun finishRestoreCount(mediaId: Long, restoredPath: String, nowMs: Long): Int
+
+    override suspend fun finishRestore(mediaId: Long, restoredPath: String, nowMs: Long): Boolean =
+        finishRestoreCount(mediaId, restoredPath, nowMs) > 0
+
+    @Query(
+        "UPDATE LedgerEntry SET binRequestedAt = NULL, binPath = NULL, updatedAtMs = :nowMs " +
+            "WHERE mediaId = :mediaId AND status = 'REMOVED_FROM_PHONE' AND binRequestedAt IS NOT NULL " +
+            "AND movingTo IS NULL"
+    )
+    suspend fun cancelBinRequestCount(mediaId: Long, nowMs: Long): Int
+
+    override suspend fun cancelBinRequest(mediaId: Long, nowMs: Long): Boolean = cancelBinRequestCount(mediaId, nowMs) > 0
+
+    @Query(
+        "DELETE FROM LedgerEntry WHERE mediaId = :mediaId AND status = 'BINNED' AND movingTo IS NULL " +
+            "AND remotePath = :remotePath"
+    )
+    suspend fun deleteBinnedCount(mediaId: Long, remotePath: String): Int
+
+    override suspend fun deleteBinned(mediaId: Long, remotePath: String): Boolean =
+        deleteBinnedCount(mediaId, remotePath) > 0
+
+    @Query(
+        "SELECT status AS status, COUNT(*) AS n FROM LedgerEntry " +
+            "WHERE binRequestedAt IS NULL AND status != 'BINNED' GROUP BY status"
+    )
     fun observeStatusCounts(): Flow<List<StatusCount>>
 
     override fun observeCounts(): Flow<Map<BackupStatus, Int>> =

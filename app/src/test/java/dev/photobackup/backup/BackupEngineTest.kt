@@ -63,8 +63,41 @@ class MemoryLedger : LedgerStore {
             } ?: m
         }
     }
-    override fun observeCounts(): Flow<Map<BackupStatus, Int>> =
-        rows.map { m -> m.values.groupingBy { it.status }.eachCount() }
+    /** Applies [f] to the row atomically if [cond] holds; returns whether it changed. */
+    private fun updateIf(mediaId: Long, cond: (LedgerEntry) -> Boolean, f: (LedgerEntry) -> LedgerEntry?): Boolean {
+        var changed = false
+        rows.update { m ->
+            val e = m[mediaId]
+            changed = e != null && cond(e)
+            if (!changed) m else f(e!!)?.let { m + (mediaId to it) } ?: (m - mediaId)
+        }
+        return changed
+    }
+    private fun LedgerEntry.waitingForBin() = status == BackupStatus.REMOVED_FROM_PHONE && binRequestedAt != null
+    override suspend fun withBinRequest() = rows.value.values.filter { it.waitingForBin() }
+    override suspend fun beginBinMove(mediaId: Long, from: String, target: String, nowMs: Long) = updateIf(
+        mediaId, { it.waitingForBin() && it.movingTo == null && it.partPath == null && it.remotePath == from },
+    ) { it.copy(movingTo = target, binPath = from, updatedAtMs = nowMs) }
+    override suspend fun markBinned(mediaId: Long, path: String, nowMs: Long) = updateIf(
+        mediaId, { it.waitingForBin() && it.binPath != null && it.movingTo == null && it.remotePath == path },
+    ) { it.copy(status = BackupStatus.BINNED, binnedAt = nowMs, updatedAtMs = nowMs) }
+    override suspend fun finishRestore(mediaId: Long, restoredPath: String, nowMs: Long) = updateIf(
+        mediaId, { it.status == BackupStatus.BINNED && it.movingTo == restoredPath },
+    ) {
+        it.copy(
+            status = BackupStatus.REMOVED_FROM_PHONE, remotePath = restoredPath, movingTo = null, lastError = null,
+            binRequestedAt = null, binPath = null, binnedAt = null, updatedAtMs = nowMs,
+        )
+    }
+    override suspend fun cancelBinRequest(mediaId: Long, nowMs: Long) = updateIf(
+        mediaId, { it.waitingForBin() && it.movingTo == null },
+    ) { it.copy(binRequestedAt = null, binPath = null, updatedAtMs = nowMs) }
+    override suspend fun deleteBinned(mediaId: Long, remotePath: String) = updateIf(
+        mediaId, { it.status == BackupStatus.BINNED && it.movingTo == null && it.remotePath == remotePath },
+    ) { null }
+    override fun observeCounts(): Flow<Map<BackupStatus, Int>> = rows.map { m ->
+        m.values.filter { it.binRequestedAt == null && it.status != BackupStatus.BINNED }.groupingBy { it.status }.eachCount()
+    }
     override fun observeAll(): Flow<List<LedgerEntry>> =
         rows.map { m -> m.values.sortedByDescending { it.dateTakenMs } }
 }
