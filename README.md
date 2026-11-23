@@ -1,10 +1,41 @@
-# Hearthhold
+<p align="center">
+  <img src="docs/logo.svg" width="120" alt="Hearthhold logo">
+</p>
 
-Android app that backs up your phone's photos and videos over SMB2 to a USB drive plugged into your home router. No cloud, no accounts. Browse and play back from the drive in the app, and free up phone space once files are safely copied.
+<h1 align="center">Hearthhold</h1>
+
+<p align="center">
+  Back up your phone's photos and videos to the drive plugged into your home router.<br>
+  No cloud, no accounts: your pictures stay in your house.
+</p>
+
+<p align="center">
+  <a href="../../releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/GreggsNBacon/hearthhold?color=E89A52"></a>
+  <img alt="Android 11+" src="https://img.shields.io/badge/Android-11%2B-3DDC84?logo=android&logoColor=white">
+  <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-Jetpack%20Compose-7F52FF?logo=kotlin&logoColor=white">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/gallery.png" width="250" alt="Gallery with backup badges">
+  <img src="docs/screenshots/status.png" width="250" alt="Backup status">
+  <img src="docs/screenshots/settings.png" width="250" alt="Settings">
+</p>
+<p align="center"><sub>Screenshots use made-up demo data.</sub></p>
+
+## Features
+
+- **Automatic backup** of Camera, Screenshots and any folders you pick, over SMB2/3 on home Wi-Fi.
+- **Verified copies**: every file is read back and checked with SHA-256 before it counts as backed up. Nothing on the drive is ever overwritten.
+- **Free up space**: suggests old, big items; re-checks both copies by hash, then Android asks you to confirm the delete.
+- **Gallery** of phone and drive together, with a badge on each item showing where it lives.
+- **Viewer and player** for photos and videos, from the phone or straight from the drive, with loop and 0.25x–2x speed.
+- **Gentle on your router**: one file at a time by default, adjustable parallel uploads, optional overnight-only window.
+- **Organised drive**: `Device/Source folder/Year/`, with file dates set to when the photo was taken.
 
 ## Install
 
-- Enable USB debugging, then: `adb install app/build/outputs/apk/release/app-release.apk`
+- Download the APK from the [latest release](../../releases/latest) on your phone and open it (allow installs from your browser).
+- Or with USB debugging on: `adb install app/build/outputs/apk/release/app-release.apk`
 - Or copy the APK to the phone and open it (allow "install unknown apps" for your file manager).
 - Unsigned builds (`app-release-unsigned.apk`) must be signed before installing; see Build.
 
@@ -70,6 +101,8 @@ keyPassword=CHANGE_ME
 
 - With this file present the output is `app/build/outputs/apk/release/app-release.apk`; without it, `app-release-unsigned.apk`. If the file exists but one of the four keys is missing or empty, release builds stop with a message naming the missing key.
 - Release builds use R8 shrinking; keep rules are in `app/proguard-rules.pro`.
+- README screenshots are rendered from the real screens with demo data: `./gradlew testDebugUnitTest --tests "*ReadmeScreenshots*" -PscreenshotsDir=docs/screenshots`
+- Before each release, raise `versionCode` (and `versionName`) in `app/build.gradle.kts`, or phones won't install the update.
 
 ## Device test checklist
 

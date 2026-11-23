@@ -15,8 +15,8 @@ android {
         applicationId = "dev.photobackup"
         minSdk = 30
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.0.1"
     }
 
     // Optional release signing (owner-managed, gitignored). Only key NAMES are ever reported, never values.
@@ -68,6 +68,13 @@ android {
     }
     testOptions {
         unitTests.isIncludeAndroidResources = true
+        // README screenshots: ./gradlew testDebugUnitTest --tests "*ReadmeScreenshots*" -PscreenshotsDir=docs/screenshots
+        unitTests.all { test ->
+            (project.findProperty("screenshotsDir") as String?)?.let {
+                test.systemProperty("hh.screenshots.dir", rootProject.file(it).absolutePath)
+                test.systemProperty("robolectric.pixelCopyRenderMode", "hardware")
+            }
+        }
     }
 }
 
@@ -97,4 +104,7 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation("androidx.test:core:1.6.1")
     testImplementation(libs.androidx.work.testing)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
