@@ -32,7 +32,7 @@ object DrivePaths {
     }
 
     /** [parse] for a bare path: today's shape under [root], never in the `.Bin` folder. */
-    private fun parsePath(path: String, root: String): DriveFile? {
+    fun parsePath(path: String, root: String): DriveFile? {
         val prefix = "$root\\"
         if (!path.startsWith(prefix, ignoreCase = true)) return null
         val parts = path.substring(prefix.length).split('\\')

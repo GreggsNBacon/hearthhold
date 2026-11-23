@@ -3,6 +3,7 @@ package dev.photobackup.backup
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.ledger.LedgerStore
+import dev.photobackup.smb.RemoteEntry
 import dev.photobackup.smb.RemoteException
 import dev.photobackup.smb.RemoteStore
 import kotlinx.coroutines.sync.Mutex
@@ -12,17 +13,59 @@ import java.util.Locale
 
 enum class MoveOutcome { MOVED, FAILED, SKIPPED }
 
+/** What a failed [DriveMover.move] records on the item's row (main ledger or second copy list). */
+interface MoveRecorder {
+    /** The move failed before any rename was tried (folder, no free name): record the error only. */
+    suspend fun failed()
+
+    /**
+     * The rename to [target] (already recorded in movingTo) was tried and failed: point the row back at its old path,
+     * clear movingTo when [stillAtFrom] (a stat confirmed the file is still there), else keep [target] for the next
+     * run's recovery, and record the error.
+     */
+    suspend fun abandoned(target: String, stillAtFrom: Boolean)
+}
+
+/** [MoveRecorder] for a main ledger row: targeted writes only (setLastError / endMove). */
+class LedgerMoveRecorder(
+    private val ledger: LedgerStore,
+    private val mediaId: Long,
+    private val from: String,
+    private val error: String,
+    private val clock: () -> Long,
+) : MoveRecorder {
+    override suspend fun failed() = ledger.setLastError(mediaId, error, clock())
+    override suspend fun abandoned(target: String, stillAtFrom: Boolean) = ledger.endMove(
+        mediaId, remotePath = from, movingTo = if (stillAtFrom) null else target, lastError = error, nowMs = clock(),
+    )
+}
+
+/** What [DriveMover.pickName] found. */
+sealed interface NamePick {
+    /** A free name, reserved (name and `.part`) with its folder created; the caller releases it when done. */
+    class Free(val path: String) : NamePick
+
+    /** An existing file of the same size that the caller's check accepted (nothing reserved). */
+    class Existing(val path: String) : NamePick
+
+    /** The caller's check asked to stop (nothing reserved). */
+    data object Aborted : NamePick
+
+    /** No free name within the clash limit. */
+    data object NoName : NamePick
+}
+
+/** The answer of [DriveMover.pickName]'s check on an existing same-size file. */
+enum class NameCheck { ADOPT, NEXT, ABORT }
+
 /**
- * The one drive move mechanism (folder moves, bin moves, restores) and the name reservations it shares with uploads.
+ * The one drive move mechanism (folder moves, bin moves, restores, second-location folder moves) and the name
+ * reservations it shares with uploads. One instance per drive (store) per run.
  *
  * A target name (and its `.part`) is reserved under [nameLock] while the free-name check runs, so two moves or uploads
  * in the same folder can never pick the same name. Names are kept lowercase: SMB names are case-insensitive.
  */
-class DriveMover(
-    private val store: RemoteStore,
-    private val ledger: LedgerStore,
-    private val clock: () -> Long,
-) {
+class DriveMover(private val store: RemoteStore) {
     companion object {
         private const val MAX_CLASH = 10_000
     }
@@ -52,38 +95,81 @@ class DriveMover(
         reserved.remove(key(RemotePathPlanner.partName(path)))
     }
 
+    private class Claim(val claimed: Boolean, val found: RemoteEntry?)
+
+    /** Under [nameLock]: reserves [candidate] when neither it nor its `.part` exists on the drive or is reserved. */
+    private suspend fun tryClaim(candidate: String): Claim = nameLock.withLock {
+        if (isReserved(candidate)) return@withLock Claim(false, null)
+        val found = store.stat(candidate)
+        if (found != null || store.stat(RemotePathPlanner.partName(candidate)) != null) {
+            return@withLock Claim(false, found)
+        }
+        reserve(candidate)
+        Claim(true, null)
+    }
+
+    private fun candidate(dir: String, name: String, n: Int) =
+        "$dir\\" + if (n == 0) name else RemotePathPlanner.clashName(name, n)
+
     /** First name in [dir] (clash scheme) that exists neither on the drive (nor its `.part`) nor in [reserved]. */
     suspend fun reserveFreeName(dir: String, name: String): String? {
         for (n in 0..MAX_CLASH) {
-            val candidate = "$dir\\" + if (n == 0) name else RemotePathPlanner.clashName(name, n)
-            val part = RemotePathPlanner.partName(candidate)
-            val claimed = nameLock.withLock {
-                if (isReserved(candidate) || store.stat(candidate) != null || store.stat(part) != null) {
-                    return@withLock false
-                }
-                reserve(candidate)
-                true
-            }
-            if (claimed) return candidate
+            val candidate = candidate(dir, name, n)
+            if (tryClaim(candidate).claimed) return candidate
         }
         return null
     }
 
     /**
-     * mkdirs, reserve a free name (clash scheme, never an existing name), [begin] (a conditional ledger write that
-     * records movingTo; false = the row changed meanwhile, skip it untouched), rename, then [finish] (records the new
-     * path). On failure the file stays where it was: movingTo is cleared only once a stat confirms the file is still at
-     * [from] (otherwise the next run's recovery settles it), and the row gets [error]. Every ledger write is targeted,
+     * The upload name pick: walks the clash scheme in [dir]; the first name free on the drive and not reserved is
+     * reserved and [dir] created (the reservation is released again if that fails). An existing file of [sizeBytes] on
+     * the way is offered to [check] (run outside [nameLock]; it may hash): ADOPT returns it, ABORT stops, NEXT walks
+     * on. Never overwrites anything. IOExceptions propagate.
+     */
+    suspend fun pickName(
+        dir: String,
+        name: String,
+        sizeBytes: Long,
+        check: suspend (existing: String) -> NameCheck,
+    ): NamePick {
+        for (n in 0..MAX_CLASH) {
+            val candidate = candidate(dir, name, n)
+            val claim = tryClaim(candidate)
+            if (claim.claimed) {
+                try {
+                    store.mkdirs(dir)
+                } catch (e: Throwable) {
+                    release(candidate)
+                    throw e
+                }
+                return NamePick.Free(candidate)
+            }
+            val st = claim.found
+            if (st != null && !st.isDirectory && st.sizeBytes == sizeBytes) {
+                when (check(candidate)) {
+                    NameCheck.ADOPT -> return NamePick.Existing(candidate)
+                    NameCheck.ABORT -> return NamePick.Aborted
+                    NameCheck.NEXT -> {}
+                }
+            }
+        }
+        return NamePick.NoName
+    }
+
+    /**
+     * mkdirs, reserve a free name (clash scheme, never an existing name), [begin] (a conditional write that records
+     * movingTo; false = the row changed meanwhile, skip it untouched), rename, then [finish] (records the new path).
+     * On failure the file stays where it was: movingTo is cleared only once a stat confirms the file is still at
+     * [from] (otherwise the next run's recovery settles it), and [recorder] records the error. Every write is targeted,
      * so a concurrent change to another column is never undone. A [RemoteException] propagates (the caller stops); the
      * row then keeps movingTo for recovery. A false [finish] counts as failed (the row changed under the move; recovery
      * or the next attempt settles it).
      */
     suspend fun move(
-        row: LedgerEntry,
         from: String,
         dir: String,
         name: String,
-        error: String,
+        recorder: MoveRecorder,
         begin: suspend (target: String) -> Boolean,
         finish: suspend (target: String) -> Boolean,
     ): MoveOutcome {
@@ -94,7 +180,7 @@ class DriveMover(
             store.mkdirs(dir)
             target = reserveFreeName(dir, name)
             if (target == null) {
-                ledger.setLastError(row.mediaId, error, clock())
+                recorder.failed()
                 return MoveOutcome.FAILED
             }
             if (!begin(target)) return MoveOutcome.SKIPPED
@@ -108,7 +194,7 @@ class DriveMover(
         } catch (e: IOException) {
             if (e is RemoteException) throw e
             if (!renameTried) {
-                ledger.setLastError(row.mediaId, error, clock())
+                recorder.failed()
                 return MoveOutcome.FAILED
             }
             val stillThere = try {
@@ -119,13 +205,7 @@ class DriveMover(
             }
             // Still recorded in movingTo: keep the name reserved for the rest of the run, as recovery does.
             if (!stillThere) keepReserved = true
-            ledger.endMove(
-                row.mediaId,
-                remotePath = from,
-                movingTo = if (stillThere) null else target,
-                lastError = error,
-                nowMs = clock(),
-            )
+            recorder.abandoned(target!!, stillThere)
             return MoveOutcome.FAILED
         } finally {
             if (!keepReserved) target?.let { release(it) }

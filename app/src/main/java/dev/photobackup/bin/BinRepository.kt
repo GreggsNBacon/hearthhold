@@ -4,6 +4,7 @@ import dev.photobackup.backup.BackupLock
 import dev.photobackup.backup.BinFiles
 import dev.photobackup.backup.DriveMover
 import dev.photobackup.backup.DrivePaths
+import dev.photobackup.backup.LedgerMoveRecorder
 import dev.photobackup.backup.EmptyOutcome
 import dev.photobackup.backup.MoveOutcome
 import dev.photobackup.ledger.BackupStatus
@@ -59,7 +60,7 @@ class BinRepository(
 
     /** Puts each item back where it was (clash: `name (n).ext`), as drive-only. */
     suspend fun restore(ids: List<Long>): BinResult = withDrive { store, deviceRoot ->
-        val mover = DriveMover(store, ledger, clock)
+        val mover = DriveMover(store)
         tally(ids) { id -> restoreOne(id, store, mover, deviceRoot) }
     }
 
@@ -156,7 +157,8 @@ class BinRepository(
         val cut = original.lastIndexOf('\\')
         if (cut <= 0 || cut == original.length - 1) return false
         val outcome = mover.move(
-            row, from, original.substring(0, cut), original.substring(cut + 1), RESTORE_ERROR,
+            from, original.substring(0, cut), original.substring(cut + 1),
+            LedgerMoveRecorder(ledger, id, from, RESTORE_ERROR, clock),
             begin = { target -> ledger.beginMove(id, from, target, clock()) },
             finish = { target -> ledger.finishRestore(id, target, clock()) },
         )

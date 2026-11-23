@@ -36,6 +36,15 @@ interface SecondCopyDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(row: SecondCopy)
 
+    @Query("SELECT * FROM SecondCopy")
+    suspend fun all(): List<SecondCopy>
+
+    @Query("SELECT * FROM SecondCopy WHERE partPath IS NOT NULL")
+    suspend fun withPartPath(): List<SecondCopy>
+
+    @Query("UPDATE SecondCopy SET lastError = :error, updatedAtMs = :nowMs WHERE mediaId = :mediaId")
+    suspend fun setLastError(mediaId: Long, error: String?, nowMs: Long)
+
     @Query("SELECT * FROM SecondCopy WHERE status = :status")
     suspend fun byStatus(status: SecondStatus): List<SecondCopy>
 
@@ -57,6 +66,19 @@ interface SecondCopyDao {
             "updatedAtMs = :nowMs WHERE mediaId = :mediaId"
     )
     suspend fun endMove(mediaId: Long, remotePath: String?, movingTo: String?, lastError: String?, nowMs: Long)
+
+    @Query(
+        "UPDATE SecondCopy SET remotePath = :remotePath, movingTo = :movingTo, lastError = :lastError, " +
+            "updatedAtMs = :nowMs WHERE mediaId = :mediaId AND movingTo = :expected"
+    )
+    suspend fun endMoveIfCount(
+        mediaId: Long, expected: String, remotePath: String?, movingTo: String?, lastError: String?, nowMs: Long,
+    ): Int
+
+    /** [endMove] only while the row still records the move to [expected]; false = it changed meanwhile. */
+    suspend fun endMoveIf(
+        mediaId: Long, expected: String, remotePath: String?, movingTo: String?, lastError: String?, nowMs: Long,
+    ): Boolean = endMoveIfCount(mediaId, expected, remotePath, movingTo, lastError, nowMs) > 0
 
     @Query("DELETE FROM SecondCopy")
     suspend fun clear()

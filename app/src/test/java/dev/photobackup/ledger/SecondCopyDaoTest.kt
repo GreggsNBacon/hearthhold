@@ -69,6 +69,27 @@ class SecondCopyDaoTest {
         assertFalse(dao.beginMove(1, "B/a.jpg", "B/Dog/a.jpg", 9))
     }
 
+    @Test fun endMoveIfOnlyEndsTheExpectedMove() = runBlocking {
+        dao.upsert(row(1))
+        assertTrue(dao.beginMove(1, "B/a.jpg", "B/Dog/a.jpg", 9))
+        assertFalse(dao.endMoveIf(1, "B/Cat/a.jpg", "B/Cat/a.jpg", null, null, 10))
+        assertEquals("B/Dog/a.jpg", dao.get(1)!!.movingTo)
+        assertTrue(dao.endMoveIf(1, "B/Dog/a.jpg", "B/Dog/a.jpg", null, null, 11))
+        assertEquals("B/Dog/a.jpg", dao.get(1)!!.remotePath)
+        assertNull(dao.get(1)!!.movingTo)
+        assertFalse(dao.endMoveIf(1, "B/Dog/a.jpg", "B/x.jpg", null, null, 12)) // no move recorded any more
+    }
+
+    @Test fun withPartPathAllAndSetLastError() = runBlocking {
+        dao.upsert(row(1)); dao.upsert(row(2, SecondStatus.FAILED, null, "x.part"))
+        assertEquals(listOf(2L), dao.withPartPath().map { it.mediaId })
+        assertEquals(setOf(1L, 2L), dao.all().map { it.mediaId }.toSet())
+        dao.setLastError(1, "boom", 7)
+        assertEquals("boom", dao.get(1)!!.lastError)
+        assertEquals(7L, dao.get(1)!!.updatedAtMs)
+        assertEquals(SecondStatus.VERIFIED, dao.get(1)!!.status)
+    }
+
     @Test fun clearRemovesEverything() = runBlocking {
         dao.upsert(row(1)); dao.upsert(row(2))
         dao.clear()

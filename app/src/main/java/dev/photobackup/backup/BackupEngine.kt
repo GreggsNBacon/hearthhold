@@ -13,13 +13,11 @@ import dev.photobackup.smb.MSG_DRIVE_ERROR
 import dev.photobackup.smb.RemoteEntry
 import dev.photobackup.smb.RemoteException
 import dev.photobackup.smb.RemoteStore
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 import java.io.FileNotFoundException
@@ -60,7 +58,7 @@ data class BackupSettings(val destination: String, val deviceName: String, val z
  * requests over one session: message ids and credits are handed out under a lock and responses are matched by id).
  * With 1 it behaves exactly like a plain sequential loop. Concurrency rules:
  * - Leftover cleanup runs once, before any worker starts.
- * - A target name (and its `.part`) is reserved under [nameLock] while the free-name check runs, and released only
+ * - A target name (and its `.part`) is reserved under the name lock ([DriveMover]) while the free-name check runs, and released only
  *   after the rename (the name then exists on the drive) or after the item gave up on it. So two items with the
  *   same name in the same folder can never pick the same target.
  * - Each item reserves its size against the free space before it starts; the reservation is returned unless it
@@ -116,7 +114,6 @@ class BackupEngine(
         }
         const val DEFAULT_ITEM_PAUSE_MS = 2000L
         const val MAX_PARALLEL = 4
-        private const val MAX_CLASH = 10_000
     }
 
     private val workers = parallelUploads.coerceIn(1, MAX_PARALLEL)
@@ -142,8 +139,7 @@ class BackupEngine(
     }
 
     /** Moves and the target-name reservations shared by moves and uploads (see [DriveMover]). */
-    private val mover = DriveMover(store, ledger, clock)
-    private val nameLock get() = mover.nameLock
+    private val mover = DriveMover(store)
 
     private val root = DrivePaths.deviceRoot(settings.destination, settings.deviceName)
 
@@ -291,11 +287,9 @@ class BackupEngine(
     private suspend fun cleanLeftovers() {
         for (row in ledger.withPartPath()) {
             val part = row.partPath ?: continue
-            try {
-                if (store.stat(part) != null) store.delete(part)
+            if (DriveCopy.removeIfPresent(store, part)) {
                 ledger.upsert(row.copy(partPath = null, status = BackupStatus.PENDING, updatedAtMs = clock()))
-            } catch (e: IOException) {
-                if (e is RemoteException) throw e
+            } else {
                 // Keep partPath so the next run tries again.
                 ledger.upsert(
                     row.copy(
@@ -394,7 +388,8 @@ class BackupEngine(
             pauseFirst = true
             val from = row.remotePath!!
             val outcome = mover.move(
-                row, from, "$root\\$desired\\${file.year}", file.name, MOVE_ERROR,
+                from, "$root\\$desired\\${file.year}", file.name,
+                LedgerMoveRecorder(ledger, row.mediaId, from, MOVE_ERROR, clock),
                 begin = { target -> ledger.beginMove(row.mediaId, from, target, clock()) },
                 finish = { target ->
                     ledger.endMove(row.mediaId, remotePath = target, movingTo = null, lastError = null, nowMs = clock())
@@ -458,7 +453,7 @@ class BackupEngine(
                 continue
             }
             val outcome = mover.move(
-                row, from, dir, name, BIN_MOVE_ERROR,
+                from, dir, name, LedgerMoveRecorder(ledger, row.mediaId, from, BIN_MOVE_ERROR, clock),
                 begin = { target -> ledger.beginBinMove(row.mediaId, from, target, clock()) },
                 finish = { target ->
                     ledger.endMove(row.mediaId, remotePath = target, movingTo = null, lastError = null, nowMs = clock())
@@ -516,51 +511,38 @@ class BackupEngine(
 
     /**
      * Finds the first name that neither exists on the drive (nor its `.part`) nor is reserved by another in-flight
-     * item, and reserves it (name and `.part`) before creating the folder. Check-and-reserve runs under [nameLock];
-     * adoption hashing runs outside it.
+     * item, and reserves it (name and `.part`) before creating the folder ([DriveMover.pickName]). An identical
+     * existing file on the way is adopted; adoption hashing runs outside the name lock.
      */
     private suspend fun pickTarget(m: PhoneMedia, dir: String, name: String): Pick {
         var localSha: String? = null
-        try {
-            for (n in 0..MAX_CLASH) {
-                val candidate = "$dir\\" + if (n == 0) name else RemotePathPlanner.clashName(name, n)
-                val part = RemotePathPlanner.partName(candidate)
-                var found: RemoteEntry? = null
-                val claimed = nameLock.withLock {
-                    if (mover.isReserved(candidate)) return@withLock false
-                    found = store.stat(candidate)
-                    if (found != null || store.stat(part) != null) return@withLock false
-                    mover.reserve(candidate)
-                    true
-                }
-                if (claimed) {
-                    try {
-                        store.mkdirs(dir)
-                    } catch (e: Throwable) {
-                        release(candidate)
-                        throw e
-                    }
-                    return Pick.Target(candidate)
-                }
-                val st = found
-                if (st != null && !st.isDirectory && st.sizeBytes == m.sizeBytes) {
-                    val sha = localSha ?: (hashLocal(m) ?: return Pick.Done(missingOnPhone(m))).also { localSha = it }
-                    if (hashRemote(candidate) == sha) {
-                        ledger.upsert(entry(m, BackupStatus.VERIFIED, sha = sha, remote = candidate))
-                        return Pick.Done(Outcome.ADOPTED)
-                    }
+        val pick = try {
+            mover.pickName(dir, name, m.sizeBytes) { candidate ->
+                val sha = localSha ?: hashLocal(m)?.also { localSha = it }
+                when {
+                    sha == null -> NameCheck.ABORT
+                    DriveCopy.hash(store, candidate) == sha -> NameCheck.ADOPT
+                    else -> NameCheck.NEXT
                 }
             }
-            return Pick.Done(fail(m, NO_NAME_ERROR))
         } catch (e: IOException) {
             if (e is RemoteException) throw e
             return Pick.Done(fail(m, itemError(e)))
+        }
+        return when (pick) {
+            is NamePick.Free -> Pick.Target(pick.path)
+            is NamePick.Existing -> {
+                ledger.upsert(entry(m, BackupStatus.VERIFIED, sha = localSha, remote = pick.path))
+                Pick.Done(Outcome.ADOPTED)
+            }
+            NamePick.Aborted -> Pick.Done(missingOnPhone(m))
+            NamePick.NoName -> Pick.Done(fail(m, NO_NAME_ERROR))
         }
     }
 
     private fun release(candidate: String) = mover.release(candidate)
 
-    /** Steps 5-7 for a reserved [final] name: upload to `.part`, rename, verify. */
+    /** Steps 5-7 for a reserved [final] name: upload to `.part`, rename, verify ([DriveCopy.copyVerified]). */
     private suspend fun uploadTo(
         m: PhoneMedia,
         final: String,
@@ -577,72 +559,58 @@ class BackupEngine(
             return fail(m, PHONE_READ_ERROR)
         } ?: return missingOnPhone(m) // nothing written yet, so no .part to remove
 
-        val ctx = coroutineContext
-        var offered = 0L
-        var partCreated = false
-        val sha: String = try {
-            input.use { inp ->
-                store.openWrite(part).also { partCreated = true }.use { out ->
-                    Hashing.copyWithSha256(inp, out) { n ->
-                        ctx.ensureActive() // cancellable per chunk; row stays UPLOADING for cleanup
-                        offered += n
-                        synchronized(state.lock) {
-                            state.bytesDone += n
-                            onProgress(state.done, state.total, state.bytesDone)
-                        }
-                    }
+        // 6. Rename onto the final name (fails rather than overwrite), then clear partPath. 7. Verify by reading back.
+        // The phone must have delivered exactly the size it reported: checked before the rename, so a short copy
+        // never appears under the final name.
+        val result = DriveCopy.copyVerified(
+            store, input, part, final, m.sizeBytes,
+            onChunk = { n ->
+                synchronized(state.lock) {
+                    state.bytesDone += n
+                    onProgress(state.done, state.total, state.bytesDone)
                 }
+            },
+            afterRename = { sha -> ledger.upsert(entry(m, BackupStatus.UPLOADING, sha = sha, remote = final)) },
+        )
+        return when (result) {
+            is CopyResult.Verified -> {
+                ledger.upsert(entry(m, BackupStatus.VERIFIED, sha = result.sha, remote = final))
+                setDriveTime(m, final)
+                Outcome.UPLOADED
             }
-        } catch (e: IOException) {
-            if (!partCreated) {
+            is CopyResult.OpenFailed -> {
                 // openWrite itself failed: the .part (if any) is not ours, so stop tracking it.
+                val e = result.error
                 if (e is RemoteException) {
                     ledger.upsert(entry(m, BackupStatus.PENDING))
                     throw e
                 }
-                return fail(m, itemError(e))
+                fail(m, itemError(e))
             }
-            // smbj can't report the file system, and FAT32 overflow surfaces as a plain IOException
-            // or as DISK_FULL (Samba EFBIG / Windows FAT), so a failure right at the 4 GB mark means FAT32.
-            val nearLimit = m.sizeBytes > fat32MaxBytes &&
-                offered >= fat32MaxBytes && offered < fat32MaxBytes + fat32SlackBytes
-            val fat32 = nearLimit && when (e) {
-                is RemoteException.DriveFull -> state.freeAtConnect >= m.sizeBytes
-                is RemoteException -> false
-                else -> true
+            is CopyResult.WriteFailed -> {
+                val e = result.error
+                val offered = result.bytes
+                // smbj can't report the file system, and FAT32 overflow surfaces as a plain IOException
+                // or as DISK_FULL (Samba EFBIG / Windows FAT), so a failure right at the 4 GB mark means FAT32.
+                val nearLimit = m.sizeBytes > fat32MaxBytes &&
+                    offered >= fat32MaxBytes && offered < fat32MaxBytes + fat32SlackBytes
+                val fat32 = nearLimit && when (e) {
+                    is RemoteException.DriveFull -> state.freeAtConnect >= m.sizeBytes
+                    is RemoteException -> false
+                    else -> true
+                }
+                if (fat32) return failAndRemovePart(m, part, FAT32_ERROR)
+                if (e is RemoteException) throw e
+                failAndRemovePart(m, part, itemError(e))
             }
-            if (fat32) return failAndRemovePart(m, part, FAT32_ERROR)
-            if (e is RemoteException) throw e
-            return failAndRemovePart(m, part, itemError(e))
-        }
-
-        // The phone must have delivered exactly the size it reported. Checked before the rename, so a short copy
-        // never appears under the final name.
-        if (offered != m.sizeBytes) return failAndRemovePart(m, part, SIZE_ERROR)
-
-        // 6. Rename onto the final name (fails rather than overwrite), then clear partPath.
-        try {
-            store.rename(part, final)
-        } catch (e: IOException) {
-            if (e is RemoteException) throw e
-            return failAndRemovePart(m, part, itemError(e))
-        }
-        ledger.upsert(entry(m, BackupStatus.UPLOADING, sha = sha, remote = final))
-
-        // 7. Verify by reading the copy back.
-        val remoteSha = try {
-            hashRemote(final)
-        } catch (e: IOException) {
-            if (e is RemoteException) throw e
+            is CopyResult.WrongSize -> failAndRemovePart(m, part, SIZE_ERROR)
+            // No expected hash is passed, so this never happens; kept for exhaustiveness.
+            is CopyResult.WrongHash -> failAndRemovePart(m, part, VERIFY_ERROR)
+            is CopyResult.RenameFailed -> failAndRemovePart(m, part, itemError(result.error))
             // Copy left in place unverified; a later run adopts it if it hashes correctly.
-            return fail(m, itemError(e), remote = final)
+            is CopyResult.ReadBackFailed -> fail(m, itemError(result.error), remote = final)
+            is CopyResult.Mismatch -> failAndRemoveFinal(m, final, VERIFY_ERROR)
         }
-        if (remoteSha == sha) {
-            ledger.upsert(entry(m, BackupStatus.VERIFIED, sha = sha, remote = final))
-            setDriveTime(m, final)
-            return Outcome.UPLOADED
-        }
-        return failAndRemoveFinal(m, final, VERIFY_ERROR)
     }
 
     /**
@@ -652,30 +620,17 @@ class BackupEngine(
      */
     private suspend fun setDriveTime(m: PhoneMedia, path: String) {
         val ms = if (m.dateTakenMs > 0) m.dateTakenMs else m.dateAddedSec * 1000
-        if (ms <= 0) return
-        try {
-            store.setTimes(path, ms)
-        } catch (e: Throwable) {
-            if (e is CancellationException) throw e
-        }
+        DriveCopy.setTimesQuietly(store, path, ms)
     }
 
     /** Deletes the copy this item just renamed into place (it failed a check), then marks FAILED. */
     private suspend fun failAndRemoveFinal(m: PhoneMedia, final: String, msg: String): Outcome {
-        val removed = try {
-            store.delete(final)
-            true
-        } catch (e: IOException) {
-            if (e is RemoteException) throw e
-            false
-        }
+        val removed = DriveCopy.delete(store, final)
         ledger.upsert(entry(m, BackupStatus.FAILED, error = msg, remote = if (removed) null else final))
         return Outcome.FAILED
     }
 
     private fun hashLocal(m: PhoneMedia): String? = opener.open(m)?.use { Hashing.sha256(it) }
-
-    private suspend fun hashRemote(path: String): String = store.openRead(path, 0).use { Hashing.sha256(it) }
 
     private suspend fun missingOnPhone(m: PhoneMedia): Outcome {
         ledger.delete(m.mediaId)
@@ -690,13 +645,7 @@ class BackupEngine(
 
     /** Removes this item's own `.part`; if that fails, keeps partPath so the next run cleans it. */
     private suspend fun failAndRemovePart(m: PhoneMedia, part: String, msg: String): Outcome {
-        val removed = try {
-            if (store.stat(part) != null) store.delete(part)
-            true
-        } catch (e: IOException) {
-            if (e is RemoteException) throw e
-            false
-        }
+        val removed = DriveCopy.removeIfPresent(store, part)
         ledger.upsert(
             entry(m, BackupStatus.FAILED, error = msg, part = if (removed) null else part)
         )
