@@ -31,6 +31,9 @@ import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
 
+/** The file was read but isn't a decodable image (or has no video frame): not a drive problem. */
+class ImageDecodeException(msg: String = "Can't decode image") : IOException(msg)
+
 /** Pure thumbnail helpers (JVM-tested). */
 object Thumbnails {
     const val DEFAULT_PX = 512
@@ -194,7 +197,7 @@ class SmbCoilFetcher(
             BitmapFactory.decodeByteArray(head, 0, head.size, opts)
         } else {
             store.openRead(path).use { BitmapFactory.decodeStream(it.buffered(64 * 1024), null, opts) }
-        } ?: throw IOException("Can't decode image")
+        } ?: throw ImageDecodeException()
         val orientation = runCatching {
             ExifInterface(ByteArrayInputStream(head)).getAttributeInt(
                 ExifInterface.TAG_ORIENTATION,
@@ -221,7 +224,7 @@ class SmbCoilFetcher(
             retriever.setDataSource(source)
             return retriever.getScaledFrameAtTime(-1, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, w, h)
                 ?: retriever.frameAtTime
-                ?: throw IOException("Can't read a video frame")
+                ?: throw ImageDecodeException("Can't read a video frame")
         } catch (e: RuntimeException) {
             throw IOException("Can't read a video frame", e)
         } finally {
@@ -250,19 +253,31 @@ class SmbCoilFetcher(
         return if (n == max) buf else buf.copyOf(n)
     }
 
-    /** One per ImageLoader; [store] is the app's shared thumbnail store. */
-    class Factory(private val store: () -> RemoteStore) : Fetcher.Factory<Uri> {
+    /**
+     * One per ImageLoader; [store] is the app's shared thumbnail store. A request with parameter [FULL_SIZE] = true
+     * (the viewer's full-screen photos) uses [fullSizeStore] and its own lock instead, so a slow full-size read never
+     * holds up grid thumbnails and a thumbnail reconnect never kills it.
+     */
+    class Factory(
+        private val store: () -> RemoteStore,
+        private val fullSizeStore: () -> RemoteStore = store,
+    ) : Fetcher.Factory<Uri> {
         private val lock = Mutex()
+        private val fullSizeLock = Mutex()
 
-        override fun create(data: Uri, options: Options, imageLoader: ImageLoader): Fetcher? =
-            if (data.scheme.equals(SmbUri.SCHEME, ignoreCase = true)) {
-                SmbCoilFetcher(data, options, imageLoader, store(), lock)
+        override fun create(data: Uri, options: Options, imageLoader: ImageLoader): Fetcher? {
+            if (!data.scheme.equals(SmbUri.SCHEME, ignoreCase = true)) return null
+            return if (options.parameters.value<Boolean>(FULL_SIZE) == true) {
+                SmbCoilFetcher(data, options, imageLoader, fullSizeStore(), fullSizeLock)
             } else {
-                null
+                SmbCoilFetcher(data, options, imageLoader, store(), lock)
             }
+        }
     }
 
-    private companion object {
-        const val HEAD_BYTES = 256 * 1024
+    companion object {
+        /** Coil request parameter: a full-screen viewer photo rather than a thumbnail (see [Factory]). */
+        const val FULL_SIZE = "smb.fullSize"
+        private const val HEAD_BYTES = 256 * 1024
     }
 }

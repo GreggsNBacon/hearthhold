@@ -32,9 +32,11 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
+import coil.request.CachePolicy
 import coil.request.ImageRequest
 import coil.size.Scale
 import dev.photobackup.gallery.GalleryItem
+import dev.photobackup.gallery.SmbCoilFetcher
 import dev.photobackup.gallery.SmbRoot
 import dev.photobackup.smb.SmbUri
 import kotlin.math.max
@@ -111,14 +113,20 @@ fun PhotoPage(item: GalleryItem, root: SmbRoot?, active: Boolean, onZoomChange: 
 
     val phone = item.phoneUri
     val remote = item.remotePath
+    val missing = unavailableMessage(phone != null, remote != null, root != null, isVideo = false)
     var attempt by remember(item.key) { mutableIntStateOf(0) }
     val request = remember(item.key, root, shortPx, longPx, attempt) {
         when {
+            missing != null -> null
             // Coil's own decoder: fits the photo inside a long-side square, so either orientation stays sharp.
             phone != null -> ImageRequest.Builder(context).data(Uri.parse(phone)).size(longPx, longPx).scale(Scale.FIT)
-            // SmbCoilFetcher: keeps both sides at least this big (inSampleSize), so ask for the short side.
+            // SmbCoilFetcher, full-size path: its own store and lock, apart from thumbnails. It keeps both sides at
+            // least this big (inSampleSize), so ask for the short side. Not disk-cached, so viewing many photos
+            // never evicts grid thumbnails (the memory cache still covers swiping back).
             remote != null && root != null ->
                 ImageRequest.Builder(context).data(SmbUri.build(root.host, root.share, remote)).size(shortPx, shortPx)
+                    .setParameter(SmbCoilFetcher.FULL_SIZE, true, memoryCacheKey = "full")
+                    .diskCachePolicy(CachePolicy.DISABLED)
             else -> null
         }?.setParameter("attempt", attempt, memoryCacheKey = null)?.build() // a new request on Retry
     }
@@ -146,7 +154,7 @@ fun PhotoPage(item: GalleryItem, root: SmbRoot?, active: Boolean, onZoomChange: 
         contentAlignment = Alignment.Center,
     ) {
         if (request == null) {
-            PageMessage(MSG_DRIVE_UNREACHABLE)
+            PageMessage(missing ?: MSG_CANT_SHOW)
             return@Box
         }
         AsyncImage(

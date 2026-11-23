@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import dev.photobackup.gallery.GalleryItem
 import dev.photobackup.gallery.SmbRoot
 import dev.photobackup.smb.RemoteStore
+import java.io.Closeable
 
 /**
  * Full-screen viewer over the list it was opened from (Gallery or Browse), starting at [startIndex]; swipe for the
@@ -38,7 +39,8 @@ import dev.photobackup.smb.RemoteStore
  * only, with the loop toggle (saved via [onLoopChange]) and the speed chip ([session], this launch only).
  *
  * @param root host/share of the saved drive, for items only on the drive (null: no drive set up).
- * @param openStore a new drive store for one video page; the page closes it.
+ * @param openStore a new drive store for one video page.
+ * @param closeStore closes such a store off the main thread (a drive logoff can block).
  */
 @Composable
 fun ViewerScreen(
@@ -49,6 +51,7 @@ fun ViewerScreen(
     onLoopChange: (Boolean) -> Unit,
     session: PlayerSession,
     openStore: () -> RemoteStore,
+    closeStore: (Closeable) -> Unit,
     onBack: () -> Unit,
 ) {
     if (items.isEmpty()) {
@@ -74,7 +77,7 @@ fun ViewerScreen(
             val item = items[page]
             val active = page == pager.settledPage
             if (item.isVideo) {
-                VideoPage(item, root, active, loop, speed, setSpeed, openStore)
+                VideoPage(item, root, active, loop, speed, setSpeed, openStore, closeStore)
             } else {
                 PhotoPage(item, root, active) { if (active) zoomed = it }
             }

@@ -1,11 +1,14 @@
 package dev.photobackup.player
 
+import androidx.compose.runtime.saveable.SaverScope
 import androidx.media3.common.ParserException
+import dev.photobackup.gallery.ImageDecodeException
 import dev.photobackup.smb.AccessDeniedException
 import dev.photobackup.smb.MSG_ACCESS_DENIED
 import dev.photobackup.smb.RemoteException
 import dev.photobackup.ui.MSG_AUTH
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 import java.io.FileNotFoundException
 import java.io.IOException
@@ -33,6 +36,29 @@ class PlayerPrefsTest {
         assertEquals(MSG_CANT_PLAY, fromDrive(ParserException.createForMalformedContainer("bad", null)))
         assertEquals(MSG_CANT_PLAY, fromDrive(IllegalStateException("decoder")))
         assertEquals(MSG_CANT_SHOW, viewerErrorMessage(IllegalStateException("decode"), fromDrive = true, isVideo = false))
+    }
+
+    @Test fun undecodableDrivePhotoIsNotBlamedOnTheDrive() {
+        assertEquals(MSG_CANT_SHOW, viewerErrorMessage(ImageDecodeException(), fromDrive = true, isVideo = false))
+        assertEquals(MSG_DRIVE_UNREACHABLE, viewerErrorMessage(IOException("reset"), fromDrive = true, isVideo = false))
+    }
+
+    @Test fun missingSourceMessages() {
+        // Drive-only item but no drive saved.
+        assertEquals(MSG_NO_DRIVE, unavailableMessage(hasPhone = false, hasRemote = true, hasDrive = false, isVideo = true))
+        assertEquals(MSG_CANT_SHOW, unavailableMessage(hasPhone = false, hasRemote = false, hasDrive = true, isVideo = false))
+        assertEquals(MSG_CANT_PLAY, unavailableMessage(hasPhone = false, hasRemote = false, hasDrive = false, isVideo = true))
+        assertNull(unavailableMessage(hasPhone = true, hasRemote = false, hasDrive = false, isVideo = true))
+        assertNull(unavailableMessage(hasPhone = false, hasRemote = true, hasDrive = true, isVideo = false))
+    }
+
+    @Test fun playbackSnapshotSurvivesSaveAndRestore() {
+        val scope = SaverScope { true }
+        val snap = PlaybackSnapshot(positionMs = 12_345, playWhenReady = false)
+        val saved = with(PlaybackSnapshot.Saver) { scope.save(snap) }!!
+        assertEquals(snap, PlaybackSnapshot.Saver.restore(saved))
+        assertEquals(PlaybackSnapshot(0, true), PlaybackSnapshot())
+        assertEquals(0L, PlaybackSnapshot.capture(positionMs = -5, playWhenReady = true).positionMs)
     }
 
     @Test fun phoneErrorMessagesNeverBlameTheDrive() {

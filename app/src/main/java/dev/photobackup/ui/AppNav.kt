@@ -145,6 +145,7 @@ fun AppNav(container: AppContainer) {
                     onLoopChange = container::setLoopVideos,
                     session = container.playerSession,
                     openStore = container::driveStore,
+                    closeStore = container::closeInBackground,
                     onBack = { nav.popBackStack() },
                 )
             }

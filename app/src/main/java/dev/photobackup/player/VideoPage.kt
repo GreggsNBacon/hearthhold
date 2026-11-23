@@ -12,6 +12,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,7 +41,10 @@ import java.io.Closeable
  * The drive store for one player: opened on the first drive read, closed with the page. Its own connection, so a
  * long stream is never killed by a reconnect elsewhere (Browse, thumbnails).
  */
-private class PageStore(private val open: () -> RemoteStore) : Closeable {
+private class PageStore(
+    private val open: () -> RemoteStore,
+    private val closeLater: (Closeable) -> Unit,
+) : Closeable {
     private var store: RemoteStore? = null
     private var closed = false
 
@@ -50,11 +54,13 @@ private class PageStore(private val open: () -> RemoteStore) : Closeable {
         return store ?: open().also { store = it }
     }
 
-    @Synchronized
+    /** Never blocks: the store (smbj logoff, which can wait on a hung drive) is closed by [closeLater]. */
     override fun close() {
-        closed = true
-        store?.let { runCatching { it.close() } }
-        store = null
+        val s = synchronized(this) {
+            closed = true
+            store.also { store = null }
+        }
+        s?.let(closeLater)
     }
 }
 
@@ -84,9 +90,10 @@ fun VideoPage(
     speed: Float,
     onSpeedChange: (Float) -> Unit,
     openStore: () -> RemoteStore,
+    closeStore: (Closeable) -> Unit,
 ) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        if (active) ActivePlayer(item, root, loop, speed, onSpeedChange, openStore)
+        if (active) ActivePlayer(item, root, loop, speed, onSpeedChange, openStore, closeStore)
     }
 }
 
@@ -99,16 +106,25 @@ private fun ActivePlayer(
     speed: Float,
     onSpeedChange: (Float) -> Unit,
     openStore: () -> RemoteStore,
+    closeStore: (Closeable) -> Unit,
 ) {
     val context = LocalContext.current
     val fromDrive = item.phoneUri == null
-    val store = remember(item.key) { PageStore(openStore) }
+    val missing = unavailableMessage(item.phoneUri != null, item.remotePath != null, root != null, isVideo = true)
+    if (missing != null) {
+        PageMessage(missing)
+        return
+    }
+    val store = remember(item.key) { PageStore(openStore, closeStore) }
     val source = remember(item.key, root) { mediaSource(context, item, root, store) }
     if (source == null) {
         DisposableEffect(store) { onDispose { store.close() } }
-        PageMessage(MSG_DRIVE_UNREACHABLE)
+        PageMessage(MSG_CANT_PLAY)
         return
     }
+    // Survives a rotation: the position and play/pause state are captured when the activity pauses (before it is
+    // saved and recreated) and restored when the player is rebuilt.
+    var snapshot by rememberSaveable(item.key, stateSaver = PlaybackSnapshot.Saver) { mutableStateOf(PlaybackSnapshot()) }
     var error by remember(item.key) { mutableStateOf<String?>(null) }
     val currentOnSpeed by rememberUpdatedState(onSpeedChange)
 
@@ -117,7 +133,8 @@ private fun ActivePlayer(
             setMediaSource(source)
             repeatMode = if (loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
             playbackParameters = PlaybackParameters(speed, 1f)
-            playWhenReady = true
+            if (snapshot.positionMs > 0) seekTo(snapshot.positionMs)
+            playWhenReady = snapshot.playWhenReady
             prepare()
         }
     }
@@ -134,7 +151,7 @@ private fun ActivePlayer(
         onDispose {
             player.removeListener(listener)
             player.release()
-            store.close() // ends any drive read still in flight
+            store.close() // off the main thread; also ends any drive read still in flight
         }
     }
     LaunchedEffect(player, loop) { player.repeatMode = if (loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF }
@@ -149,6 +166,7 @@ private fun ActivePlayer(
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> {
                     resume = player.playWhenReady
+                    snapshot = PlaybackSnapshot.capture(player.currentPosition, player.playWhenReady)
                     player.pause()
                 }
                 Lifecycle.Event.ON_RESUME -> if (resume) {

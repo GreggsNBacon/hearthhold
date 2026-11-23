@@ -60,7 +60,7 @@ class PhotoBackupApp : Application(), ImageLoaderFactory {
     /** Coil: phone video frames, drive thumbnails (smb://), and a thumbnail cache the OS won't clear. */
     override fun newImageLoader(): ImageLoader = ImageLoader.Builder(this)
         .components {
-            add(SmbCoilFetcher.Factory { container.thumbnailStore })
+            add(SmbCoilFetcher.Factory(store = { container.thumbnailStore }, fullSizeStore = { container.viewerPhotoStore }))
             add(VideoFrameDecoder.Factory())
         }
         .diskCache {
@@ -110,6 +110,14 @@ class AppContainer(context: Context) {
 
     /** Hands the Gallery/Browse list to the viewer (`viewer/{source}/{index}`). */
     val viewerLists = ViewerListHolder()
+
+    /** The viewer's full-screen drive photos: their own connection (app lifetime), apart from thumbnails. */
+    val viewerPhotoStore: RemoteStore by lazy { driveStore() }
+
+    /** Closes a store off the main thread: smbj's logoff can wait for a hung drive. */
+    fun closeInBackground(store: java.io.Closeable) {
+        appScope.launch(Dispatchers.IO) { runCatching { store.close() } }
+    }
 
     /** Player speed for this launch only (resets to 1× next launch). */
     val playerSession = PlayerSession()

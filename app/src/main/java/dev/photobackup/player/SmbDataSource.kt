@@ -37,13 +37,14 @@ class SmbDataSource(private val store: RemoteStore) : BaseDataSource(/* isNetwor
     private var stream: InputStream? = null
     private var bytesRemaining: Long = 0
     private var opened = false
+    private var sizeCache: Pair<String, Long>? = null
 
     override fun open(dataSpec: DataSpec): Long {
         this.dataSpec = dataSpec
         transferInitializing(dataSpec)
         val loc = SmbUri.parse(dataSpec.uri.toString()) ?: throw IOException("Not an smb:// URI")
         val position = dataSpec.position
-        val size = io { store.stat(loc.path) }?.sizeBytes ?: throw FileNotFoundException("Not on the drive")
+        val size = sizeOf(loc.path)
         if (position > size) {
             throw DataSourceException(PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE)
         }
@@ -53,6 +54,14 @@ class SmbDataSource(private val store: RemoteStore) : BaseDataSource(/* isNetwor
         opened = true
         transferStarted(dataSpec)
         return bytesRemaining
+    }
+
+    /** File size, looked up once per path: ExoPlayer reopens the same source on every seek. */
+    private fun sizeOf(path: String): Long {
+        sizeCache?.let { (p, s) -> if (p == path) return s }
+        val size = io { store.stat(path) }?.sizeBytes ?: throw FileNotFoundException("Not on the drive")
+        sizeCache = path to size
+        return size
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {

@@ -157,6 +157,18 @@ class SmbDataSourceTest {
         }
     }
 
+    @Test fun fileSizeIsLookedUpOncePerSource() {
+        var stats = 0
+        val base = store().apply { failOn = { op, _ -> if (op == "stat") stats++; null } }
+        val src = SmbDataSource(base)
+        src.open(DataSpec(uri))
+        src.close()
+        src.open(DataSpec.Builder().setUri(uri).setPosition(700).build()) // a seek reopens
+        assertArrayEquals(data.copyOfRange(700, 1000), readAll(src))
+        src.close()
+        assertEquals(1, stats)
+    }
+
     @Test fun factoryUsesProvidedStore() {
         val s = store()
         var calls = 0

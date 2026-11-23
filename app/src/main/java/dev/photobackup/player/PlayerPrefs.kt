@@ -1,6 +1,9 @@
 package dev.photobackup.player
 
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.listSaver
 import androidx.media3.common.ParserException
+import dev.photobackup.gallery.ImageDecodeException
 import dev.photobackup.smb.AccessDeniedException
 import dev.photobackup.smb.MSG_ACCESS_DENIED
 import dev.photobackup.smb.RemoteException
@@ -31,6 +34,30 @@ const val MSG_DRIVE_UNREACHABLE = "Drive not reachable — connect to home Wi-Fi
 const val MSG_NOT_FOUND = "This file is no longer on the drive"
 const val MSG_CANT_PLAY = "Can't play this video"
 const val MSG_CANT_SHOW = "Can't show this photo"
+const val MSG_NO_DRIVE = "No drive set up"
+
+/**
+ * Why an item has nothing to open, or null when it has a source: the phone copy, or the drive copy when a drive is
+ * saved.
+ */
+fun unavailableMessage(hasPhone: Boolean, hasRemote: Boolean, hasDrive: Boolean, isVideo: Boolean): String? = when {
+    hasPhone -> null
+    hasRemote && hasDrive -> null
+    hasRemote -> MSG_NO_DRIVE
+    else -> if (isVideo) MSG_CANT_PLAY else MSG_CANT_SHOW
+}
+
+/** Where a video was and whether it was playing; kept across a rotation (activity recreation). */
+data class PlaybackSnapshot(val positionMs: Long = 0, val playWhenReady: Boolean = true) {
+    companion object {
+        fun capture(positionMs: Long, playWhenReady: Boolean) = PlaybackSnapshot(positionMs.coerceAtLeast(0), playWhenReady)
+
+        val Saver: Saver<PlaybackSnapshot, Any> = listSaver(
+            save = { listOf(it.positionMs, it.playWhenReady) },
+            restore = { PlaybackSnapshot(it[0] as Long, it[1] as Boolean) },
+        )
+    }
+}
 
 /**
  * What a viewer page says when its photo or video fails. Looks through the cause chain (ExoPlayer and Coil wrap the
@@ -44,7 +71,7 @@ fun viewerErrorMessage(e: Throwable, fromDrive: Boolean, isVideo: Boolean): Stri
         chain.any { it is RemoteException.AuthFailed } -> MSG_AUTH
         chain.any { it is AccessDeniedException } -> MSG_ACCESS_DENIED
         chain.any { it is FileNotFoundException } -> MSG_NOT_FOUND
-        chain.any { it is ParserException } -> cantOpen // the file arrived but isn't playable
+        chain.any { it is ParserException || it is ImageDecodeException } -> cantOpen // arrived, but unreadable
         chain.any { it is IOException } -> MSG_DRIVE_UNREACHABLE
         else -> cantOpen
     }
