@@ -60,6 +60,17 @@ Remote access (Immich on a spare PC, router WireGuard VPN) and Google Photos are
 - **Media3 ExoPlayer** with a custom SMB `DataSource` to play video from the drive. **Coil** with a custom SMB fetcher for image thumbnails.
 - *My call:* **minSdk 30 (Android 11)**, because `MediaStore.createDeleteRequest` (batch delete with one system confirmation) needs it. Target the latest SDK.
 
+### Main screen = Gallery *(owner decision, 2026-11-22)*
+- After setup, the app opens on the **Gallery**, not a status page.
+- **Each thumbnail shows a small badge:**
+  - ✓ backed up (on phone and drive)
+  - drive icon: only on the drive
+  - no badge: on the phone only and not yet backed up
+  - ! : failed (tap for the reason)
+- **Top bar:** "Hearthhold" plus a compact status chip ("Up to date" / "Backing up 12 of 40" / "Drive not reachable" / an error). Tapping the chip opens a bottom sheet with the old Home content: last backup, counts, ETA, error text, "Back up now", "Free up X GB", and the password-unreadable banner.
+- **Overflow menu:** Browse drive, Settings.
+- The separate Home route is removed (its content lives in the status sheet).
+
 ### Screens
 1. **Setup** (first run): find the drive → pick share → log in (guest or user/password) → pick or create a destination folder → grant permissions (photos and videos, notifications).
 2. **Home**: status (last backup, files waiting, files backed up, drive reachable yes/no), "Back up now", and "Free up X GB" button.
