@@ -156,7 +156,49 @@ class BackupWorkerTest {
         runWorker()
         val s = status()
         assertEquals("Backed up 3, failed 2", s.lastResult)
-        assertEquals("2 files failed — see Home", s.lastError)
+        assertEquals("2 files failed — tap ! for why", s.lastError) // the Home screen is gone
+        assertEquals("1 file failed — tap its ! for why", BackupMessages.failed(1))
+    }
+
+    @Test fun filesTooBigForFreeSpaceAreReportedAndNotified() {
+        runner = BackupRunner { _ -> BackupResult.Done(3, 0, 2, noRoom = 1) }
+        runWorker()
+        assertEquals("1 file doesn't fit on the drive — free up space", status().lastError)
+        assertEquals("1 file doesn't fit on the drive — free up space", text(errorNotifications().single()))
+    }
+
+    @Test fun finishedRunRecordsDriveFreeSpace() {
+        runner = BackupRunner { _ -> BackupResult.Done(1, 0, 0, driveFreeBytes = 123_456) }
+        runWorker()
+        assertEquals(123_456L, status().driveFreeBytes)
+        runner = BackupRunner { _ -> BackupResult.Done(0, 0, 0) } // unknown: keep the last figure
+        runWorker()
+        assertEquals(123_456L, status().driveFreeBytes)
+    }
+
+    @Test fun partialPhotoAccessAsksForAllPhotos() {
+        runner = BackupRunner { _ -> throw dev.photobackup.media.PartialMediaAccessException() }
+        assertEquals(ListenableWorker.Result.success(), runWorker())
+        assertEquals("Allow access to all photos", status().lastError)
+        assertEquals("Allow access to all photos", text(errorNotifications().single()))
+    }
+
+    @Test fun foregroundServiceTimeoutExplainsThePause() {
+        val timeout = androidx.work.WorkInfo.STOP_REASON_FOREGROUND_SERVICE_TIMEOUT
+        assertEquals(BackupMessages.TIME_LIMIT, BackupStop.message(35) { timeout })
+        assertNull(BackupStop.message(34) { timeout }) // no such limit before Android 15
+        assertNull(BackupStop.message(35) { androidx.work.WorkInfo.STOP_REASON_CANCELLED_BY_APP })
+    }
+
+    @Test fun staleInProgressIsClearedOnlyWhenNoRunHoldsTheLock() = runBlocking {
+        repo.update { it.copy(inProgress = true, done = 3, total = 9, etaSec = 60) }
+        repo.clearStaleProgress { true } // a run is active: leave it
+        assertTrue(status().inProgress)
+        repo.clearStaleProgress { false }
+        val s = status()
+        assertFalse(s.inProgress)
+        assertEquals(0, s.total)
+        assertNull(s.etaSec)
     }
 
     @Test fun missingSetupIsQuietlyReported() {

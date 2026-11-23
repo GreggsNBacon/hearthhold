@@ -9,6 +9,7 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.VideoFrameDecoder
 import coil.disk.DiskCache
+import dev.photobackup.backup.BackupLock
 import dev.photobackup.backup.BackupNotifications
 import dev.photobackup.backup.BackupScheduler
 import dev.photobackup.backup.BackupStatusRepository
@@ -60,10 +61,30 @@ interface BackupControl {
 class PhotoBackupApp : Application(), ImageLoaderFactory {
     val container: AppContainer by lazy { AppContainer(this) }
 
+    override fun onCreate() {
+        super.onCreate()
+        // A killed process (OOM, force-stop) can leave "in progress" saved: clear it unless a run holds the lock.
+        container.appScope.launch(Dispatchers.IO) {
+            try {
+                container.statusRepository.clearStaleProgress { BackupLock.mutex.isLocked }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Status is cosmetic here; the next run rewrites it.
+            }
+        }
+    }
+
     /** Coil: phone video frames, drive thumbnails (smb://), and a thumbnail cache the OS won't clear. */
     override fun newImageLoader(): ImageLoader = ImageLoader.Builder(this)
         .components {
-            add(SmbCoilFetcher.Factory(store = { container.thumbnailStore }, fullSizeStore = { container.viewerPhotoStore }))
+            add(
+                SmbCoilFetcher.Factory(
+                    store = { container.thumbnailStore },
+                    fullSizeStore = { container.viewerPhotoStore },
+                    savedRoot = { container.driveRoot() },
+                )
+            )
             add(VideoFrameDecoder.Factory())
         }
         .diskCache {
@@ -146,7 +167,14 @@ class AppContainer(context: Context) {
 
     /** Connects and logs in to the saved drive (via the auth prompt); throws on failure. */
     suspend fun checkDrive() {
-        authPrompt.withAuthRetry { cfg -> storeFactory(cfg).use { it.connect() } }
+        val drive = authPrompt.withAuthRetry { cfg -> storeFactory(cfg).use { it.connect() } }
+        // For the status sheet's "X free on the drive". Cosmetic: a failed write must not fail the check.
+        try {
+            statusRepository.recordDriveFree(drive.freeBytes)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+        }
     }
 
     /** A new login was saved (from any screen or the notification): clear the stale error and resume backing up. */

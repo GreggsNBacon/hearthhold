@@ -21,6 +21,8 @@ data class BackupStatusSnapshot(
     val done: Int,
     val total: Int,
     val etaSec: Long?,
+    /** Free space on the drive as of the last connect (backup run or drive check); null if never seen. */
+    val driveFreeBytes: Long? = null,
 )
 
 private val Context.statusDataStore: DataStore<Preferences> by preferencesDataStore(name = "backup_status")
@@ -40,8 +42,20 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
             p[DONE] = s.done
             p[TOTAL] = s.total
             p.putOrRemove(ETA, s.etaSec)
+            p.putOrRemove(DRIVE_FREE, s.driveFreeBytes)
         }
     }
+
+    /**
+     * Process start: a persisted "in progress" with no run holding [isRunning] is left over from a killed process
+     * (OOM, force-stop). Clear it so the chip and "Back up now" don't stay stuck until the next run. The check runs
+     * inside the edit, so a run that starts meanwhile (and takes its lock before writing) is never overwritten.
+     */
+    suspend fun clearStaleProgress(isRunning: () -> Boolean) = update { s ->
+        if (s.inProgress && !isRunning()) s.copy(inProgress = false, done = 0, total = 0, etaSec = null) else s
+    }
+
+    suspend fun recordDriveFree(bytes: Long) = update { it.copy(driveFreeBytes = bytes) }
 
     private fun read(p: Preferences) = BackupStatusSnapshot(
         lastRunMs = p[LAST_RUN],
@@ -51,6 +65,7 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
         done = p[DONE] ?: 0,
         total = p[TOTAL] ?: 0,
         etaSec = p[ETA],
+        driveFreeBytes = p[DRIVE_FREE],
     )
 
     private fun <T> MutablePreferences.putOrRemove(key: Preferences.Key<T>, value: T?) {
@@ -65,6 +80,7 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
         private val DONE = intPreferencesKey("done")
         private val TOTAL = intPreferencesKey("total")
         private val ETA = longPreferencesKey("eta_sec")
+        private val DRIVE_FREE = longPreferencesKey("drive_free_bytes")
 
         val defaultProvider: (Context) -> BackupStatusRepository = { ctx ->
             BackupStatusRepository(ctx.applicationContext.statusDataStore)

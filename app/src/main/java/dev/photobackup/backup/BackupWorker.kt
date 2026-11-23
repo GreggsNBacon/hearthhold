@@ -2,10 +2,13 @@ package dev.photobackup.backup
 
 import android.content.Context
 import android.content.pm.ServiceInfo
+import android.os.Build
 import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
+import androidx.work.WorkInfo
 import androidx.work.WorkerParameters
+import dev.photobackup.media.PartialMediaAccessException
 import dev.photobackup.smb.RemoteException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -34,6 +37,27 @@ object BackupMessages {
     const val FULL = "The drive is full"
     const val SETUP = "Finish setup first"
     const val PERMISSION = "Photos permission needed"
+    const val PERMISSION_ALL = "Allow access to all photos"
+    const val TIME_LIMIT = "Paused by Android's background time limit — will continue later"
+
+    /** Files bigger than all the drive's free space: the run went on with the rest. */
+    fun noRoom(n: Int): String =
+        if (n == 1) "1 file doesn't fit on the drive — free up space" else "$n files don't fit on the drive — free up space"
+
+    /** "N files failed": the reason for each is on its ! badge in the Gallery. */
+    fun failed(n: Int): String = if (n == 1) "1 file failed — tap its ! for why" else "$n files failed — tap ! for why"
+}
+
+/**
+ * Why a stopped run stopped, for the status line; null when it needs no explanation (cancelled by the user, by
+ * REPLACE or by a constraint). Android 15+ limits a dataSync foreground service to 6 h a day: WorkManager 2.10+
+ * stops the worker on `Service.onTimeout` with [WorkInfo.STOP_REASON_FOREGROUND_SERVICE_TIMEOUT] instead of
+ * letting the app crash. Rows still UPLOADING are cleaned by the next run as after any cancellation. Pure.
+ */
+object BackupStop {
+    fun message(sdk: Int, stopReason: () -> Int): String? =
+        if (sdk >= 35 && stopReason() == WorkInfo.STOP_REASON_FOREGROUND_SERVICE_TIMEOUT) BackupMessages.TIME_LIMIT
+        else null
 }
 
 /** Only one backup run per process: a second engine would delete the first one's in-flight .part files. */
@@ -131,14 +155,17 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 finish(repo, r)
             }
         } catch (e: CancellationException) {
-            idle(repo) { it }
+            val why = if (isStopped) BackupStop.message(Build.VERSION.SDK_INT) { stopReason } else null
+            idle(repo) { if (why != null) it.copy(lastResult = why) else it }
             throw e
         } catch (_: SetupIncompleteException) {
             idle(repo) { it.copy(lastResult = null, lastError = BackupMessages.SETUP) }
             Result.success()
-        } catch (_: SecurityException) {
-            idle(repo) { it.copy(lastResult = null, lastError = BackupMessages.PERMISSION) }
-            BackupNotifications.error(applicationContext, BackupMessages.PERMISSION)
+        } catch (e: SecurityException) {
+            // No (or only "Select photos") access: MediaStore would quietly return nothing, so this must be loud.
+            val text = if (e is PartialMediaAccessException) BackupMessages.PERMISSION_ALL else BackupMessages.PERMISSION
+            idle(repo) { it.copy(lastResult = null, lastError = text) }
+            BackupNotifications.error(applicationContext, text)
             Result.success()
         } catch (e: Exception) {
             // Class name only, never the message: it could carry connection details.
@@ -152,11 +179,25 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         val now = System.currentTimeMillis()
         when (r) {
             is BackupResult.Done -> {
-                val err = if (r.failed == 0) null else "${r.failed} files failed — see Home"
-                idle(repo) {
-                    it.copy(lastRunMs = now, lastResult = "Backed up ${r.uploaded}, failed ${r.failed}", lastError = err)
+                val err = when {
+                    r.noRoom > 0 -> BackupMessages.noRoom(r.noRoom)
+                    r.failed > 0 -> BackupMessages.failed(r.failed)
+                    else -> null
                 }
-                BackupNotifications.clearError(applicationContext)
+                idle(repo) {
+                    it.copy(
+                        lastRunMs = now,
+                        lastResult = "Backed up ${r.uploaded}, failed ${r.failed}",
+                        lastError = err,
+                        driveFreeBytes = r.driveFreeBytes ?: it.driveFreeBytes,
+                    )
+                }
+                // A full drive is a persistent problem (spec: Home + notification); other item failures show in-app.
+                if (r.noRoom > 0) {
+                    BackupNotifications.error(applicationContext, BackupMessages.noRoom(r.noRoom))
+                } else {
+                    BackupNotifications.clearError(applicationContext)
+                }
                 if (r.uploaded > 0 && notifyEnabled()) {
                     BackupNotifications.complete(applicationContext, r.uploaded, r.bytesUploaded)
                 }

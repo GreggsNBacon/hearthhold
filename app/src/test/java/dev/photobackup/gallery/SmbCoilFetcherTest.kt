@@ -2,7 +2,9 @@ package dev.photobackup.gallery
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.InputStream
@@ -74,5 +76,14 @@ class SmbCoilFetcherTest {
         assertEquals(4, r.readAt(96, buf, 0, 10))
         assertEquals(-1, r.readAt(100, buf, 0, 10))
         r.close()
+    }
+
+
+    @Test fun onlyUrisOnTheSavedDriveAreRead() {
+        val loc = dev.photobackup.smb.SmbLocation("NAS", "usb", "a\\b.jpg")
+        assertTrue(Thumbnails.onSavedDrive(loc, SmbRoot("nas", "USB")))
+        assertFalse(Thumbnails.onSavedDrive(loc, SmbRoot("newhost", "usb")))
+        assertFalse(Thumbnails.onSavedDrive(loc, SmbRoot("nas", "other")))
+        assertFalse(Thumbnails.onSavedDrive(loc, null))
     }
 }

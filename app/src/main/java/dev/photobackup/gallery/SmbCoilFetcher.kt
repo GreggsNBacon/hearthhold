@@ -46,6 +46,14 @@ object Thumbnails {
         return s
     }
 
+    /**
+     * Whether [loc] is on the saved drive [root]. The store always reads from the saved drive, so after a drive
+     * change an old `smb://oldhost/...` URI must not read the same path from the new share. Host and share
+     * names compare case-insensitively (as SMB does). No saved drive: nothing is on it.
+     */
+    fun onSavedDrive(loc: SmbLocation, root: SmbRoot?): Boolean =
+        root != null && loc.host.equals(root.host, ignoreCase = true) && loc.share.equals(root.share, ignoreCase = true)
+
     /** Disk-cache key: the `smb://` URI (host, share, path) plus the requested size. */
     fun cacheKey(uri: String, w: Int, h: Int) = "smb-thumb:$uri@${w}x$h"
 }
@@ -116,6 +124,8 @@ class SmbCoilFetcher(
     private val imageLoader: ImageLoader,
     private val store: RemoteStore,
     private val lock: Mutex,
+    /** The saved drive's host and share; only URIs on it are read through [store]. */
+    private val savedRoot: suspend () -> SmbRoot?,
 ) : Fetcher {
 
     override suspend fun fetch(): FetchResult {
@@ -138,6 +148,8 @@ class SmbCoilFetcher(
 
         cached()?.let { return it }
         if (!options.networkCachePolicy.readEnabled) throw IOException("Drive not reachable")
+        // Cache hits above are keyed by the full URI, so they are fine; a drive read must be on the saved drive.
+        if (!Thumbnails.onSavedDrive(loc, savedRoot())) throw IOException("Not on the saved drive")
 
         val bitmap = lock.withLock {
             // Another request for the same thumbnail may have filled the cache while this one waited.
@@ -261,6 +273,7 @@ class SmbCoilFetcher(
     class Factory(
         private val store: () -> RemoteStore,
         private val fullSizeStore: () -> RemoteStore = store,
+        private val savedRoot: suspend () -> SmbRoot?,
     ) : Fetcher.Factory<Uri> {
         private val lock = Mutex()
         private val fullSizeLock = Mutex()
@@ -268,9 +281,9 @@ class SmbCoilFetcher(
         override fun create(data: Uri, options: Options, imageLoader: ImageLoader): Fetcher? {
             if (!data.scheme.equals(SmbUri.SCHEME, ignoreCase = true)) return null
             return if (options.parameters.value<Boolean>(FULL_SIZE) == true) {
-                SmbCoilFetcher(data, options, imageLoader, fullSizeStore(), fullSizeLock)
+                SmbCoilFetcher(data, options, imageLoader, fullSizeStore(), fullSizeLock, savedRoot)
             } else {
-                SmbCoilFetcher(data, options, imageLoader, store(), lock)
+                SmbCoilFetcher(data, options, imageLoader, store(), lock, savedRoot)
             }
         }
     }
