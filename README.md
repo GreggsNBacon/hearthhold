@@ -31,7 +31,20 @@ Android app that backs up your phone's photos and videos over SMB2 to a USB driv
 - Notifications show progress and problems.
 - Interrupted copies restart from the beginning on the next run; the app cleans up its own `.part` files.
 - **Free up space**: removes only items you choose, after a full hash re-check against the drive copy and Android's own confirmation prompt.
-- Removed videos play from the drive, with loop and 2x speed.
+- Removed videos play from the drive, with loop and 0.25x–2x speed.
+
+## Gallery icons
+
+Each thumbnail can carry a small round badge in its corner:
+
+| Badge | Meaning |
+|---|---|
+| Green ✓ (checkmark) | **Backed up**: on the phone *and* on the drive, verified by hash. Safe to free up. |
+| Blue ☁ (cloud) | **On the drive only**: no longer on the phone (freed up, or never on this phone). Plays from the drive. |
+| Red ! | **Backup failed**: tap it to see why. It retries on the next run. |
+| No badge | **Not backed up yet**: on the phone, waiting or uploading. |
+
+The chip at the top shows overall status, e.g. "Backing up 3 of 40", "5 waiting", "2 failed", "Drive not reachable", "Re-enter drive password", "Waiting for overnight window" or "Up to date". Tap it for details and drive free space.
 
 ## Drive layout
 
