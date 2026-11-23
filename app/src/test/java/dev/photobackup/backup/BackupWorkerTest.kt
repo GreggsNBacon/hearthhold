@@ -108,7 +108,7 @@ class BackupWorkerTest {
         runner = BackupRunner { _ -> BackupResult.Stopped(RemoteException.Smb1Only()) }
         runWorker()
         assertEquals(
-            "Turn on SMB2 on the router: USB Application → Network Place (Samba) Share",
+            "Couldn't agree a file-sharing version with the drive. On the router, make sure SMB2 is enabled: USB Application → Network Place (Samba) Share",
             text(errorNotifications().single()),
         )
     }

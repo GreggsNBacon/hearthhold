@@ -2,6 +2,7 @@ package dev.photobackup.backup
 
 import android.content.Context
 import android.content.pm.ServiceInfo
+import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
@@ -29,7 +30,7 @@ object BackupMessages {
     const val UNREACHABLE = "Drive not reachable — not at home?"
     const val AUTH = "Wrong username or password"
     const val SHARE = "Shared folder not found on the drive"
-    const val SMB1 = "Turn on SMB2 on the router: USB Application → Network Place (Samba) Share"
+    const val SMB1 = dev.photobackup.smb.MSG_SMB_VERSION
     const val FULL = "The drive is full"
     const val SETUP = "Finish setup first"
     const val PERMISSION = "Photos permission needed"
@@ -123,8 +124,9 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             idle(repo) { it.copy(lastResult = null, lastError = BackupMessages.PERMISSION) }
             BackupNotifications.error(applicationContext, BackupMessages.PERMISSION)
             Result.success()
-        } catch (_: Exception) {
-            // Never log the exception text: it could carry connection details.
+        } catch (e: Exception) {
+            // Class name only, never the message: it could carry connection details.
+            Log.w("Hearthhold", "backup failed: " + e.javaClass.simpleName)
             idle(repo) { it.copy(lastError = "Backup failed, will retry") }
             Result.retry()
         }

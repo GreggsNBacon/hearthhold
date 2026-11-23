@@ -342,4 +342,35 @@ class BackupEngineTest {
         assertEquals(BackupStatus.UPLOADING, e.status)
         assertEquals(part, e.partPath)
     }
+
+    @Test fun accessDeniedOnOpenWriteFailsOnlyThatItem() = runBlocking {
+        var calls = 0
+        val store = FakeRemoteStore(failOn = { op, _ ->
+            if (op == "openWrite" && ++calls == 1) dev.photobackup.smb.AccessDeniedException() else null
+        })
+        val ledger = MemoryLedger(); val data = bytes(5000)
+        val r = engine(store, ledger, data).run(listOf(media(5000, id = 1), media(5000, id = 2)))
+        assertEquals(BackupResult.Done(1, 0, 1), counts(r))
+        assertEquals(BackupStatus.FAILED, ledger.get(1)!!.status)
+        assertEquals("You don't have permission to open this on the drive", ledger.get(1)!!.lastError)
+        assertEquals(BackupStatus.VERIFIED, ledger.get(2)!!.status)
+    }
+
+    @Test fun wrappedSmbjRuntimeErrorFailsOnlyThatItem() = runBlocking {
+        // SmbjRemoteStore.mapOp turns e.g. IllegalArgumentException into an IOException; the engine must not stop.
+        var calls = 0
+        val store = FakeRemoteStore(failOn = { op, _ ->
+            if (op == "openWrite" && ++calls == 1) {
+                dev.photobackup.smb.SmbjRemoteStore.mapOp(IllegalStateException("smbj")) as java.io.IOException
+            } else null
+        })
+        val ledger = MemoryLedger(); val data = bytes(5000)
+        val r = engine(store, ledger, data).run(listOf(media(5000, id = 1), media(5000, id = 2)))
+        assertEquals(BackupResult.Done(1, 0, 1), counts(r))
+        assertEquals(BackupStatus.FAILED, ledger.get(1)!!.status)
+        assertNull(ledger.get(1)!!.partPath)
+        assertEquals(BackupStatus.VERIFIED, ledger.get(2)!!.status)
+    }
+
+    private fun counts(r: BackupResult) = if (r is BackupResult.Done) r.copy() else r
 }

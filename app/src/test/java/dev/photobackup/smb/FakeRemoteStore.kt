@@ -7,7 +7,7 @@ import java.io.InputStream
 import java.io.OutputStream
 
 class FakeRemoteStore(
-    var failOn: ((op: String, path: String) -> RemoteException?)? = null,
+    var failOn: ((op: String, path: String) -> IOException?)? = null,
     var freeBytes: Long = Long.MAX_VALUE,
     var fileSystem: String = "EXFAT",
     var truncateWritesAfter: Long? = null,

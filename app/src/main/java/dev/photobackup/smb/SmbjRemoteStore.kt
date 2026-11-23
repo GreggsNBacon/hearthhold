@@ -1,11 +1,8 @@
 package dev.photobackup.smb
 
 import com.hierynomus.mserref.NtStatus
-import com.hierynomus.msdtyp.AccessMask
 import com.hierynomus.msfscc.FileAttributes
-import com.hierynomus.mssmb2.SMB2CreateDisposition
 import com.hierynomus.mssmb2.SMB2Dialect
-import com.hierynomus.mssmb2.SMB2ShareAccess
 import com.hierynomus.mssmb2.SMBApiException
 import com.hierynomus.protocol.transport.TransportException
 import com.hierynomus.smbj.SMBClient
@@ -15,6 +12,7 @@ import com.hierynomus.smbj.common.SMBRuntimeException
 import com.hierynomus.smbj.connection.Connection
 import com.hierynomus.smbj.session.Session
 import com.hierynomus.smbj.share.DiskShare
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.EOFException
@@ -55,7 +53,7 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
                 .withWriteTimeout(OP_TIMEOUT_S, TimeUnit.SECONDS)
                 .withTransactTimeout(OP_TIMEOUT_S, TimeUnit.SECONDS)
                 .withSocketFactory(factory)
-                .withDialects(SMB2Dialect.SMB_2_1, SMB2Dialect.SMB_3_0, SMB2Dialect.SMB_3_0_2, SMB2Dialect.SMB_3_1_1)
+                .withDialects(DIALECTS)
                 .build()
             val c = SMBClient(smbConfig).also { client = it }
             val conn = try {
@@ -130,14 +128,7 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
     }
 
     override suspend fun openWrite(path: String): OutputStream = io {
-        val file = requireShare().openFile(
-            path,
-            setOf(AccessMask.GENERIC_WRITE),
-            setOf(FileAttributes.FILE_ATTRIBUTE_NORMAL),
-            SMB2ShareAccess.ALL,
-            SMB2CreateDisposition.FILE_CREATE, // never OVERWRITE: fails if the file exists
-            emptySet(),
-        )
+        val file = SmbOpenArgs.write().openFile(requireShare(), path) // FILE_CREATE: fails if the file exists
         val out = try {
             file.getOutputStream(false)
         } catch (e: Throwable) {
@@ -167,14 +158,7 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
     }
 
     override suspend fun openRead(path: String, offset: Long): InputStream = io {
-        val file = requireShare().openFile(
-            path,
-            setOf(AccessMask.GENERIC_READ),
-            setOf(FileAttributes.FILE_ATTRIBUTE_NORMAL),
-            SMB2ShareAccess.ALL,
-            SMB2CreateDisposition.FILE_OPEN,
-            emptySet(),
-        )
+        val file = SmbOpenArgs.read().openFile(requireShare(), path)
         object : InputStream() {
             private var pos = offset
             private var closed = false
@@ -198,14 +182,7 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
     }
 
     override suspend fun rename(from: String, to: String) = io {
-        val entry = requireShare().open(
-            from,
-            setOf(AccessMask.DELETE),
-            setOf(FileAttributes.FILE_ATTRIBUTE_NORMAL),
-            SMB2ShareAccess.ALL,
-            SMB2CreateDisposition.FILE_OPEN,
-            emptySet(),
-        )
+        val entry = SmbOpenArgs.rename().open(requireShare(), from)
         try {
             entry.rename(to, false) // replaceIfExists = false: server fails with NAME_COLLISION
         } finally {
@@ -236,6 +213,11 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
         private const val CONNECT_TIMEOUT_S = 5L
         private const val OP_TIMEOUT_S = 60L
         private const val FS_UNKNOWN = "UNKNOWN"
+
+        /** SMB 2.0.2 is needed for routers whose "SMB2" means 2.0.2 (e.g. ASUS RT-AX86U USB share). */
+        internal val DIALECTS = listOf(
+            SMB2Dialect.SMB_2_0_2, SMB2Dialect.SMB_2_1, SMB2Dialect.SMB_3_0, SMB2Dialect.SMB_3_0_2, SMB2Dialect.SMB_3_1_1,
+        )
         private val NOT_FOUND = setOf(
             NtStatus.STATUS_OBJECT_NAME_NOT_FOUND,
             NtStatus.STATUS_OBJECT_PATH_NOT_FOUND,
@@ -243,12 +225,29 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
             NtStatus.STATUS_NOT_FOUND,
         )
 
-        /** Maps errors from file operations on an established connection. */
-        internal fun mapOp(e: Throwable): Throwable = when {
+        /**
+         * Maps errors from file operations on an established connection. Anything that is not already an
+         * IOException (unmapped smbj runtime errors, IllegalArgumentException, ...) is wrapped in one, so the backup
+         * engine fails just that item instead of the whole worker. Cancellation and VM errors pass through.
+         */
+        internal fun mapOp(e: Throwable): Throwable {
+            val known = mapKnown(e, connecting = false)
+            return when (known) {
+                is IOException, is CancellationException, is VirtualMachineError -> known
+                else -> IOException(known.javaClass.simpleName, known)
+            }
+        }
+
+        /**
+         * ACCESS_DENIED means a bad login only while connecting (session setup / tree connect). On a file or folder
+         * it is [AccessDeniedException]: the login is fine, that item is off limits, so no password prompt.
+         */
+        private fun mapKnown(e: Throwable, connecting: Boolean): Throwable = when {
             e is RemoteException -> e
             e is SMBApiException -> when (e.status) {
-                NtStatus.STATUS_LOGON_FAILURE, NtStatus.STATUS_ACCESS_DENIED ->
-                    RemoteException.AuthFailed("${e.status}: ${e.message}")
+                NtStatus.STATUS_LOGON_FAILURE -> RemoteException.AuthFailed("${e.status}: ${e.message}")
+                NtStatus.STATUS_ACCESS_DENIED ->
+                    if (connecting) RemoteException.AuthFailed("${e.status}: ${e.message}") else AccessDeniedException()
                 NtStatus.STATUS_BAD_NETWORK_NAME -> RemoteException.ShareNotFound(e.message ?: "Share not found")
                 NtStatus.STATUS_DISK_FULL -> RemoteException.DriveFull(e.message ?: "Drive is full")
                 in NOT_FOUND -> FileNotFoundException(e.message)
@@ -262,9 +261,9 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
         /** Maps errors from connect/authenticate/share-connect. */
         internal fun mapConnect(e: Throwable): Throwable {
             if (e is RemoteException) return e
-            if (e is SMBApiException) return mapOp(e)
+            if (e is SMBApiException) return mapKnown(e, connecting = true)
             if (isNegotiationFailure(e)) return RemoteException.Smb1Only(e.message ?: "Negotiation failed")
-            val mapped = mapOp(e)
+            val mapped = mapKnown(e, connecting = true)
             if (mapped !== e) return mapped
             return if (e is IOException || e is SMBRuntimeException) {
                 RemoteException.Unreachable(e.message ?: "Drive unreachable")
