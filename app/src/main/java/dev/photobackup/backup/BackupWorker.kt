@@ -101,7 +101,8 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                         trySetForeground(p.done, p.total, eta)
                     }
                 }
-                repo.update { it.copy(inProgress = true, done = 0, total = 0, etaSec = null) }
+                // A new run starts: the previous run's error is stale (lastResult stays until this run ends).
+                repo.update { it.copy(inProgress = true, done = 0, total = 0, etaSec = null, lastError = null) }
                 trySetForeground(0, 0, null)
                 val r = try {
                     runner.run { done, total, bytes, totalBytes ->

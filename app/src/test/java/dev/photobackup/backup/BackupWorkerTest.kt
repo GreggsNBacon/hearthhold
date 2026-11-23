@@ -263,4 +263,43 @@ class BackupWorkerTest {
         runWorker()
         assertTrue(errorNotifications().isEmpty())
     }
+
+    private fun nowIds() =
+        WorkManager.getInstance(app).getWorkInfosForUniqueWork("pb_now").get().map { it.id }
+
+    @Test fun backUpNowReplacesPendingRetry() {
+        BackupScheduler.runNow(app, chargingOnly = false)
+        val first = nowIds().single()
+        // Still ENQUEUED (unmetered constraint unmet in tests), like a run waiting in retry backoff.
+        BackupScheduler.runNow(app, chargingOnly = false)
+        val infos = WorkManager.getInstance(app).getWorkInfosForUniqueWork("pb_now").get()
+        val live = infos.filter { !it.state.isFinished }
+        assertEquals(1, live.size)
+        assertTrue(live.single().id != first)
+    }
+
+    @Test fun backUpNowKeepsRunningWork() {
+        assertEquals(androidx.work.ExistingWorkPolicy.KEEP,
+            BackupScheduler.nowPolicy(listOf(androidx.work.WorkInfo.State.RUNNING)))
+        assertEquals(androidx.work.ExistingWorkPolicy.KEEP,
+            BackupScheduler.nowPolicy(listOf(androidx.work.WorkInfo.State.CANCELLED, androidx.work.WorkInfo.State.RUNNING)))
+        for (st in listOf(androidx.work.WorkInfo.State.ENQUEUED, androidx.work.WorkInfo.State.BLOCKED,
+            androidx.work.WorkInfo.State.SUCCEEDED)) {
+            assertEquals(androidx.work.ExistingWorkPolicy.REPLACE, BackupScheduler.nowPolicy(listOf(st)))
+        }
+        assertEquals(androidx.work.ExistingWorkPolicy.REPLACE, BackupScheduler.nowPolicy(emptyList()))
+    }
+
+    @Test fun newRunClearsStaleError() {
+        runBlocking { repo.update { it.copy(lastError = "Backup failed, will retry", lastResult = "Backed up 1, failed 0") } }
+        var during: BackupStatusSnapshot? = null
+        runner = BackupRunner { _ ->
+            during = repo.status.first()
+            BackupResult.Done(1, 0, 0)
+        }
+        runWorker()
+        assertTrue(during!!.inProgress)
+        assertNull(during!!.lastError)
+        assertEquals("Backed up 1, failed 0", during!!.lastResult)
+    }
 }

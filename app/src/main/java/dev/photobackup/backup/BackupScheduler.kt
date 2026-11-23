@@ -10,6 +10,7 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import dev.photobackup.media.LocalMediaSource
@@ -58,6 +59,13 @@ object BackupScheduler {
         WorkManager.getInstance(context).enqueueUniqueWork(TRIGGER, policy, request)
     }
 
+    /**
+     * A running "Back up now" is kept; anything else (waiting in retry backoff, blocked, finished, none) is replaced,
+     * so pressing the button always starts a run soon instead of being ignored.
+     */
+    internal fun nowPolicy(states: List<WorkInfo.State>): ExistingWorkPolicy =
+        if (WorkInfo.State.RUNNING in states) ExistingWorkPolicy.KEEP else ExistingWorkPolicy.REPLACE
+
     /** User pressed "Back up now": unmetered only, no charging requirement. */
     fun runNow(context: Context, chargingOnly: Boolean) {
         val request = OneTimeWorkRequestBuilder<BackupWorker>()
@@ -66,6 +74,16 @@ object BackupScheduler {
             .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.MINUTES)
             .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(NOW, ExistingWorkPolicy.KEEP, request)
+        val wm = WorkManager.getInstance(context)
+        // Called from the main thread: look up the current state without blocking, then enqueue.
+        val infos = wm.getWorkInfosForUniqueWork(NOW)
+        infos.addListener({
+            val states = try {
+                infos.get().map { it.state }
+            } catch (_: Exception) {
+                emptyList()
+            }
+            wm.enqueueUniqueWork(NOW, nowPolicy(states), request)
+        }, Runnable::run)
     }
 }
