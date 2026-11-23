@@ -17,7 +17,7 @@
 - An item is only offered for removal from the phone when its status is `VERIFIED` **and** the ledger's size + date modified still match the phone's current version.
 - No location permission. The home check is "can connect and log in to the configured share".
 - Background work uses unmetered networks only. Default: no charging requirement.
-- Drive layout: `<destination>/<deviceName>/YYYY/MM/<fileName>`. Clash: `name (1).ext`, `name (2).ext`, …
+- Drive layout: `<destination>/<deviceName>/<sourceFolder>/YYYY/<fileName>`. Clash: `name (1).ext`, `name (2).ext`, …
 - Free-up rule default: older than **6** months, sorted by size descending.
 - Phone source folders (default): `DCIM/Camera/` and any `.../Screenshots/` relative path.
 - Player: loop default **on**, remembered. Speeds `[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0]`, pitch kept, resets to 1.0 on app launch.

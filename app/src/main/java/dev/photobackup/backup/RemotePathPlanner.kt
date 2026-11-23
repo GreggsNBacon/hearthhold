@@ -13,8 +13,14 @@ object RemotePathPlanner {
         val epochMs = if (m.dateTakenMs > 0) m.dateTakenMs else m.dateAddedSec * 1000
         val date = Instant.ofEpochMilli(epochMs).atZone(zone)
         val dest = destination.replace('/', '\\').trim('\\')
-        val parts = listOf(dest, sanitise(deviceName), "%04d".format(date.year), "%02d".format(date.monthValue))
+        val source = sourceFolder(m.relativePath)
+        val parts = listOf(dest, sanitise(deviceName), source, date.year.toString())
         return parts.filter { it.isNotEmpty() }.joinToString("\\")
+    }
+
+    private fun sourceFolder(relativePath: String): String {
+        val last = relativePath.split('/').lastOrNull { it.isNotBlank() } ?: return "Other"
+        return sanitise(last)
     }
 
     fun sanitise(name: String): String {

@@ -38,7 +38,7 @@ class MemoryLedger : LedgerStore {
 }
 
 class BackupEngineTest {
-    private val dir = "B\\Dev\\2026\\03"
+    private val dir = "B\\Dev\\Camera\\2026"
     private val final = "$dir\\IMG.jpg"
     private val part = "$dir\\IMG.jpg.part"
     private val march2026 = 1_772_400_000_000L // 2026-03-01T21:20Z
