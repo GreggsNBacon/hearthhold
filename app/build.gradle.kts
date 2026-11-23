@@ -59,6 +59,7 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.video)
     implementation(libs.jmdns)
+    implementation(libs.dcerpc)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
