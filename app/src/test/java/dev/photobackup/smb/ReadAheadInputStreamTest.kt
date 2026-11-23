@@ -6,8 +6,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.io.IOException
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.random.Random
 
 class ReadAheadInputStreamTest {
@@ -86,19 +91,36 @@ class ReadAheadInputStreamTest {
 
     /** Backups rename or delete the file right after reading it back: the handle must be closed on return. */
     @Test fun closeWaitsForInFlightReadsThenClosesHandle() {
-        val running = AtomicInteger()
-        val slow = ChunkReader { position, buf, len ->
-            running.incrementAndGet()
-            Thread.sleep(50)
-            val n = reader().read(position, buf, len)
-            running.decrementAndGet()
-            n
+        val single = Executors.newSingleThreadExecutor() // chunk 0 and 1 run one after another; the rest stay queued
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val readerReturned = AtomicBoolean(false)
+        val invoked = CopyOnWriteArrayList<Long>()
+        val blocking = ChunkReader { position, buf, len ->
+            invoked.add(position)
+            if (position == 65_536L) { // the second chunk is the one in flight during close()
+                entered.countDown()
+                release.await()
+                readerReturned.set(true)
+            }
+            reader().read(position, buf, len)
         }
-        var closedWhileRunning = -1
-        val s = ReadAheadInputStream(slow, 0, 65_536, 4, pool, onClose = { closedWhileRunning = running.get() })
-        s.read(ByteArray(10), 0, 10)
-        s.close()
-        assertEquals("onClose ran before close() returned, with no read in flight", 0, closedWhileRunning)
+        val closedAfterReturn = AtomicReference<Boolean?>(null)
+        val s = ReadAheadInputStream(blocking, 0, 65_536, 3, single, onClose = { closedAfterReturn.set(readerReturned.get()) })
+        s.read(ByteArray(10), 0, 10) // schedules chunks 0..3 (chunk 0 done, chunk 1 blocks, 2 and 3 never start)
+        assertTrue("read in flight", entered.await(5, TimeUnit.SECONDS))
+        val closer = Thread { s.close() }
+        closer.start()
+        closer.join(300)
+        assertTrue("close() must wait for the in-flight read", closer.isAlive)
+        assertEquals("onClose must not run while a read is in flight", null, closedAfterReturn.get())
+        release.countDown()
+        closer.join(5_000)
+        assertTrue("close() returned", !closer.isAlive)
+        assertEquals("onClose ran only after the in-flight read returned", true, closedAfterReturn.get())
+        single.shutdown()
+        assertTrue(single.awaitTermination(5, TimeUnit.SECONDS)) // queued chunks have now been skipped
+        assertEquals("never-started chunks must not reach the reader", listOf(0L, 65_536L), invoked.toList())
     }
 
     @Test fun closedStreamThrows() {
