@@ -36,6 +36,7 @@ import dev.photobackup.review.ReviewScreen
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.ui.settings.SettingsScreen
 import dev.photobackup.ui.setup.SetupScreen
+import dev.photobackup.ui.setup.SetupViewModel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
@@ -48,6 +49,7 @@ object Routes {
     const val SETTINGS = "settings"
     const val REVIEW = "review"
     const val BIN = "bin"
+    const val SETUP_SECOND = "setup/second"
 
     fun browse(path: String = "") = "browse?path=${Uri.encode(path)}"
     fun viewer(source: String, index: Int) = "viewer/${Uri.encode(source)}/$index"
@@ -96,6 +98,17 @@ fun AppNav(container: AppContainer) {
                 viewModel = viewModel(factory = container.settingsFactory),
                 driveStore = container::driveStore,
                 onBack = { nav.popBackStack() },
+                onSetUpSecond = { nav.navigate(Routes.SETUP_SECOND) },
+            )
+        }
+        composable(Routes.SETUP_SECOND) {
+            val vm: SetupViewModel = viewModel(factory = container.secondSetupFactory)
+            SetupScreen(
+                viewModel = vm,
+                // The folder step browses the second drive with the login just typed (nothing is saved yet).
+                driveStore = vm::pickerStore,
+                onFinished = { nav.popBackStack() },
+                onCancel = { nav.popBackStack() },
             )
         }
         composable(Routes.GALLERY) {

@@ -1,6 +1,9 @@
 package dev.photobackup.gallery
 
 import dev.photobackup.ledger.BackupStatus
+import dev.photobackup.ledger.LedgerEntry
+import dev.photobackup.ledger.SecondCopy
+import dev.photobackup.ledger.SecondStatus
 import java.util.Locale
 
 /** Where a gallery item lives. */
@@ -23,6 +26,8 @@ data class GalleryItem(
     val remotePath: String?,
     val status: BackupStatus? = null,
     val lastError: String? = null,
+    /** A second backup location is set and this backed-up item has no verified copy there yet ([oneCopySoFar]). */
+    val oneCopy: Boolean = false,
 )
 
 /** The small corner badge on a Gallery thumbnail. */
@@ -35,12 +40,27 @@ enum class Badge {
     DRIVE_ONLY,
     /** The last backup attempt failed; tap for the reason. */
     FAILED,
+    /** Backed up on the main drive, but its copy on the second location is still to come (outlined ✓). */
+    ONE_COPY,
 }
 
+/** Without a second location [GalleryItem.oneCopy] is always false, so this is exactly the badge from before it. */
 fun badgeFor(item: GalleryItem): Badge = when (item.location) {
-    Location.BOTH -> Badge.BACKED_UP
-    Location.DRIVE -> Badge.DRIVE_ONLY
+    Location.BOTH -> if (item.oneCopy) Badge.ONE_COPY else Badge.BACKED_UP
+    Location.DRIVE -> if (item.oneCopy) Badge.ONE_COPY else Badge.DRIVE_ONLY
     Location.PHONE -> if (item.status == BackupStatus.FAILED) Badge.FAILED else Badge.NONE
+}
+
+/**
+ * True when a second location is set ([secondOn]), the ledger row [e] is one the second step copies (VERIFIED or
+ * REMOVED_FROM_PHONE, hash recorded, no bin request: the engine's rule, so binned items never get the badge) and its
+ * [copy] there is not VERIFIED with the same hash. Pure.
+ */
+fun oneCopySoFar(secondOn: Boolean, e: LedgerEntry, copy: SecondCopy?): Boolean {
+    if (!secondOn) return false
+    if (e.status != BackupStatus.VERIFIED && e.status != BackupStatus.REMOVED_FROM_PHONE) return false
+    if (e.localSha256 == null || e.binRequestedAt != null) return false
+    return !(copy?.status == SecondStatus.VERIFIED && copy.sha256 == e.localSha256)
 }
 
 /** What a drive file is, judged by its extension. */

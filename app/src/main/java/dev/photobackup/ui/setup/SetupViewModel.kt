@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.photobackup.app.BackupControl
 import dev.photobackup.discovery.FoundHost
+import dev.photobackup.settings.SecondLocation
 import dev.photobackup.settings.SettingsStore
 import dev.photobackup.smb.RemoteException
 import dev.photobackup.smb.RemoteStore
@@ -21,6 +22,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 enum class SetupStep { DISCOVER, SHARE, CREDENTIALS, FOLDER, PERMISSIONS, DONE }
+
+/** [MAIN]: first run, the main drive. [SECOND]: the optional second backup location, saved to `second` only. */
+enum class SetupMode { MAIN, SECOND }
 
 data class SetupUiState(
     val step: SetupStep = SetupStep.DISCOVER,
@@ -58,13 +62,18 @@ fun setupPermissions(sdk: Int): List<String> =
         listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
     }
 
-/** First run: find drive → share → login → folder → permissions → done. */
+/**
+ * First run: find drive → share → login → folder → permissions → done. In [SetupMode.SECOND] the same steps pick the
+ * second backup location: nothing is saved until Finish, which writes `second` only (never the main login or
+ * folder); the permissions step is skipped; the main share+folder is refused.
+ */
 class SetupViewModel(
     private val settingsStore: SettingsStore,
     private val discover: () -> Flow<FoundHost>,
     private val listShares: suspend (host: String, user: String?, pass: String?) -> List<String>,
     private val openStore: (SmbConfig) -> RemoteStore,
     private val backup: BackupControl,
+    val mode: SetupMode = SetupMode.MAIN,
 ) : ViewModel() {
     private val _state = MutableStateFlow(SetupUiState())
     val state: StateFlow<SetupUiState> = _state.asStateFlow()
@@ -153,7 +162,7 @@ class SetupViewModel(
         return viewModelScope.launch {
             try {
                 openStore(cfg).use { it.connect() }
-                settingsStore.update { it.copy(smb = cfg) }
+                if (mode == SetupMode.MAIN) settingsStore.update { it.copy(smb = cfg) }
                 _state.update { it.copy(step = SetupStep.FOLDER) }
             } catch (e: CancellationException) {
                 throw e
@@ -165,8 +174,30 @@ class SetupViewModel(
         }
     }
 
-    fun onFolderPicked(path: String) =
-        _state.update { it.copy(destination = path, step = SetupStep.PERMISSIONS, message = null) }
+    /** A store for the folder step, logged in with the typed login (second mode; the main mode uses the saved drive). */
+    fun pickerStore(): RemoteStore = openStore(config(_state.value) ?: throw IllegalStateException("no drive picked"))
+
+    fun onFolderPicked(path: String): Job {
+        if (mode == SetupMode.MAIN) {
+            _state.update { it.copy(destination = path, step = SetupStep.PERMISSIONS, message = null) }
+            return Job().apply { complete() }
+        }
+        val cfg = config(_state.value) ?: return Job().apply { complete() }
+        return viewModelScope.launch {
+            val same = try {
+                settingsStore.settings.first().let { s -> s.smb != null && isSameLocation(s.smb, s.destination, cfg, path) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _state.update { it.copy(message = SAVE_FAILED) }
+                return@launch
+            }
+            _state.update {
+                if (same) it.copy(message = SAME_AS_MAIN)
+                else it.copy(destination = path, step = SetupStep.DONE, message = null)
+            }
+        }
+    }
 
     fun onPermissionsDone() = _state.update { it.copy(step = SetupStep.DONE) }
 
@@ -176,6 +207,7 @@ class SetupViewModel(
         val destination = s.destination
         // The login was saved at "Test connection" and may have been updated since; only the destination is written here.
         if (destination.isNullOrBlank()) return Job().apply { complete() }
+        if (mode == SetupMode.SECOND) return finishSecond(destination)
         _state.update { it.copy(busy = true, message = null) }
         return viewModelScope.launch {
             try {
@@ -195,6 +227,39 @@ class SetupViewModel(
         }
     }
 
+    /** Saves the second location (re-checking it is not the main one) and starts a run so copying begins. */
+    private fun finishSecond(destination: String): Job {
+        val cfg = config(_state.value) ?: return Job().apply { complete() }
+        _state.update { it.copy(busy = true, message = null) }
+        return viewModelScope.launch {
+            try {
+                var same = false
+                settingsStore.update { cur ->
+                    same = cur.smb != null && isSameLocation(cur.smb, cur.destination, cfg, destination)
+                    if (same) cur else cur.copy(second = SecondLocation(cfg, destination))
+                }
+                if (same) {
+                    _state.update { it.copy(message = SAME_AS_MAIN, step = SetupStep.FOLDER) }
+                    return@launch
+                }
+                try {
+                    backup.runNow(settingsStore.settings.first().chargingOnly)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // Saved; the next scheduled run starts the copying.
+                }
+                _state.update { it.copy(finished = true) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _state.update { it.copy(message = SAVE_FAILED) }
+            } finally {
+                _state.update { it.copy(busy = false) }
+            }
+        }
+    }
+
     /** Back one step; returns false on the first step. */
     fun back(): Boolean {
         val prev = when (_state.value.step) {
@@ -203,10 +268,29 @@ class SetupViewModel(
             SetupStep.CREDENTIALS -> SetupStep.SHARE
             SetupStep.FOLDER -> SetupStep.CREDENTIALS
             SetupStep.PERMISSIONS -> SetupStep.FOLDER
-            SetupStep.DONE -> SetupStep.PERMISSIONS
+            SetupStep.DONE -> if (mode == SetupMode.SECOND) SetupStep.FOLDER else SetupStep.PERMISSIONS
         }
         _state.update { it.copy(step = prev, message = null) }
         if (prev == SetupStep.DISCOVER) startDiscovery()
         return true
     }
+
+    companion object {
+        const val SAME_AS_MAIN = "That's the main backup location — pick a different drive or folder"
+        const val SAVE_FAILED = "Couldn't save the second location"
+    }
 }
+
+/**
+ * True when [cfg] + [folder] name the main drive's share and folder ([main] + [mainFolder]): host, share and folder
+ * compared case-insensitively, with `/` and `\` treated alike and leading, trailing and doubled slashes ignored.
+ */
+fun isSameLocation(main: SmbConfig, mainFolder: String?, cfg: SmbConfig, folder: String): Boolean =
+    main.host.trim().equals(cfg.host.trim(), ignoreCase = true) &&
+        normalisePath(main.share).equals(normalisePath(cfg.share), ignoreCase = true) &&
+        normalisePath(mainFolder.orEmpty()).equals(normalisePath(folder), ignoreCase = true)
+
+private fun normalisePath(p: String): String =
+    p.trim().replace('/', BACKSLASH).split(BACKSLASH).filter { it.isNotBlank() }.joinToString(BACKSLASH.toString()) { it.trim() }
+
+private const val BACKSLASH = '\\'

@@ -24,6 +24,7 @@ object BackupNotifications {
     const val SECOND_ERROR_ID = 1004
     private const val REQ_REAUTH = 2001
     private const val REQ_OPEN = 2002
+    private const val REQ_REAUTH_SECOND = 2003
 
     private fun manager(context: Context) =
         context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -80,9 +81,10 @@ object BackupNotifications {
 
     /**
      * A second backup location problem (its own slot, so it never replaces or clears the main drive's). Posted only
-     * for problems that need the user; same permission and never-throws rules as [error].
+     * for problems that need the user; same permission and never-throws rules as [error]. With [reauth] (its login
+     * was refused), tapping it opens the "Re-enter second location password" dialog.
      */
-    fun secondError(context: Context, text: String) {
+    fun secondError(context: Context, text: String, reauth: Boolean = false) {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) return
@@ -94,7 +96,7 @@ object BackupNotifications {
                 .setContentText(text)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(text))
                 .setAutoCancel(true)
-                .setContentIntent(openAppIntent(context))
+                .setContentIntent(if (reauth) reauthSecondIntent(context) else openAppIntent(context))
                 .build()
             manager(context).notify(SECOND_ERROR_ID, n)
         } catch (_: SecurityException) {
@@ -143,6 +145,15 @@ object BackupNotifications {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         return PendingIntent.getActivity(
             context, REQ_REAUTH, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+    }
+
+    private fun reauthSecondIntent(context: Context): PendingIntent {
+        val intent = Intent(context, MainActivity::class.java)
+            .putExtra(MainActivity.EXTRA_REAUTH_SECOND, true)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        return PendingIntent.getActivity(
+            context, REQ_REAUTH_SECOND, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
     }
 

@@ -51,7 +51,13 @@ import dev.photobackup.ui.Screen
 import dev.photobackup.ui.setup.FolderPicker
 
 @Composable
-fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, onBack: () -> Unit) {
+fun SettingsScreen(
+    viewModel: SettingsViewModel,
+    driveStore: () -> RemoteStore,
+    onBack: () -> Unit,
+    /** Opens setup in "second" mode (Set up, and Change once the old location is removed). */
+    onSetUpSecond: () -> Unit = {},
+) {
     val state by viewModel.state.collectAsState()
     var picking by remember { mutableStateOf(false) }
     var addingFolder by remember { mutableStateOf(false) }
@@ -160,6 +166,8 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
             HorizontalDivider()
             FreeUpAge(s, viewModel)
             HorizontalDivider()
+            SecondLocationSection(s, state.secondMessage, viewModel, onSetUpSecond)
+            HorizontalDivider()
             Gestures(s, state.gestureMessage, viewModel)
             HorizontalDivider()
             Folders(s, viewModel) { viewModel.loadPhoneFolders(); addingFolder = true }
@@ -207,6 +215,43 @@ private fun Gestures(s: AppSettings, message: String?, vm: SettingsViewModel) {
 
 private val GESTURE_OPTIONS: List<ReviewAction?> =
     listOf(ReviewAction.KEEP, ReviewAction.DRIVE_ONLY, ReviewAction.JUNK, ReviewAction.SKIP, null)
+
+/** "Second backup location": Set up, or Change / Remove (with a confirm) and the free-up switch. */
+@Composable
+private fun SecondLocationSection(s: AppSettings, message: String?, vm: SettingsViewModel, onSetUp: () -> Unit) {
+    var confirm by remember { mutableStateOf<SecondConfirm?>(null) }
+    Section("Second backup location")
+    val second = s.second
+    if (second == null) {
+        Text("Off. A second drive or shared folder that gets its own copy of every backed-up item.",
+            style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(onClick = { vm.secondMessageShown(); onSetUp() }) { Text("Set up") }
+    } else {
+        Text("${second.destination.replace('\\', '/')} on ${second.smb.share} (${second.smb.host})")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { vm.secondMessageShown(); confirm = SecondConfirm.CHANGE }) { Text("Change") }
+            OutlinedButton(onClick = { vm.secondMessageShown(); confirm = SecondConfirm.REMOVE }) { Text("Remove") }
+        }
+        SwitchRow("Allow freeing up with only the main drive", !s.freeUpNeedsBoth) { vm.setAllowMainOnly(it) }
+    }
+    message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    confirm?.let { c ->
+        AlertDialog(
+            onDismissRequest = { confirm = null },
+            title = { Text(if (c == SecondConfirm.CHANGE) "Change second location?" else "Remove second location?") },
+            text = { Text("Stops copying; nothing on either drive is deleted") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirm = null
+                    if (c == SecondConfirm.CHANGE) vm.removeSecond(onDone = onSetUp) else vm.removeSecond()
+                }) { Text(if (c == SecondConfirm.CHANGE) "Change" else "Remove") }
+            },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+private enum class SecondConfirm { CHANGE, REMOVE }
 
 @Composable
 private fun Section(title: String) = Text(title, style = MaterialTheme.typography.titleMedium)

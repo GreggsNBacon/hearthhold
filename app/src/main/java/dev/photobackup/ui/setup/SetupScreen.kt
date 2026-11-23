@@ -44,22 +44,36 @@ import dev.photobackup.media.MediaAccess
 import dev.photobackup.ui.Screen
 
 @Composable
-fun SetupScreen(viewModel: SetupViewModel, driveStore: () -> RemoteStore, onFinished: () -> Unit) {
+fun SetupScreen(
+    viewModel: SetupViewModel,
+    driveStore: () -> RemoteStore,
+    onFinished: () -> Unit,
+    /** Second mode only: leave setup from its first step without saving. */
+    onCancel: () -> Unit = {},
+) {
     val state by viewModel.state.collectAsState()
 
     LaunchedEffect(Unit) { if (state.step == SetupStep.DISCOVER && state.hosts.isEmpty()) viewModel.startDiscovery() }
     LaunchedEffect(state.finished) { if (state.finished) onFinished() }
     BackHandler(enabled = state.step != SetupStep.DISCOVER) { viewModel.back() }
 
+    val second = viewModel.mode == SetupMode.SECOND
+    // Second mode: Back from the first step leaves setup (back to Settings); nothing has been saved.
+    BackHandler(enabled = second && state.step == SetupStep.DISCOVER) { onCancel() }
     val title = when (state.step) {
-        SetupStep.DISCOVER -> "Find your drive"
+        SetupStep.DISCOVER -> if (second) "Find the second drive" else "Find your drive"
         SetupStep.SHARE -> "Pick the shared folder"
         SetupStep.CREDENTIALS -> "Log in"
-        SetupStep.FOLDER -> "Where to put backups"
+        SetupStep.FOLDER -> if (second) "Where to put second copies" else "Where to put backups"
         SetupStep.PERMISSIONS -> "Permissions"
         SetupStep.DONE -> "All set"
     }
-    Screen(title, onBack = if (state.step != SetupStep.DISCOVER) ({ viewModel.back() }) else null) {
+    val onBack: (() -> Unit)? = when {
+        state.step != SetupStep.DISCOVER -> ({ viewModel.back() })
+        second -> onCancel
+        else -> null
+    }
+    Screen(title, onBack = onBack) {
         Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (state.busy || state.loadingShares) LinearProgressIndicator(Modifier.fillMaxWidth())
             when (state.step) {
@@ -69,10 +83,16 @@ fun SetupScreen(viewModel: SetupViewModel, driveStore: () -> RemoteStore, onFini
                 SetupStep.FOLDER -> {
                     val store = remember { driveStore() }
                     DisposableEffect(store) { onDispose { store.close() } }
-                    FolderPicker(store, initialPath = state.destination.orEmpty(), onPicked = viewModel::onFolderPicked)
+                    FolderPicker(store, initialPath = state.destination.orEmpty(), onPicked = { viewModel.onFolderPicked(it) })
                 }
                 SetupStep.PERMISSIONS -> PermissionsStep(viewModel)
-                SetupStep.DONE -> {
+                SetupStep.DONE -> if (second) {
+                    Text("Second copies go to ${state.destination?.replace('\\', '/')} on ${state.share} (${state.host}).")
+                    Text("Each backed-up photo and video is copied there too and checked. Nothing is ever deleted there.")
+                    Button(onClick = { viewModel.finish() }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
+                        Text("Save and start copying")
+                    }
+                } else {
                     Text("Backups go to ${state.destination?.replace('\\', '/')} on ${state.share}.")
                     Text("New photos and videos back up on home Wi-Fi.")
                     Button(onClick = { viewModel.finish() }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {

@@ -24,9 +24,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 
-/** Place once at the app root: shows "Re-enter drive password" whenever [prompt] asks for it. */
+/**
+ * Place once at the app root (per prompt): shows "Re-enter drive password" (or [title], e.g. for the second backup
+ * location) whenever [prompt] asks for it.
+ */
 @Composable
-fun AuthPromptHost(prompt: AuthPrompt) {
+fun AuthPromptHost(prompt: AuthPrompt, title: String = "Re-enter drive password") {
     val request by prompt.request.collectAsState()
     val req = request ?: return
     var username by remember { mutableStateOf(req.username) }
@@ -35,7 +38,7 @@ fun AuthPromptHost(prompt: AuthPrompt) {
 
     AlertDialog(
         onDismissRequest = { if (!req.busy) prompt.cancel() },
-        title = { Text("Re-enter drive password") },
+        title = { Text(title) },
         text = {
             Column {
                 OutlinedTextField(

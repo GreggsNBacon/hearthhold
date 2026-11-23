@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.photobackup.app.BackupControl
 import dev.photobackup.backup.BackupEngine
+import dev.photobackup.backup.BackupLock
 import dev.photobackup.backup.DrivePaths
 import dev.photobackup.backup.RemotePathPlanner
 import dev.photobackup.ledger.BackupStatus
@@ -30,6 +31,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
 data class SettingsUiState(
@@ -44,6 +46,8 @@ data class SettingsUiState(
     val ruleMessage: String? = null,
     /** Shown after a gesture change was refused (all four would be No action); cleared by the next change. */
     val gestureMessage: String? = null,
+    /** A short fixed message after Remove / Change of the second location was refused or failed; null when none. */
+    val secondMessage: String? = null,
 )
 
 /** False when setting [swipe] to [action] would leave every swipe direction on No action. */
@@ -66,6 +70,10 @@ class SettingsViewModel(
     private val phoneFolderCounts: suspend () -> Map<String, Int> = { emptyMap() },
     private val ledger: LedgerStore? = null,
     private val assignments: FolderAssignmentStore? = null,
+    /** Empties the SecondCopy table (Remove / Change of the second location). Never touches a drive. */
+    private val clearSecondCopies: suspend () -> Unit = {},
+    /** The shared backup lock: Remove / Change never run while a backup does. */
+    private val lock: Mutex = BackupLock.mutex,
 ) : ViewModel() {
     private val _state = MutableStateFlow(SettingsUiState())
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
@@ -367,7 +375,39 @@ class SettingsViewModel(
         }
     }
 
+    /** "Allow freeing up with only the main drive" (off by default) is the inverse of [AppSettings.freeUpNeedsBoth]. */
+    fun setAllowMainOnly(on: Boolean): Job = edit { it.copy(freeUpNeedsBoth = !on) }
+
+    fun secondMessageShown() = _state.update { it.copy(secondMessage = null) }
+
+    /**
+     * Remove (and the first half of Change): clears the SecondCopy table, then the `second` settings, under the shared
+     * backup lock. Nothing on either drive is touched. A running backup → [BACKUP_RUNNING] and nothing changes. The
+     * table goes first so a failure never leaves old rows behind for a location set up later. [onDone] runs only after
+     * both are cleared (Change then opens setup in second mode). Never throws but cancellation; never shows exception text.
+     */
+    fun removeSecond(onDone: () -> Unit = {}): Job = viewModelScope.launch {
+        if (!lock.tryLock()) {
+            _state.update { it.copy(secondMessage = BACKUP_RUNNING) }
+            return@launch
+        }
+        val ok = try {
+            clearSecondCopies()
+            store.update { it.copy(second = null) }
+            true
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            false
+        } finally {
+            lock.unlock()
+        }
+        _state.update { it.copy(secondMessage = if (ok) null else REMOVE_SECOND_FAILED) }
+        if (ok) onDone()
+    }
+
     companion object {
+        const val BACKUP_RUNNING = "A backup is running — try again in a moment"
+        const val REMOVE_SECOND_FAILED = "Couldn't remove the second location"
         private const val INVALID_NAME_CHARS = "\\/:*?\"<>|"
         const val SAVE_FAILED = "Couldn't save the rule"
         const val REMOVE_FAILED = "Couldn't remove the rule"

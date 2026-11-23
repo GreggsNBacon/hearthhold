@@ -6,6 +6,7 @@ import dev.photobackup.backup.DrivePaths
 import dev.photobackup.ledger.FolderAssignment
 import dev.photobackup.ledger.FolderAssignmentStore
 import dev.photobackup.ledger.LedgerEntry
+import dev.photobackup.ledger.SecondCopy
 import dev.photobackup.media.FolderRules
 import dev.photobackup.media.PartialMediaAccessException
 import dev.photobackup.media.PhoneMedia
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.mapLatest
@@ -106,6 +108,8 @@ class GalleryViewModel(
     private val runNow: suspend () -> Unit = {},
     /** Drive destination and device name (the drive path prefix is `<destination>\<device>\`), or null. */
     private val root: suspend () -> Pair<String?, String>? = { null },
+    /** The second location's copies by mediaId, or null while no second location is set (the badges are then as before). */
+    private val second: kotlinx.coroutines.flow.Flow<Map<Long, SecondCopy>?> = flowOf(null),
 ) : ViewModel() {
     private class Phone(
         val items: List<PhoneMedia>,
@@ -122,9 +126,9 @@ class GalleryViewModel(
     private val phone = MutableStateFlow<Phone?>(null)
     private val extra = MutableStateFlow(GalleryUiState())
 
-    private val merged = combine(phone, ledger) { p, l -> p to l }
-        .mapLatest { (p, l) ->
-            if (p == null) null else Merged(GalleryMerge.merge(p.items, l), GalleryMerge.counts(p.items, l))
+    private val merged = combine(phone, ledger, second) { p, l, c -> Triple(p, l, c) }
+        .mapLatest { (p, l, c) ->
+            if (p == null) null else Merged(GalleryMerge.merge(p.items, l, c), GalleryMerge.counts(p.items, l))
         }
         .flowOn(compute)
 

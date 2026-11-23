@@ -20,6 +20,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -60,6 +61,8 @@ fun StatusSheetContent(
     onBackUpNow: () -> Unit,
     onFreeUp: () -> Unit,
     onReenter: () -> Unit,
+    /** Opens "Re-enter second location password". */
+    onReenterSecond: () -> Unit = {},
     /** Opens Swipe review. */
     onReview: () -> Unit = {},
     /** Files flagged too big for this drive's format (FAT32). */
@@ -78,6 +81,14 @@ fun StatusSheetContent(
             }
         }
         StatusCard(state, reach, reachMessage)
+        state.secondLine?.let { line ->
+            Card(Modifier.fillMaxWidth()) {
+                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(line, Modifier.weight(1f))
+                    if (state.secondNeedsPassword) TextButton(onClick = onReenterSecond) { Text("Re-enter password") }
+                }
+            }
+        }
         val limits = driveLimitLines(state.status?.driveFreeBytes, tooBig)
         if (limits.isNotEmpty()) {
             Card(Modifier.fillMaxWidth()) {

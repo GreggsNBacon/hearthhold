@@ -1,0 +1,137 @@
+package dev.photobackup.ui.setup
+
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.test.core.app.ApplicationProvider
+import dev.photobackup.discovery.FoundHost
+import dev.photobackup.settings.CredentialCipher
+import dev.photobackup.settings.SecondLocation
+import dev.photobackup.settings.SettingsStore
+import dev.photobackup.smb.FakeRemoteStore
+import dev.photobackup.smb.SmbConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.setMain
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import java.io.File
+
+private class XCipher : CredentialCipher {
+    override fun encrypt(plain: String) = "x$plain"
+    override fun decrypt(cipher: String) = cipher.removePrefix("x")
+}
+
+/** Setup in "second" mode: same discovery → share → login → folder steps, saved to `second` only. */
+@OptIn(ExperimentalCoroutinesApi::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
+class SecondSetupTest {
+    @get:Rule val tmp = TemporaryFolder()
+    private lateinit var settings: SettingsStore
+    private val store = FakeRemoteStore()
+    private val backup = FakeBackupControl()
+    private val opened = mutableListOf<SmbConfig>()
+    private val mainSmb = SmbConfig("192.168.50.1", "usb", "greg", "pw")
+
+    @Before fun setUp() {
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+        val ds = PreferenceDataStoreFactory.create { File(tmp.root, "s.preferences_pb") }
+        settings = SettingsStore(ApplicationProvider.getApplicationContext(), XCipher(), ds)
+        runBlocking { settings.update { it.copy(smb = mainSmb, destination = "Phone backup") } }
+    }
+
+    @After fun tearDown() = Dispatchers.resetMain()
+
+    private fun vm() = SetupViewModel(
+        settingsStore = settings,
+        discover = { emptyFlow<FoundHost>() },
+        listShares = { _, _, _ -> listOf("usb", "pcshare") },
+        openStore = { cfg -> opened += cfg; store },
+        backup = backup,
+        mode = SetupMode.SECOND,
+    )
+
+    private suspend fun SetupViewModel.loggedIn(host: String, share: String): SetupViewModel = apply {
+        selectHost(host).join()
+        selectShare(share)
+        setGuest(false); setUsername("pc"); setPassword("pcpw")
+        testConnection().join()
+    }
+
+    @Test fun testConnectionInSecondModeNeverTouchesTheMainLogin() = runBlocking {
+        val vm = vm().loggedIn("pc.local", "pcshare")
+        assertEquals(SetupStep.FOLDER, vm.state.value.step)
+        assertEquals(listOf(SmbConfig("pc.local", "pcshare", "pc", "pcpw")), opened)
+        val s = settings.settings.first()
+        assertEquals(mainSmb, s.smb)
+        assertNull(s.second) // nothing saved until the folder is picked and Finish is tapped
+    }
+
+    @Test fun refusesTheMainShareAndFolder() = runBlocking {
+        val vm = vm().loggedIn("192.168.50.1", "usb")
+        vm.onFolderPicked("Phone backup").join()
+        assertEquals(SetupStep.FOLDER, vm.state.value.step)
+        assertEquals(SetupViewModel.SAME_AS_MAIN, vm.state.value.message)
+        vm.finish().join()
+        assertNull(settings.settings.first().second)
+        assertFalse(vm.state.value.finished)
+    }
+
+    @Test fun sameLocationIgnoresCaseAndSlashes() = runBlocking {
+        val vm = vm().loggedIn("192.168.50.1 ", "USB")
+        vm.onFolderPicked("\\phone BACKUP/").join()
+        assertEquals(SetupViewModel.SAME_AS_MAIN, vm.state.value.message)
+        assertTrue(isSameLocation(mainSmb, "Phone backup", SmbConfig("192.168.50.1", "/usb/", null, null), "phone backup"))
+        assertTrue(isSameLocation(mainSmb, "A\\B",SmbConfig("192.168.50.1", "usb", null, null), "a//b\\"))
+        assertFalse(isSameLocation(mainSmb, "Phone backup", SmbConfig("192.168.50.1", "usb", null, null), "Copy"))
+        assertFalse(isSameLocation(mainSmb, "Phone backup", SmbConfig("other", "usb", null, null), "Phone backup"))
+        assertFalse(isSameLocation(mainSmb, "Phone backup", SmbConfig("192.168.50.1", "usb2", null, null), "Phone backup"))
+    }
+
+    @Test fun sameShareOtherFolderIsAllowed() = runBlocking {
+        val vm = vm().loggedIn("192.168.50.1", "usb")
+        vm.onFolderPicked("Second copy").join()
+        assertNull(vm.state.value.message)
+        assertEquals(SetupStep.DONE, vm.state.value.step) // no permissions step in second mode
+    }
+
+    @Test fun finishSavesSecondOnlyAndStartsARun() = runBlocking {
+        val vm = vm().loggedIn("pc.local", "pcshare")
+        vm.onFolderPicked("Hearthhold copy").join()
+        vm.finish().join()
+        val s = settings.settings.first()
+        assertEquals(SecondLocation(SmbConfig("pc.local", "pcshare", "pc", "pcpw"), "Hearthhold copy"), s.second)
+        assertEquals(mainSmb, s.smb)
+        assertEquals("Phone backup", s.destination)
+        assertTrue(vm.state.value.finished)
+        assertEquals(listOf("runNow(false)"), backup.calls) // no re-scheduling from the second setup
+    }
+
+    @Test fun backFromDoneSkipsPermissions() = runBlocking {
+        val vm = vm().loggedIn("pc.local", "pcshare")
+        vm.onFolderPicked("Hearthhold copy").join()
+        assertTrue(vm.back())
+        assertEquals(SetupStep.FOLDER, vm.state.value.step)
+    }
+
+    @Test fun pickerStoreUsesTheTypedLogin() = runBlocking {
+        val vm = vm().loggedIn("pc.local", "pcshare")
+        opened.clear()
+        vm.pickerStore()
+        assertEquals(listOf(SmbConfig("pc.local", "pcshare", "pc", "pcpw")), opened)
+    }
+}

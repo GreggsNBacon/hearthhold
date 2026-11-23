@@ -268,6 +268,7 @@ fun GalleryScreen(
                     onFreeUp()
                 },
                 onReenter = { status.reenter(onDone = refreshAll) },
+                onReenterSecond = { status.reenterSecond() },
                 onReview = {
                     showSheet = false
                     onReview()
@@ -392,7 +393,10 @@ private fun BackupBadge(badge: Badge, onClick: (() -> Unit)?, modifier: Modifier
         Badge.BACKED_UP -> Color(0xFF2E7D32) to "Backed up"
         Badge.DRIVE_ONLY -> Color(0xFF1565C0) to "On drive only"
         Badge.FAILED -> Color(0xFFC62828) to "Backup failed — show why"
+        Badge.ONE_COPY -> Color(0xFF2E7D32) to "One copy so far"
     }
+    // Outlined ✓: a white dot with a green rim and check, so it reads as "not quite done" next to the solid green one.
+    val outlined = badge == Badge.ONE_COPY
     // The outer box is the touch target (bigger than the dot) when the badge is tappable.
     Box(
         modifier
@@ -404,12 +408,13 @@ private fun BackupBadge(badge: Badge, onClick: (() -> Unit)?, modifier: Modifier
         Box(
             Modifier
                 .size(20.dp)
-                .background(fill, CircleShape)
-                .border(1.dp, Color.White, CircleShape),
+                .background(if (outlined) Color.White else fill, CircleShape)
+                .border(if (outlined) 2.dp else 1.dp, if (outlined) fill else Color.White, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
             when (badge) {
                 Badge.BACKED_UP -> Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                Badge.ONE_COPY -> Icon(Icons.Filled.Check, null, tint = fill, modifier = Modifier.size(13.dp))
                 Badge.DRIVE_ONLY -> Icon(CloudDone, null, tint = Color.White, modifier = Modifier.size(13.dp))
                 else -> Text(
                     "!",

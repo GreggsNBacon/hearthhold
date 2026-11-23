@@ -4,6 +4,7 @@ import dev.photobackup.backup.BackupEngine
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.ledger.LedgerRules
+import dev.photobackup.ledger.SecondCopy
 import dev.photobackup.media.PhoneMedia
 
 /**
@@ -23,12 +24,18 @@ data class BackupCounts(val waiting: Int, val tooBig: Int)
  * Each item carries its ledger status and last error (for the Gallery badges).
  * Ledger rows that are neither on the phone nor (with a remote path) on the drive are left out, and so are bin rows
  * (binRequestedAt set, or BINNED): the Bin screen lists those.
+ * [second]: the second location's copies by mediaId, or null when no second location is set (then every item's
+ * `oneCopy` is false and the list is exactly what it was before the feature).
  * Sorted newest first. Pure, so it runs off the main thread and in JVM tests.
  */
 object GalleryMerge {
     fun key(mediaId: Long) = "media:$mediaId"
 
-    fun merge(phone: List<PhoneMedia>, ledger: List<LedgerEntry>): List<GalleryItem> {
+    fun merge(
+        phone: List<PhoneMedia>,
+        ledger: List<LedgerEntry>,
+        second: Map<Long, SecondCopy>? = null,
+    ): List<GalleryItem> {
         val byId = ledger.associateBy { it.mediaId }
         val out = ArrayList<GalleryItem>(phone.size + ledger.size)
         val onPhone = HashSet<Long>(phone.size * 2)
@@ -52,6 +59,7 @@ object GalleryMerge {
                 remotePath = if (both) e!!.remotePath else null,
                 status = e?.status,
                 lastError = e?.lastError,
+                oneCopy = both && second != null && oneCopySoFar(true, e!!, second[m.mediaId]),
             )
         }
         for (e in ledger) {
@@ -70,6 +78,7 @@ object GalleryMerge {
                 remotePath = remote,
                 status = e.status,
                 lastError = e.lastError,
+                oneCopy = second != null && oneCopySoFar(true, e, second[e.mediaId]),
             )
         }
         out.sortWith(compareByDescending<GalleryItem> { it.dateMs }.thenBy { it.key })

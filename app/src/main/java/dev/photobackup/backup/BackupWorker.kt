@@ -241,7 +241,7 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         // The second location speaks up only when the user must act: its login was refused. "Not reachable" and
         // waiting are normal away from home; failed items are shown in-app, as for the main drive.
         if (secondResult == SecondResult.AuthFailed) {
-            BackupNotifications.secondError(applicationContext, SecondStatusText.REENTER_PASSWORD)
+            BackupNotifications.secondError(applicationContext, SecondStatusText.REENTER_PASSWORD, reauth = true)
         } else {
             BackupNotifications.clearSecondError(applicationContext)
         }

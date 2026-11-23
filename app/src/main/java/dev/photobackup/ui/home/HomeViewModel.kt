@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.photobackup.app.BackupControl
 import dev.photobackup.backup.BackupStatusSnapshot
+import dev.photobackup.backup.SecondStatusText
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.ui.userMessage
@@ -33,6 +34,19 @@ data class HomeUiState(
 ) {
     /** A login is saved but its password can't be decrypted (e.g. after a phone restore). */
     val needsPassword: Boolean get() = passwordUnreadable(settings)
+
+    /** "Second location: …" for the status sheet; null when no second location is set (a stale status is hidden). */
+    val secondLine: String? get() {
+        if (settings?.second == null) return null
+        return "Second location: " + (status?.secondStatus ?: "not copied yet")
+    }
+
+    /** Show "Re-enter password" for the second location: its login was refused, or its saved password can't be read. */
+    val secondNeedsPassword: Boolean get() {
+        val second = settings?.second ?: return false
+        return status?.secondStatus == SecondStatusText.REENTER_PASSWORD ||
+            (second.smb.username != null && second.smb.password == null)
+    }
 }
 
 /** A login is saved but its password can't be decrypted (e.g. after a phone restore). Guest logins never need one. */
@@ -48,6 +62,8 @@ class HomeViewModel(
     private val reenterPassword: suspend () -> Unit,
     private val freeUpBytes: suspend (AppSettings) -> Long,
     private val backup: BackupControl,
+    /** Opens the "Re-enter second location password" dialog; throws if cancelled. */
+    private val reenterSecondPassword: suspend () -> Unit = {},
 ) : ViewModel() {
     private val _state = MutableStateFlow(HomeUiState())
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
@@ -135,6 +151,20 @@ class HomeViewModel(
                 throw e
             } catch (_: Exception) {
                 // cancelled: banner stays
+            }
+        }
+    }
+
+    /** Re-enter the second location's password; on success runs [onDone]. A cancelled dialog does nothing. */
+    fun reenterSecond(onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                reenterSecondPassword()
+                onDone()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // cancelled or still refused: the status line stays
             }
         }
     }

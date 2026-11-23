@@ -31,6 +31,7 @@ import dev.photobackup.gallery.SmbRoot
 import dev.photobackup.gallery.ViewerListHolder
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerDao
+import dev.photobackup.ledger.SecondCopy
 import dev.photobackup.media.LocalMediaSource
 import dev.photobackup.player.PlayerSession
 import dev.photobackup.review.DEFAULT_GESTURES
@@ -49,12 +50,18 @@ import dev.photobackup.ui.auth.AuthRetryingStore
 import dev.photobackup.ui.home.HomeViewModel
 import dev.photobackup.ui.home.passwordUnreadable
 import dev.photobackup.ui.settings.SettingsViewModel
+import dev.photobackup.ui.setup.SetupMode
 import dev.photobackup.ui.setup.SetupViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -149,6 +156,51 @@ class AppContainer(context: Context) {
             },
             onReauthSaved = { onReauthSaved() },
         )
+    }
+
+    /**
+     * "Re-enter second location password": the main flow's [AuthPrompt], for the second location's own login. Saves
+     * only into `second` (never the main login); a missing second location reads as not configured.
+     */
+    val secondAuthPrompt: AuthPrompt by lazy {
+        AuthPrompt(
+            load = { settingsStore.settings.first().second?.smb },
+            save = { user, pass ->
+                settingsStore.update { s ->
+                    s.copy(second = s.second?.let { it.copy(smb = it.smb.copy(username = user, password = pass)) })
+                }
+            },
+            onReauthSaved = { onSecondReauthSaved() },
+        )
+    }
+
+    @Volatile private var secondReauthSaves = 0
+
+    /** A new second-location login was saved: clear its notification and run a backup so copying resumes. */
+    private suspend fun onSecondReauthSaved() {
+        secondReauthSaves++
+        BackupNotifications.clearSecondError(app)
+        backup.runNow(settings().chargingOnly)
+    }
+
+    /** Opens the "Re-enter second location password" dialog and checks the new login against the second drive. */
+    suspend fun reenterSecondPassword() {
+        secondAuthPrompt.prompt { cfg -> storeFactory(cfg).use { it.connect() } }
+    }
+
+    /** Tapped the second location's "Re-enter password" notification: try the saved login, ask only if refused. */
+    fun reauthSecondFromNotification() {
+        appScope.launch {
+            try {
+                val before = secondReauthSaves
+                secondAuthPrompt.withAuthRetry { cfg -> storeFactory(cfg).use { it.connect() } }
+                if (secondReauthSaves == before) onSecondReauthSaved()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // cancelled, still failing or removed meanwhile: the status sheet shows the state
+            }
+        }
     }
 
     private suspend fun settings(): AppSettings = settingsStore.settings.first()
@@ -262,6 +314,20 @@ class AppContainer(context: Context) {
         }
     }
 
+    /** Setup in "second" mode, from Settings: picks the second backup location and saves it to `second` only. */
+    val secondSetupFactory: ViewModelProvider.Factory = viewModelFactory {
+        initializer {
+            SetupViewModel(
+                settingsStore = settingsStore,
+                discover = { discovery.discover() },
+                listShares = { host, user, pass -> shareLister.shares(host, user, pass) },
+                openStore = storeFactory,
+                backup = backup,
+                mode = SetupMode.SECOND,
+            )
+        }
+    }
+
     val homeFactory: ViewModelProvider.Factory = viewModelFactory {
         initializer {
             HomeViewModel(
@@ -272,6 +338,7 @@ class AppContainer(context: Context) {
                 reenterPassword = { reenterPassword() },
                 freeUpBytes = { freeUpBytes(it) },
                 backup = backup,
+                reenterSecondPassword = { reenterSecondPassword() },
             )
         }
     }
@@ -281,6 +348,7 @@ class AppContainer(context: Context) {
             SettingsViewModel(
                 settingsStore, storeFactory, backup, media::folderCounts,
                 ledger = ledger, assignments = LedgerDatabase.get(app).folderAssignmentDao(),
+                clearSecondCopies = { LedgerDatabase.get(app).secondCopyDao().clear() },
             )
         }
     }
@@ -297,9 +365,23 @@ class AppContainer(context: Context) {
                 rules = { settings().folderRules },
                 runNow = { backup.runNow(settings().chargingOnly) },
                 root = { settings().let { it.destination to it.deviceName } },
+                second = secondCopies(),
             )
         }
     }
+
+    /**
+     * The second location's copies by mediaId for the Gallery badge, or null while no second location is set (then
+     * the table is not even observed). A read error falls back to null: the badges stay as without the feature.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun secondCopies(): Flow<Map<Long, SecondCopy>?> =
+        settingsStore.settings.map { it.second != null }.distinctUntilChanged().flatMapLatest { on ->
+            if (!on) flowOf(null)
+            else LedgerDatabase.get(app).secondCopyDao().observeAll().map<List<SecondCopy>, Map<Long, SecondCopy>?> { rows ->
+                rows.associateBy { it.mediaId }
+            }
+        }.catch { e -> if (e is CancellationException) throw e else emit(null) }
 
     /** Browse one folder; each `browse?path=` back-stack entry gets its own ViewModel and connection. */
     fun browseFactory(path: String): ViewModelProvider.Factory = viewModelFactory {
