@@ -58,6 +58,7 @@ class ProductionBackupRunner(private val context: Context) : BackupRunner {
             .filter { LedgerRules.needsUpload(ledger.get(it.mediaId), it) }
             .sumOf { it.sizeBytes }
 
+        // One store (one SMB session) shared by all parallel workers: smbj handles concurrent requests on a session.
         val store = SmbjRemoteStore(smb)
         try {
             val engine = BackupEngine(
@@ -66,6 +67,7 @@ class ProductionBackupRunner(private val context: Context) : BackupRunner {
                 opener = media.opener(),
                 settings = BackupSettings(destination, settings.deviceName, ZoneId.systemDefault()),
                 clock = System::currentTimeMillis,
+                parallelUploads = settings.parallelUploads,
             )
             return engine.run(items) { done, total, bytes -> onProgress(done, total, bytes, totalBytes) }
         } finally {

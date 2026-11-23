@@ -3,6 +3,7 @@ package dev.photobackup.ui.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.photobackup.app.BackupControl
+import dev.photobackup.backup.BackupEngine
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.settings.SettingsStore
 import dev.photobackup.smb.RemoteStore
@@ -50,6 +51,8 @@ class SettingsViewModel(
     }
 
     fun setNotifyOnComplete(on: Boolean): Job = edit { it.copy(notifyOnComplete = on) }
+
+    fun setParallelUploads(n: Int): Job = edit { it.copy(parallelUploads = n.coerceIn(1, BackupEngine.MAX_PARALLEL)) }
 
     fun setFreeUpAge(months: Int): Job = edit { it.copy(freeUpAgeMonths = months.coerceIn(1, 36)) }
 

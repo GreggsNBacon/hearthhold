@@ -67,7 +67,7 @@ Remote access (Immich on a spare PC, router WireGuard VPN) and Google Photos are
 4. **Gallery**: one date-sorted grid of everything, whether it's on the phone, on the drive, or both. A small badge shows where each item lives (phone / drive / both). Tap to open the viewer. Drive-only items appear only when the drive is reachable. The app keeps a cached list and thumbnails, so it can show "on drive (not reachable now)" greyed out.
 5. **Browse drive**: folder view of the share, for files the app didn't put there. Tap opens the viewer. Overflow menu: "Copy to phone".
 6. **Viewer / player**: see below.
-7. **Settings**: drive/share/folder, credentials, charging-only toggle (default off), "Notify when a backup finishes" toggle (default on: a quiet "Backup complete — N files backed up (size)" notification when a run uploads at least one file), age threshold N, which phone folders to include.
+7. **Settings**: drive/share/folder, credentials, charging-only toggle (default off), "Notify when a backup finishes" toggle (default on: a quiet "Backup complete — N files backed up (size)" notification when a run uploads at least one file), "Files at once" (1–4, default 1), age threshold N, which phone folders to include.
 
 ### Backup behaviour
 - **Source:** MediaStore images and videos. *My call:* by default include the camera folder (DCIM/Camera) and Screenshots. Other folders (e.g. WhatsApp) can be turned on in Settings.
@@ -84,6 +84,7 @@ Remote access (Immich on a spare PC, router WireGuard VPN) and Google Photos are
 - *My call:* **Edited files.** The ledger records MediaStore id + size + date modified. If a backed-up file changes on the phone, it goes back to `pending` and uploads as a new copy (`name (1).ext`). The old copy on the drive stays. "Verified" always means *the version on the phone right now* is on the drive.
 - *My call:* **Drive limits.** Before uploading, check free space on the share (SMB query). On FAT32 drives, flag files over 4 GB as "too big for this drive's format" instead of failing again and again. Show both on Home.
 - *My call:* **First backup.** The backlog can be large. Home shows progress and an estimated time left. A "Back up now" run keeps going in the foreground while the screen is on, so it doesn't depend on Android's background-time limits.
+- **Gentle on the router** *(owner decision, 2026-11-22)*: a full-speed write + read-back made the RT-AX86U's Samba unreachable for the owner's PC. So the app pauses 2 s after each file (upload + verify, or adopt) before the next one, and by default copies **one file at a time**. Settings → "Files at once (faster, but busier router)" allows 1–4 in parallel over the same SMB session; every safety rule still holds (a name is reserved while a file is in flight, so two files can never pick the same name; free space is reserved per file before it starts; a drive-level error stops all of them).
 - **Errors:** retry with backoff. A persistent failure (bad password, drive missing, SMB1-only) shows on Home and in a notification.
 
 ### Viewer / player

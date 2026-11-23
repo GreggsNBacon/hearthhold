@@ -5,16 +5,25 @@ import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.ledger.LedgerRules
 import dev.photobackup.ledger.LedgerStore
 import dev.photobackup.media.PhoneMedia
+import dev.photobackup.smb.DriveInfo
+import dev.photobackup.smb.RemoteEntry
 import dev.photobackup.smb.RemoteException
 import dev.photobackup.smb.RemoteStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 import java.io.IOException
 import java.io.InputStream
 import java.time.ZoneId
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 
 fun interface LocalOpener {
     /** Returns null if the item is gone from the phone. */
@@ -36,7 +45,24 @@ data class BackupSettings(val destination: String, val deviceName: String, val z
  * leaves the in-flight row as-is for the next run's leftover cleanup. Other IOExceptions fail the
  * item and the run continues.
  *
- * [fat32MaxBytes] is injectable only so tests can exercise FAT32 detection without 4 GB of data.
+ * Gentle on the router: a worker waits [itemPauseMs] (cancellable) before its next item whenever the previous one
+ * went to the drive (upload + verify, adopt, or a failed attempt). A full-speed write + read-back otherwise starves
+ * the router's Samba for everyone else on the network.
+ *
+ * Parallel: up to [parallelUploads] items run at once on the one shared [store] (smbj multiplexes concurrent
+ * requests over one session: message ids and credits are handed out under a lock and responses are matched by id).
+ * With 1 it behaves exactly like a plain sequential loop. Concurrency rules:
+ * - Leftover cleanup runs once, before any worker starts.
+ * - A target name (and its `.part`) is reserved under [nameLock] while the free-name check runs, and released only
+ *   after the rename (the name then exists on the drive) or after the item gave up on it. So two items with the
+ *   same name in the same folder can never pick the same target.
+ * - Each item reserves its size against the free space before it starts; the reservation is returned unless it
+ *   uploaded.
+ * - A Stop-type [RemoteException] in any worker cancels the others at their next chunk or pause; their rows stay
+ *   UPLOADING with partPath for the next run's cleanup, exactly as when a single run is cancelled.
+ *
+ * [fat32MaxBytes] is injectable only so tests can exercise FAT32 detection without 4 GB of data; [pause] only so
+ * tests can observe the pauses.
  */
 class BackupEngine(
     private val store: RemoteStore,
@@ -47,20 +73,47 @@ class BackupEngine(
     private val fat32MaxBytes: Long = RemotePathPlanner.FAT32_MAX_BYTES,
     /** A write failure counts as the FAT32 limit only within this many bytes past it (stream buffering). */
     private val fat32SlackBytes: Long = 8L * 1024 * 1024,
+    parallelUploads: Int = 1,
+    private val itemPauseMs: Long = DEFAULT_ITEM_PAUSE_MS,
+    private val pause: suspend (Long) -> Unit = { delay(it) },
 ) {
     companion object {
         const val FAT32_ERROR = "too big for this drive's format (FAT32, 4 GB limit)"
         const val VERIFY_ERROR = "verification failed"
         const val SIZE_ERROR = "size mismatch"
+        const val DEFAULT_ITEM_PAUSE_MS = 2000L
+        const val MAX_PARALLEL = 4
         private const val MAX_CLASH = 10_000
     }
 
-    private enum class Outcome { UPLOADED, SKIPPED, FAILED }
+    private val workers = parallelUploads.coerceIn(1, MAX_PARALLEL)
 
-    /** Per-run state shared with [processItem]. */
-    private class RunState(val freeAtConnect: Long, val total: Int) {
+    /** ADOPTED counts as skipped but did go to the drive (the existing copy was read back in full). */
+    private enum class Outcome { UPLOADED, ADOPTED, SKIPPED, FAILED }
+
+    /** Thrown by a worker to stop the whole run; the enclosing coroutineScope cancels its siblings. */
+    private class StopRun(val reason: RemoteException) : Exception(null, reason, false, false)
+
+    /** Per-run state shared by the workers. Everything here is guarded by [lock]. */
+    private class RunState(freeAtConnect: Long, val total: Int) {
+        val lock = Any()
+        val freeAtConnect = freeAtConnect
+        var free = freeAtConnect
+        var done = 0
         var bytesDone = 0L
+        var uploaded = 0
+        var skipped = 0
+        var failed = 0
+        var bytesUploaded = 0L
     }
+
+    /** Target names (and their `.part`), lowercase since SMB names are case-insensitive, held by in-flight items. */
+    private val reserved = mutableSetOf<String>()
+
+    /** Serialises "is this name free?" checks with the reservation that follows. */
+    private val nameLock = Mutex()
+
+    private fun key(path: String) = path.lowercase(Locale.ROOT)
 
     suspend fun run(
         items: List<PhoneMedia>,
@@ -73,7 +126,7 @@ class BackupEngine(
             return@withContext BackupResult.Stopped(e)
         }
 
-        // 2. Clean leftovers before deciding what needs uploading.
+        // 2. Clean leftovers before deciding what needs uploading, and before any worker starts.
         try {
             cleanLeftovers()
         } catch (e: RemoteException) {
@@ -81,47 +134,84 @@ class BackupEngine(
         }
 
         val work = items.filter { LedgerRules.needsUpload(ledger.get(it.mediaId), it) }
-        var uploaded = 0
-        var skipped = 0
-        var failed = 0
-        var bytesUploaded = 0L
-        var free = drive.freeBytes
         val state = RunState(drive.freeBytes, work.size)
+        val next = AtomicInteger(0)
 
-        for ((i, m) in work.withIndex()) {
-            ensureActive()
-            val existing = ledger.get(m.mediaId)
-            val outcome = when {
-                // A leftover .part could not be removed; leave it for the next run's cleanup.
-                existing?.partPath != null -> Outcome.FAILED
-
-                // Already known to be too big for this drive and unchanged: don't retry.
-                existing != null && existing.status == BackupStatus.FAILED &&
-                    existing.lastError == FAT32_ERROR &&
-                    existing.sizeBytes == m.sizeBytes && existing.dateModifiedSec == m.dateModifiedSec ->
-                    Outcome.SKIPPED
-
-                drive.fileSystem == "FAT32" && m.sizeBytes > fat32MaxBytes -> {
-                    ledger.upsert(entry(m, BackupStatus.FAILED, error = FAT32_ERROR))
-                    Outcome.FAILED
-                }
-
-                m.sizeBytes > free -> return@withContext BackupResult.Stopped(RemoteException.DriveFull())
-
-                else -> try {
-                    processItem(m, i, state, onProgress)
-                } catch (e: RemoteException) {
-                    return@withContext BackupResult.Stopped(e)
+        // 3. Up to [workers] items at once, each worker taking the next item in order.
+        try {
+            coroutineScope {
+                repeat(minOf(workers, work.size)) {
+                    launch {
+                        var pauseFirst = false
+                        while (true) {
+                            ensureActive()
+                            val i = next.getAndIncrement()
+                            if (i >= work.size) break
+                            if (pauseFirst && itemPauseMs > 0) pause(itemPauseMs)
+                            pauseFirst = handle(work[i], drive, state, onProgress)
+                        }
+                    }
                 }
             }
-            when (outcome) {
-                Outcome.UPLOADED -> { uploaded++; bytesUploaded += m.sizeBytes; free -= m.sizeBytes }
-                Outcome.SKIPPED -> skipped++
-                Outcome.FAILED -> failed++
-            }
-            onProgress(i + 1, work.size, state.bytesDone)
+        } catch (s: StopRun) {
+            return@withContext BackupResult.Stopped(s.reason)
         }
-        BackupResult.Done(uploaded, skipped, failed, bytesUploaded)
+        synchronized(state.lock) {
+            BackupResult.Done(state.uploaded, state.skipped, state.failed, state.bytesUploaded)
+        }
+    }
+
+    /** Runs one item and counts its outcome. Returns whether it went to the drive (so a pause should follow). */
+    private suspend fun handle(
+        m: PhoneMedia,
+        drive: DriveInfo,
+        state: RunState,
+        onProgress: (Int, Int, Long) -> Unit,
+    ): Boolean {
+        val existing = ledger.get(m.mediaId)
+        var reservedBytes = 0L
+        var wentToDrive = false
+        val outcome = when {
+            // A leftover .part could not be removed; leave it for the next run's cleanup.
+            existing?.partPath != null -> Outcome.FAILED
+
+            // Already known to be too big for this drive and unchanged: don't retry.
+            existing != null && existing.status == BackupStatus.FAILED &&
+                existing.lastError == FAT32_ERROR &&
+                existing.sizeBytes == m.sizeBytes && existing.dateModifiedSec == m.dateModifiedSec ->
+                Outcome.SKIPPED
+
+            drive.fileSystem == "FAT32" && m.sizeBytes > fat32MaxBytes -> {
+                ledger.upsert(entry(m, BackupStatus.FAILED, error = FAT32_ERROR))
+                Outcome.FAILED
+            }
+
+            else -> {
+                // Reserve this item's size before it starts, so parallel items can't jointly overfill the drive.
+                val fits = synchronized(state.lock) {
+                    (m.sizeBytes <= state.free).also { if (it) state.free -= m.sizeBytes }
+                }
+                if (!fits) throw StopRun(RemoteException.DriveFull())
+                reservedBytes = m.sizeBytes
+                wentToDrive = true
+                try {
+                    processItem(m, state, onProgress)
+                } catch (e: RemoteException) {
+                    throw StopRun(e)
+                }
+            }
+        }
+        synchronized(state.lock) {
+            when (outcome) {
+                Outcome.UPLOADED -> { state.uploaded++; state.bytesUploaded += m.sizeBytes }
+                Outcome.ADOPTED, Outcome.SKIPPED -> state.skipped++
+                Outcome.FAILED -> state.failed++
+            }
+            if (outcome != Outcome.UPLOADED) state.free += reservedBytes
+            state.done++
+            onProgress(state.done, state.total, state.bytesDone)
+        }
+        return wentToDrive
     }
 
     /** Deletes each row's own tracked `.part`, then resets interrupted rows to PENDING. */
@@ -150,40 +240,90 @@ class BackupEngine(
 
     private suspend fun processItem(
         m: PhoneMedia,
-        index: Int,
         state: RunState,
         onProgress: (Int, Int, Long) -> Unit,
     ): Outcome {
         val dir = RemotePathPlanner.targetDir(settings.destination, settings.deviceName, m, settings.zone)
         val name = RemotePathPlanner.sanitise(m.displayName)
 
-        // 4. Pick a free name, or adopt an identical existing file.
+        // 4. Pick and reserve a free name, or adopt an identical existing file.
+        val final = when (val pick = pickTarget(m, dir, name)) {
+            is Pick.Done -> return pick.outcome
+            is Pick.Target -> pick.path
+        }
+        try {
+            return uploadTo(m, final, state, onProgress)
+        } finally {
+            // The name now exists on the drive (renamed), or this item gave up on it; a .part left behind still
+            // blocks the name through the drive itself. Either way, stop holding the reservation.
+            release(final)
+        }
+    }
+
+    private sealed interface Pick {
+        class Done(val outcome: Outcome) : Pick
+        class Target(val path: String) : Pick
+    }
+
+    /**
+     * Finds the first name that neither exists on the drive (nor its `.part`) nor is reserved by another in-flight
+     * item, and reserves it (name and `.part`) before creating the folder. Check-and-reserve runs under [nameLock];
+     * adoption hashing runs outside it.
+     */
+    private suspend fun pickTarget(m: PhoneMedia, dir: String, name: String): Pick {
         var localSha: String? = null
-        var target: String? = null
         try {
             for (n in 0..MAX_CLASH) {
                 val candidate = "$dir\\" + if (n == 0) name else RemotePathPlanner.clashName(name, n)
-                val st = store.stat(candidate)
-                if (st == null) {
-                    if (store.stat(RemotePathPlanner.partName(candidate)) == null) {
-                        target = candidate
-                        break
+                val part = RemotePathPlanner.partName(candidate)
+                var found: RemoteEntry? = null
+                val claimed = nameLock.withLock {
+                    val taken = synchronized(reserved) { key(candidate) in reserved || key(part) in reserved }
+                    if (taken) return@withLock false
+                    found = store.stat(candidate)
+                    if (found != null || store.stat(part) != null) return@withLock false
+                    synchronized(reserved) { reserved += key(candidate); reserved += key(part) }
+                    true
+                }
+                if (claimed) {
+                    try {
+                        store.mkdirs(dir)
+                    } catch (e: Throwable) {
+                        release(candidate)
+                        throw e
                     }
-                } else if (!st.isDirectory && st.sizeBytes == m.sizeBytes) {
-                    val sha = localSha ?: (hashLocal(m) ?: return missingOnPhone(m)).also { localSha = it }
+                    return Pick.Target(candidate)
+                }
+                val st = found
+                if (st != null && !st.isDirectory && st.sizeBytes == m.sizeBytes) {
+                    val sha = localSha ?: (hashLocal(m) ?: return Pick.Done(missingOnPhone(m))).also { localSha = it }
                     if (hashRemote(candidate) == sha) {
                         ledger.upsert(entry(m, BackupStatus.VERIFIED, sha = sha, remote = candidate))
-                        return Outcome.SKIPPED
+                        return Pick.Done(Outcome.ADOPTED)
                     }
                 }
             }
-            if (target == null) return fail(m, "no free file name in $dir")
-            store.mkdirs(dir)
+            return Pick.Done(fail(m, "no free file name in $dir"))
         } catch (e: IOException) {
             if (e is RemoteException) throw e
-            return fail(m, e.message)
+            return Pick.Done(fail(m, e.message))
         }
-        val final = target!!
+    }
+
+    private fun release(candidate: String) {
+        synchronized(reserved) {
+            reserved.remove(key(candidate))
+            reserved.remove(key(RemotePathPlanner.partName(candidate)))
+        }
+    }
+
+    /** Steps 5-7 for a reserved [final] name: upload to `.part`, rename, verify. */
+    private suspend fun uploadTo(
+        m: PhoneMedia,
+        final: String,
+        state: RunState,
+        onProgress: (Int, Int, Long) -> Unit,
+    ): Outcome {
         val part = RemotePathPlanner.partName(final)
 
         // 5. Upload to .part while hashing.
@@ -203,8 +343,10 @@ class BackupEngine(
                     Hashing.copyWithSha256(inp, out) { n ->
                         ctx.ensureActive() // cancellable per chunk; row stays UPLOADING for cleanup
                         offered += n
-                        state.bytesDone += n
-                        onProgress(index, state.total, state.bytesDone)
+                        synchronized(state.lock) {
+                            state.bytesDone += n
+                            onProgress(state.done, state.total, state.bytesDone)
+                        }
                     }
                 }
             }

@@ -6,6 +6,10 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 
+/**
+ * In-memory [RemoteStore]. Thread-safe (state changes under `synchronized(this)`) so the backup engine's parallel
+ * workers can share it; [failOn] runs outside the lock, so a test hook may block to line workers up.
+ */
 class FakeRemoteStore(
     var failOn: ((op: String, path: String) -> IOException?)? = null,
     var freeBytes: Long = Long.MAX_VALUE,
@@ -49,13 +53,15 @@ class FakeRemoteStore(
 
     override suspend fun list(dir: String): List<RemoteEntry> {
         check("list", dir)
-        if (dir.isNotEmpty() && dir !in dirs) throw FileNotFoundException(dir)
-        return (files.keys + dirs).filter { parentOf(it) == dir }.sorted().mapNotNull { entry(it) }
+        synchronized(this) {
+            if (dir.isNotEmpty() && dir !in dirs) throw FileNotFoundException(dir)
+            return (files.keys + dirs).filter { parentOf(it) == dir }.sorted().mapNotNull { entry(it) }
+        }
     }
 
     override suspend fun stat(path: String): RemoteEntry? {
         check("stat", path)
-        return entry(path)
+        return synchronized(this) { entry(path) }
     }
 
     override suspend fun mkdirs(dir: String) {
@@ -71,11 +77,14 @@ class FakeRemoteStore(
 
     override suspend fun openWrite(path: String): OutputStream {
         check("openWrite", path)
-        if (path in files || path in dirs) throw IOException("File exists: $path")
-        val parent = parentOf(path)
-        if (parent.isNotEmpty() && parent !in dirs) throw FileNotFoundException(parent)
-        writes.add(path)
-        files[path] = ByteArray(0)
+        synchronized(this) {
+            if (path in files || path in dirs) throw IOException("File exists: $path")
+            val parent = parentOf(path)
+            if (parent.isNotEmpty() && parent !in dirs) throw FileNotFoundException(parent)
+            writes.add(path)
+            files[path] = ByteArray(0)
+        }
+        val store = this
         return object : OutputStream() {
             private var streamWritten = 0L
             override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
@@ -85,7 +94,7 @@ class FakeRemoteStore(
                 val allowed =
                     if (limit == null) len else minOf(len.toLong(), maxOf(0L, limit - streamWritten)).toInt()
                 if (allowed > 0) {
-                    files[path] = files.getValue(path) + b.copyOfRange(off, off + allowed)
+                    synchronized(store) { files[path] = files.getValue(path) + b.copyOfRange(off, off + allowed) }
                     streamWritten += allowed
                 }
                 if (allowed < len) throw IOException("Simulated write failure after $limit bytes")
@@ -95,7 +104,7 @@ class FakeRemoteStore(
 
     override suspend fun openRead(path: String, offset: Long): InputStream {
         check("openRead", path)
-        val stored = files[path] ?: throw FileNotFoundException(path)
+        val stored = synchronized(this) { files[path] } ?: throw FileNotFoundException(path)
         val data = if (corruptReads && stored.isNotEmpty()) {
             stored.copyOf().also { it[0] = (it[0].toInt() xor 0xFF).toByte() }
         } else stored
@@ -105,22 +114,28 @@ class FakeRemoteStore(
 
     override suspend fun rename(from: String, to: String) {
         check("rename", from)
-        if (to in files || to in dirs) throw IOException("Target exists: $to")
-        val data = files.remove(from) ?: throw FileNotFoundException(from)
-        files[to] = data
+        synchronized(this) {
+            if (to in files || to in dirs) throw IOException("Target exists: $to")
+            val data = files.remove(from) ?: throw FileNotFoundException(from)
+            files[to] = data
+        }
     }
 
     override suspend fun delete(path: String) {
         check("delete", path)
-        deletes.add(path)
-        if (files.remove(path) == null && !dirs.remove(path)) throw FileNotFoundException(path)
+        synchronized(this) {
+            deletes.add(path)
+            if (files.remove(path) == null && !dirs.remove(path)) throw FileNotFoundException(path)
+        }
     }
 
     override suspend fun setTimes(path: String, modifiedMs: Long) {
         setTimesError?.let { throw it }
         check("setTimes", path)
-        if (path !in files) throw FileNotFoundException(path)
-        times[path] = modifiedMs
+        synchronized(this) {
+            if (path !in files) throw FileNotFoundException(path)
+            times[path] = modifiedMs
+        }
     }
 
     override fun close() {}

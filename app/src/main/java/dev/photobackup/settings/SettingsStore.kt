@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import dev.photobackup.backup.BackupEngine
 import dev.photobackup.media.SourceFolders
 import dev.photobackup.smb.SmbConfig
 import kotlinx.coroutines.flow.Flow
@@ -50,6 +51,7 @@ class SettingsStore internal constructor(
             ),
             loopVideos = p[LOOP_VIDEOS] ?: true,
             notifyOnComplete = p[NOTIFY_ON_COMPLETE] ?: true,
+            parallelUploads = (p[PARALLEL_UPLOADS] ?: 1).coerceIn(1, BackupEngine.MAX_PARALLEL),
         )
     }
 
@@ -71,6 +73,7 @@ class SettingsStore internal constructor(
         p[EXTRA_PATHS] = s.folders.extraRelativePaths
         p[LOOP_VIDEOS] = s.loopVideos
         p[NOTIFY_ON_COMPLETE] = s.notifyOnComplete
+        p[PARALLEL_UPLOADS] = s.parallelUploads
     }
 
     private fun <T> MutablePreferences.putOrRemove(key: Preferences.Key<T>, value: T?) {
@@ -91,5 +94,6 @@ class SettingsStore internal constructor(
         val EXTRA_PATHS = stringSetPreferencesKey("folder_extra_paths")
         val LOOP_VIDEOS = booleanPreferencesKey("loop_videos")
         val NOTIFY_ON_COMPLETE = booleanPreferencesKey("notify_on_complete")
+        val PARALLEL_UPLOADS = intPreferencesKey("parallel_uploads")
     }
 }

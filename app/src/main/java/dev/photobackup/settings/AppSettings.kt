@@ -13,4 +13,6 @@ data class AppSettings(
     val folders: SourceFolders = SourceFolders(),
     val loopVideos: Boolean = true,
     val notifyOnComplete: Boolean = true,
+    /** "Files at once": items the backup engine uploads in parallel, 1..4. More is faster but busier for the router. */
+    val parallelUploads: Int = 1,
 )

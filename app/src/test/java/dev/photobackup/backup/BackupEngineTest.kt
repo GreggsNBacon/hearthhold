@@ -9,6 +9,7 @@ import dev.photobackup.smb.RemoteException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -23,14 +24,14 @@ import java.io.InputStream
 import java.security.MessageDigest
 import java.time.ZoneOffset
 
-/** In-memory [LedgerStore] for tests. */
+/** In-memory [LedgerStore] for tests; atomic updates so parallel workers can share it. */
 class MemoryLedger : LedgerStore {
     val rows = MutableStateFlow<Map<Long, LedgerEntry>>(emptyMap())
-    override suspend fun upsert(e: LedgerEntry) { rows.value = rows.value + (e.mediaId to e) }
+    override suspend fun upsert(e: LedgerEntry) { rows.update { it + (e.mediaId to e) } }
     override suspend fun get(mediaId: Long) = rows.value[mediaId]
     override suspend fun byStatus(s: BackupStatus) = rows.value.values.filter { it.status == s }
     override suspend fun withPartPath() = rows.value.values.filter { it.partPath != null }
-    override suspend fun delete(mediaId: Long) { rows.value = rows.value - mediaId }
+    override suspend fun delete(mediaId: Long) { rows.update { it - mediaId } }
     override fun observeCounts(): Flow<Map<BackupStatus, Int>> =
         rows.map { m -> m.values.groupingBy { it.status }.eachCount() }
     override fun observeAll(): Flow<List<LedgerEntry>> =
@@ -59,7 +60,13 @@ class BackupEngineTest {
         data: ByteArray?,
         fat32Max: Long = RemotePathPlanner.FAT32_MAX_BYTES,
         slack: Long = 8L * 1024 * 1024,
-    ) = BackupEngine(store, ledger, { data?.let { ByteArrayInputStream(it) } }, settings, { 1234L }, fat32Max, slack)
+        parallel: Int = 1,
+        pauseMs: Long = 0,
+        pause: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
+    ) = BackupEngine(
+        store, ledger, { data?.let { ByteArrayInputStream(it) } }, settings, { 1234L }, fat32Max, slack,
+        parallelUploads = parallel, itemPauseMs = pauseMs, pause = pause,
+    )
 
     @Test fun uploadsAndVerifiesNewItem() = runBlocking {
         val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(5000)

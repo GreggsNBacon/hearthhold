@@ -1,6 +1,8 @@
 package dev.photobackup.settings
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.test.core.app.ApplicationProvider
 import dev.photobackup.smb.SmbConfig
@@ -43,6 +45,17 @@ class SettingsStoreTest {
         assertNull(s.destination)
         assertTrue(s.folders.camera)
         assertTrue(s.notifyOnComplete)
+        assertEquals(1, s.parallelUploads)
+    }
+
+    @Test fun parallelUploadsPersistsAndIsClampedOnRead() = runBlocking {
+        val (store, ds) = newStore()
+        store.update { it.copy(parallelUploads = 3) }
+        assertEquals(3, store.settings.first().parallelUploads)
+        ds.edit { it[intPreferencesKey("parallel_uploads")] = 9 }
+        assertEquals(4, store.settings.first().parallelUploads)
+        ds.edit { it[intPreferencesKey("parallel_uploads")] = 0 }
+        assertEquals(1, store.settings.first().parallelUploads)
     }
 
     @Test fun notifyOnCompletePersists() = runBlocking {

@@ -64,6 +64,16 @@ class SettingsViewModelTest {
         assertEquals(false, settings.settings.first().notifyOnComplete)
     }
 
+    @Test fun parallelUploadsIsClampedTo1To4() = runBlocking {
+        val vm = vm()
+        vm.setParallelUploads(3).join()
+        assertEquals(3, settings.settings.first().parallelUploads)
+        vm.setParallelUploads(7).join()
+        assertEquals(4, settings.settings.first().parallelUploads)
+        vm.setParallelUploads(0).join()
+        assertEquals(1, settings.settings.first().parallelUploads)
+    }
+
     @Test fun freeUpAgeIsClampedTo1To36() = runBlocking {
         val vm = vm()
         vm.setFreeUpAge(0).join()

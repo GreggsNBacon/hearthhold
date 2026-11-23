@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import dev.photobackup.backup.BackupEngine
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.smb.RemoteStore
 import dev.photobackup.ui.Screen
@@ -80,6 +81,13 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
             SwitchRow("Only back up while charging", s.chargingOnly) { viewModel.setChargingOnly(it) }
             SwitchRow("Notify when a backup finishes", s.notifyOnComplete) { viewModel.setNotifyOnComplete(it) }
             HorizontalDivider()
+            Stepper(
+                label = "Files at once (faster, but busier router)",
+                value = s.parallelUploads,
+                range = 1..BackupEngine.MAX_PARALLEL,
+                format = { it.toString() },
+            ) { viewModel.setParallelUploads(it) }
+            HorizontalDivider()
             FreeUpAge(s, viewModel)
             HorizontalDivider()
             Folders(s, viewModel)
@@ -95,6 +103,17 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+/** A label with − value + buttons; [onChange] gets the new value, always inside [range]. */
+@Composable
+private fun Stepper(label: String, value: Int, range: IntRange, format: (Int) -> String, onChange: (Int) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f))
+        TextButton(onClick = { onChange(value - 1) }, enabled = value > range.first) { Text("−") }
+        Text(format(value), style = MaterialTheme.typography.titleMedium)
+        TextButton(onClick = { onChange(value + 1) }, enabled = value < range.last) { Text("+") }
     }
 }
 
