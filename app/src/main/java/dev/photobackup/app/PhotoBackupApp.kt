@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import androidx.work.WorkManager
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.VideoFrameDecoder
@@ -36,8 +37,14 @@ import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerDao
 import dev.photobackup.ledger.SecondCopy
 import dev.photobackup.media.LocalMediaSource
+import dev.photobackup.media.MediaAccess
 import dev.photobackup.player.OpenElsewhere
 import dev.photobackup.player.PlayerSession
+import dev.photobackup.restore.RestoreFactory
+import dev.photobackup.restore.RestoreResults
+import dev.photobackup.restore.RestoreScheduler
+import dev.photobackup.restore.RestoreViewModel
+import dev.photobackup.restore.restoreRunOf
 import dev.photobackup.review.DEFAULT_GESTURES
 import dev.photobackup.review.RealReviewFinisher
 import dev.photobackup.review.ReviewAction
@@ -489,6 +496,22 @@ class AppContainer(context: Context) {
                 restore = { repo.restore(it) },
                 empty = { repo.empty(it) },
                 emptyAll = { repo.emptyAll() },
+            )
+        }
+    }
+
+    /** Restore to phone: the engine's groups, the unique "restore" job's progress and its saved summary. */
+    val restoreFactory: ViewModelProvider.Factory = viewModelFactory {
+        initializer {
+            val results = RestoreResults.get(app)
+            RestoreViewModel(
+                plan = { RestoreFactory.engine(app).plan(it) },
+                run = WorkManager.getInstance(app).getWorkInfosForUniqueWorkFlow(RestoreScheduler.WORK).map(::restoreRunOf),
+                loadSaved = { results.load() },
+                savedUpdates = RestoreResults.updates,
+                start = { RestoreScheduler.start(app, it) },
+                cancel = { RestoreScheduler.cancel(app) },
+                photoAccess = { MediaAccess.current(app) },
             )
         }
     }

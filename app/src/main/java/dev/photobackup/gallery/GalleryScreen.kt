@@ -100,6 +100,7 @@ fun GalleryScreen(
     onSettings: () -> Unit,
     onReview: () -> Unit = {},
     onBin: () -> Unit = {},
+    onRestore: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
     val home by status.state.collectAsState()
@@ -189,6 +190,10 @@ fun GalleryScreen(
                             DropdownMenuItem(
                                 text = { Text("Bin") },
                                 onClick = { menuOpen = false; onBin() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Restore to phone") },
+                                onClick = { menuOpen = false; onRestore() },
                             )
                             DropdownMenuItem(
                                 text = { Text("Browse drive") },

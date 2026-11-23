@@ -34,6 +34,7 @@ import dev.photobackup.gallery.GalleryScreen
 import dev.photobackup.gallery.SmbRoot
 import dev.photobackup.gallery.ViewerListHolder
 import dev.photobackup.player.ViewerScreen
+import dev.photobackup.restore.RestoreScreen
 import dev.photobackup.review.ReviewScreen
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.settings.SettingsRead
@@ -52,6 +53,7 @@ object Routes {
     const val SETTINGS = "settings"
     const val REVIEW = "review"
     const val BIN = "bin"
+    const val RESTORE = "restore"
     const val SETUP_SECOND = "setup/second"
 
     fun browse(path: String = "") = "browse?path=${Uri.encode(path)}"
@@ -113,6 +115,11 @@ fun AppNav(container: AppContainer) {
             val root by produceState<SmbRoot?>(null) { value = container.driveRoot() }
             BinScreen(viewModel = viewModel(factory = container.binFactory), root = root, onBack = { nav.popBackStack() })
         }
+        composable(Routes.RESTORE) {
+            Screen("Restore to phone", onBack = { nav.popBackStack() }) {
+                RestoreScreen(viewModel(factory = container.restoreFactory))
+            }
+        }
         composable(Routes.SETTINGS) {
             SettingsScreen(
                 viewModel = viewModel(factory = container.settingsFactory),
@@ -145,6 +152,7 @@ fun AppNav(container: AppContainer) {
                 onSettings = { nav.navigate(Routes.SETTINGS) },
                 onReview = { nav.navigate(Routes.REVIEW) },
                 onBin = { nav.navigate(Routes.BIN) },
+                onRestore = { nav.navigate(Routes.RESTORE) },
             )
         }
         composable(
