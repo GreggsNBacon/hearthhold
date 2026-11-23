@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.photobackup.app.BackupControl
 import dev.photobackup.backup.BackupEngine
+import dev.photobackup.media.PartialMediaAccessException
+import dev.photobackup.media.PhoneFolders
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.settings.SettingsStore
 import dev.photobackup.smb.RemoteStore
@@ -22,13 +24,24 @@ data class SettingsUiState(
     val settings: AppSettings? = null,
     val testing: Boolean = false,
     val driveMessage: String? = null,
+    /** Phone folders with photos or videos, for the "Add folder" browser; null until loaded. */
+    val phoneFolders: PhoneFolderList? = null,
 )
+
+sealed interface PhoneFolderList {
+    data object Loading : PhoneFolderList
+    /** Item counts per folder path ("Pictures/WhatsApp/"). */
+    data class Loaded(val counts: Map<String, Int>) : PhoneFolderList
+    data class Failed(val message: String) : PhoneFolderList
+}
 
 class SettingsViewModel(
     private val store: SettingsStore,
     /** For testing newly typed drive details; the saved login is not involved. */
     private val openStore: (SmbConfig) -> RemoteStore,
     private val backup: BackupControl,
+    /** Item counts per phone folder from MediaStore. */
+    private val phoneFolderCounts: suspend () -> Map<String, Int> = { emptyMap() },
 ) : ViewModel() {
     private val _state = MutableStateFlow(SettingsUiState())
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
@@ -73,8 +86,27 @@ class SettingsViewModel(
 
     /** Adds a phone folder like "Pictures/WhatsApp" (MediaStore relative path, trailing slash). */
     fun addFolder(path: String): Job {
-        val p = path.trim().trim('/').takeIf { it.isNotEmpty() } ?: return Job().apply { complete() }
-        return edit { it.copy(folders = it.folders.copy(extraRelativePaths = it.folders.extraRelativePaths + "$p/")) }
+        val p = PhoneFolders.normalise(path).takeIf { it.isNotEmpty() } ?: return Job().apply { complete() }
+        return edit { it.copy(folders = it.folders.copy(extraRelativePaths = it.folders.extraRelativePaths + p)) }
+    }
+
+    /** Loads (or reloads) the phone's folders that hold photos or videos. Never shows exception text. */
+    fun loadPhoneFolders(): Job {
+        _state.update { it.copy(phoneFolders = PhoneFolderList.Loading) }
+        return viewModelScope.launch {
+            val result = try {
+                PhoneFolderList.Loaded(phoneFolderCounts())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: PartialMediaAccessException) {
+                PhoneFolderList.Failed("Allow access to all photos to see every folder")
+            } catch (_: SecurityException) {
+                PhoneFolderList.Failed("Photo access is needed to list folders")
+            } catch (_: Exception) {
+                PhoneFolderList.Failed("Couldn't read the phone's folders")
+            }
+            _state.update { it.copy(phoneFolders = result) }
+        }
     }
 
     fun removeFolder(path: String): Job =

@@ -254,7 +254,7 @@ class AppContainer(context: Context) {
     }
 
     val settingsFactory: ViewModelProvider.Factory = viewModelFactory {
-        initializer { SettingsViewModel(settingsStore, storeFactory, backup) }
+        initializer { SettingsViewModel(settingsStore, storeFactory, backup, media::folderCounts) }
     }
 
     val galleryFactory: ViewModelProvider.Factory = viewModelFactory {

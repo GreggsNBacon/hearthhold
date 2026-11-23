@@ -2,6 +2,7 @@ package dev.photobackup.ui.settings
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.test.core.app.ApplicationProvider
+import dev.photobackup.media.PartialMediaAccessException
 import dev.photobackup.settings.CredentialCipher
 import dev.photobackup.settings.SettingsStore
 import dev.photobackup.smb.FakeRemoteStore
@@ -107,6 +108,32 @@ class SettingsViewModelTest {
     @Test fun addFolderNormalisesRelativePath() = runBlocking {
         vm().addFolder(" /Pictures/WhatsApp ").join()
         assertEquals(setOf("Pictures/WhatsApp/"), settings.settings.first().folders.extraRelativePaths)
+    }
+
+    @Test fun addFolderStoresPickedFolderPathAsIs() = runBlocking {
+        vm().addFolder("Pictures/WhatsApp/").join()
+        assertEquals(setOf("Pictures/WhatsApp/"), settings.settings.first().folders.extraRelativePaths)
+    }
+
+    @Test fun loadPhoneFoldersPublishesCounts() = runBlocking {
+        val vm = SettingsViewModel(settings, { store }, backup, { mapOf("Pictures/WhatsApp/" to 3) })
+        vm.loadPhoneFolders().join()
+        assertEquals(PhoneFolderList.Loaded(mapOf("Pictures/WhatsApp/" to 3)), vm.state.value.phoneFolders)
+    }
+
+    @Test fun loadPhoneFoldersPartialAccessAsksForFullAccess() = runBlocking {
+        val vm = SettingsViewModel(settings, { store }, backup, { throw PartialMediaAccessException() })
+        vm.loadPhoneFolders().join()
+        assertEquals(
+            PhoneFolderList.Failed("Allow access to all photos to see every folder"),
+            vm.state.value.phoneFolders,
+        )
+    }
+
+    @Test fun loadPhoneFoldersErrorNeverShowsExceptionText() = runBlocking {
+        val vm = SettingsViewModel(settings, { store }, backup, { throw IllegalStateException("secret /path") })
+        vm.loadPhoneFolders().join()
+        assertEquals(PhoneFolderList.Failed("Couldn't read the phone's folders"), vm.state.value.phoneFolders)
     }
 
     @Test fun saveDriveRequiresPasswordWhenSavedOneIsUnreadable() = runBlocking {

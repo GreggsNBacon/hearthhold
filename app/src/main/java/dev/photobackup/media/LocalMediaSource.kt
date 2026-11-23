@@ -43,6 +43,26 @@ class LocalMediaSource(
             queryCollection(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL), true, folders)
     }
 
+    /**
+     * Item counts per phone folder (MediaStore relative path, e.g. "Pictures/WhatsApp/") across photos and videos.
+     * Needs full access like [query]: with "Select photos" the list would be incomplete.
+     */
+    suspend fun folderCounts(): Map<String, Int> = withContext(Dispatchers.IO) {
+        when (access()) {
+            MediaAccess.FULL -> Unit
+            MediaAccess.PARTIAL -> throw PartialMediaAccessException()
+            MediaAccess.NONE -> throw SecurityException("No photo access")
+        }
+        PhoneFolders.merge(
+            countFolders(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)),
+            countFolders(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)),
+        )
+    }
+
+    private fun countFolders(collection: Uri): Map<String, Int> =
+        context.contentResolver.query(collection, arrayOf(MediaStore.MediaColumns.RELATIVE_PATH), null, null, null)
+            ?.use { PhoneFolders.count(it) }.orEmpty()
+
     private fun queryCollection(collection: Uri, isVideo: Boolean, folders: SourceFolders): List<PhoneMedia> {
         val projection = arrayOf(
             MediaStore.MediaColumns._ID,

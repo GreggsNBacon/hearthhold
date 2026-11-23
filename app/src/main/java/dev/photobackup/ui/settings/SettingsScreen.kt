@@ -44,12 +44,17 @@ import dev.photobackup.ui.setup.FolderPicker
 fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, onBack: () -> Unit) {
     val state by viewModel.state.collectAsState()
     var picking by remember { mutableStateOf(false) }
+    var addingFolder by remember { mutableStateOf(false) }
     val s = state.settings
 
-    BackHandler(enabled = picking) { picking = false }
+    BackHandler(enabled = picking || addingFolder) { picking = false; addingFolder = false }
     Screen(
-        if (picking) "Backup folder" else "Settings",
-        onBack = { if (picking) picking = false else onBack() },
+        when {
+            picking -> "Backup folder"
+            addingFolder -> "Add phone folder"
+            else -> "Settings"
+        },
+        onBack = { if (picking || addingFolder) { picking = false; addingFolder = false } else onBack() },
     ) {
         if (s == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
@@ -64,6 +69,15 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
                     picking = false
                 }
             }
+            return@Screen
+        }
+        if (addingFolder) {
+            PhoneFolderBrowser(
+                list = state.phoneFolders,
+                folders = s.folders,
+                onAdd = { viewModel.addFolder(it); addingFolder = false },
+                onRetry = { viewModel.loadPhoneFolders() },
+            )
             return@Screen
         }
         Column(
@@ -91,7 +105,7 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
             HorizontalDivider()
             FreeUpAge(s, viewModel)
             HorizontalDivider()
-            Folders(s, viewModel)
+            Folders(s, viewModel) { viewModel.loadPhoneFolders(); addingFolder = true }
         }
     }
 }
@@ -183,8 +197,7 @@ private fun FreeUpAge(s: AppSettings, vm: SettingsViewModel) {
 }
 
 @Composable
-private fun Folders(s: AppSettings, vm: SettingsViewModel) {
-    var extra by remember { mutableStateOf("") }
+private fun Folders(s: AppSettings, vm: SettingsViewModel, onAddFolder: () -> Unit) {
     Section("Phone folders to back up")
     SwitchRow("Camera (DCIM/Camera)", s.folders.camera) { vm.setCamera(it) }
     SwitchRow("Screenshots", s.folders.screenshots) { vm.setScreenshots(it) }
@@ -194,11 +207,5 @@ private fun Folders(s: AppSettings, vm: SettingsViewModel) {
             TextButton(onClick = { vm.removeFolder(p) }) { Text("Remove") }
         }
     }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        OutlinedTextField(
-            extra, { extra = it }, singleLine = true, modifier = Modifier.weight(1f),
-            label = { Text("Add folder, e.g. Pictures/WhatsApp") },
-        )
-        TextButton(onClick = { vm.addFolder(extra); extra = "" }, enabled = extra.isNotBlank()) { Text("Add") }
-    }
+    OutlinedButton(onClick = onAddFolder) { Text("Add folder") }
 }
