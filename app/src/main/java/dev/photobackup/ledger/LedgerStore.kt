@@ -46,7 +46,8 @@ interface LedgerStore {
 
     /**
      * Marks a moved bin request BINNED with binnedAt = [nowMs], only if it is still REMOVED_FROM_PHONE with
-     * binRequestedAt and binPath set, no move in flight, and remotePath = [path].
+     * binRequestedAt and binPath set, no move in flight, and remotePath = [path]. Clears lastError: a cleanly binned
+     * row has none (a stale one would block auto-empty).
      */
     suspend fun markBinned(mediaId: Long, path: String, nowMs: Long): Boolean
 
@@ -56,7 +57,10 @@ interface LedgerStore {
      */
     suspend fun finishRestore(mediaId: Long, restoredPath: String, nowMs: Long): Boolean
 
-    /** Drops a bin request not yet moved (REMOVED_FROM_PHONE, no move in flight): clears binRequestedAt and binPath. */
+    /**
+     * Drops a bin request not yet moved (REMOVED_FROM_PHONE, no move in flight): clears binRequestedAt, binPath and
+     * lastError (any error on a waiting row is about the bin move).
+     */
     suspend fun cancelBinRequest(mediaId: Long, nowMs: Long): Boolean
 
     /** Deletes the row only if it is BINNED at [remotePath] with no move in flight (emptying the bin). */

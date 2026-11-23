@@ -189,6 +189,53 @@ class BackupEngineBinTest {
         }
     }
 
+    /** I1: a Junk row the engine can't bin (old destination/device/layout) says why, so the Bin screen shows it. */
+    @Test fun binRequestsOutsideTheCurrentRootOrLayoutGetAFixedError() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger()
+        val paths = listOf(
+            "Old\\Dev\\Camera\\2026\\a.jpg", // destination changed
+            "B\\Phone\\Camera\\2026\\b.jpg", // device renamed
+            "B\\Dev\\2024\\07\\c.jpg", // old YYYY\\MM layout
+            "B\\Dev\\.Bin\\2026\\d.jpg", // uploaded into a legacy ".Bin" named folder: in the bin, no binPath
+        )
+        paths.forEachIndexed { i, p -> seed(store, ledger, row(i + 1L, p)) }
+        val before = store.files.keys.toSet()
+        engine(store, ledger).run(emptyList())
+        assertEquals(before, store.files.keys)
+        assertTrue(store.deletes.isEmpty())
+        paths.forEachIndexed { i, p ->
+            val e = ledger.get(i + 1L)!!
+            assertEquals(p, e.remotePath)
+            assertEquals(BackupStatus.REMOVED_FROM_PHONE, e.status)
+            assertEquals(BackupEngine.CANT_BIN_ERROR, e.lastError)
+        }
+    }
+
+    /** M1: a bin move that failed once, then crashed after its rename, ends BINNED with no stale error. */
+    @Test fun recoveredBinMoveDropsAnEarlierBinMoveError() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger()
+        ledger.upsert(
+            row(1, "$camera\\IMG.jpg", movingTo = "$bin\\IMG.jpg", binPath = "$camera\\IMG.jpg")
+                .copy(lastError = BackupEngine.BIN_MOVE_ERROR)
+        )
+        store.mkdirs(bin); store.files["$bin\\IMG.jpg"] = bytes(100)
+        engine(store, ledger).run(emptyList())
+        val e = ledger.get(1)!!
+        assertEquals(BackupStatus.BINNED, e.status)
+        assertNull(e.lastError)
+    }
+
+    /** M1: endMove landed (error kept) but the mark did not: marking it BINNED clears the error. */
+    @Test fun markingBinnedClearsAStaleError() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger()
+        val e0 = row(1, "$bin\\IMG.jpg", binPath = "$camera\\IMG.jpg")
+        seed(store, ledger, e0.copy(lastError = BackupEngine.BIN_MOVE_ERROR))
+        engine(store, ledger).run(emptyList())
+        val e = ledger.get(1)!!
+        assertEquals(BackupStatus.BINNED, e.status)
+        assertNull(e.lastError)
+    }
+
     /** A Junk row is never re-filed into a named folder: it goes to the bin only. */
     @Test fun binRequestedRowIsNotReconciledIntoAFolder() = runBlocking {
         val store = FakeRemoteStore(); val ledger = MemoryLedger()

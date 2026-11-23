@@ -40,6 +40,10 @@ object FolderRules {
         return best
     }
 
+    /**
+     * Hand-pick, else rule, else null (source folder). A `.Bin` hand-pick or rule (any case; saved by v1.1.0, before
+     * the name was reserved) counts as none, so nothing is ever filed into the bin folder.
+     */
     fun desired(relativePath: String, assignment: String?, rules: Map<String, String>): String? =
-        assignment ?: ruleFor(relativePath, rules)
+        assignment?.takeUnless { isReserved(it) } ?: ruleFor(relativePath, rules.filterValues { !isReserved(it) })
 }

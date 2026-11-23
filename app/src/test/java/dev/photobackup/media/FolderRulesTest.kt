@@ -26,6 +26,15 @@ class FolderRulesTest {
         assertNull(FolderRules.desired("DCIM/Camera/", null, rules))
     }
 
+    /** M2: a ".Bin" rule or hand-pick saved by v1.1.0 is not a folder: it counts as no rule. */
+    @Test fun desiredIgnoresALegacyBinRuleOrHandPick() {
+        val rules = mapOf("Pictures/" to "Memes", "Pictures/WhatsApp/" to ".bin", "DCIM/" to " .Bin ")
+        assertEquals("Memes", FolderRules.desired("Pictures/WhatsApp/", null, rules))
+        assertNull(FolderRules.desired("DCIM/Camera/", null, rules))
+        assertEquals("Memes", FolderRules.desired("Pictures/WhatsApp/", ".BIN", rules))
+        assertNull(FolderRules.desired("DCIM/Camera/", ".Bin", rules))
+    }
+
     @Test fun canonicalSanitisesAndRejectsBlank() {
         assertEquals("a_b", FolderRules.canonical("  a/b. "))
         assertNull(FolderRules.canonical("   "))

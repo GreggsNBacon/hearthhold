@@ -14,6 +14,8 @@ import dev.photobackup.ledger.ReviewKeepDao
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.smb.FakeRemoteStore
 import dev.photobackup.smb.RemoteException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -197,29 +199,64 @@ class RealReviewFinisherTest {
         assertEquals(1, runs)
     }
 
-    @Test fun rowGoneFromThePhoneIsListedAndItsDecisionCleared() = runBlocking {
+    /** I2: a Drive only row whose phone copy is already gone is applied at prepare, outside the dialog. */
+    @Test fun driveOnlyRowAlreadyGoneFromThePhoneIsAppliedAtPrepare() = runBlocking {
         photo(1, ReviewAction.JUNK)
-        photo(2, ReviewAction.DRIVE_ONLY)
+        val two = photo(2, ReviewAction.DRIVE_ONLY)
         phone.remove(2L)
         val f = finisher()
         val r = f.prepare(decisions.all()) as PrepareResult.Ready
-        assertEquals(listOf(FailedRow(2, RealReviewFinisher.GONE_FROM_PHONE)), r.failed)
-        assertEquals(setOf(1L, 2L), decisions.rows.keys) // nothing changes before confirm
-        f.apply(r)
+        assertTrue(r.failed.isEmpty())
+        assertEquals(listOf(ReviewDecision(2, ReviewAction.DRIVE_ONLY, 2)), r.alreadyGone)
+        assertEquals(listOf(listOf(1L)), requests) // the gone row is not in the delete request
+        assertEquals(setOf(1L), decisions.rows.keys)
+        assertEquals(two.copy(status = BackupStatus.REMOVED_FROM_PHONE, updatedAtMs = now), ledger.get(2))
+        val done = f.apply(r) as ApplyResult.Done
+        assertEquals(1, done.junkCount)
         assertTrue(decisions.rows.isEmpty())
-        assertEquals(BackupStatus.VERIFIED, ledger.get(2)!!.status)
     }
 
-    @Test fun allGoneFromThePhoneClearsDecisionsWithoutDialog() = runBlocking {
+    /** I2 / T5: Junk whose phone copy is gone (deleted, intent not recorded) still goes to the drive bin. */
+    @Test fun junkAlreadyGoneFromThePhoneIsBinRequestedWithoutDialog() = runBlocking {
         photo(1, ReviewAction.JUNK)
         photo(2, ReviewAction.KEEP)
         phone.remove(1L)
         val r = finisher().prepare(decisions.all())
         assertEquals(
-            PrepareResult.NothingToDelete(true, 1, listOf(FailedRow(1, RealReviewFinisher.GONE_FROM_PHONE))), r,
+            PrepareResult.NothingToDelete(
+                true, 1, emptyList(), alreadyGone = listOf(ReviewDecision(1, ReviewAction.JUNK, 1)),
+            ),
+            r,
         )
+        val one = ledger.get(1)!!
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, one.status)
+        assertEquals(now, one.binRequestedAt)
         assertTrue(decisions.rows.isEmpty())
         assertTrue(requests.isEmpty())
+    }
+
+    /** A gone row that is no longer VERIFIED can't be applied: listed as gone, decision cleared, row untouched. */
+    @Test fun rowGoneFromThePhoneAndNotVerifiedIsListedAndCleared() = runBlocking {
+        val e = photo(1, ReviewAction.JUNK)
+        ledger.upsert(e.copy(status = BackupStatus.REMOVED_FROM_PHONE))
+        phone.remove(1L)
+        val r = finisher().prepare(decisions.all())
+        assertEquals(
+            PrepareResult.NothingToDelete(false, 0, listOf(FailedRow(1, RealReviewFinisher.GONE_FROM_PHONE))), r,
+        )
+        assertNull(ledger.get(1)!!.binRequestedAt)
+        assertTrue(decisions.rows.isEmpty())
+    }
+
+    /** A gone row with a drive move in flight waits: decision kept, applied by a later Finish. */
+    @Test fun rowGoneFromThePhoneWithAMoveInFlightKeepsItsDecision() = runBlocking {
+        val e = photo(1, ReviewAction.JUNK)
+        ledger.upsert(e.copy(movingTo = "elsewhere\\f1.jpg"))
+        phone.remove(1L)
+        val r = finisher().prepare(decisions.all())
+        assertEquals(PrepareResult.NothingToDelete(false, 0, listOf(FailedRow(1, RealReviewFinisher.NOT_READY))), r)
+        assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+        assertEquals(setOf(1L), decisions.rows.keys)
     }
 
     @Test fun editedPhoneFileIsListedAndItsDecisionCleared() = runBlocking {
@@ -297,6 +334,83 @@ class RealReviewFinisherTest {
         assertEquals(BackupStatus.VERIFIED, two.status)
         assertNull(two.binRequestedAt)
         assertEquals("elsewhere\\f2.jpg", two.movingTo)
+        assertEquals(1, runs)
+    }
+
+    /** I2 (a): a move started between prepare and apply; the next Finish (phone copy now gone) bins it. */
+    @Test fun junkLeftAloneByAMoveIsBinnedByTheNextFinish() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        val f = finisher()
+        val r = f.prepare(decisions.all()) as PrepareResult.Ready
+        ledger.upsert(ledger.get(1)!!.copy(movingTo = "r\\Dog\\f1.jpg")) // a backup run starts a folder move
+        assertEquals(ApplyResult.Done(0, 0, 0, leftAlone = 1), f.apply(r))
+        phone.remove(1L) // Android deleted the phone copy
+        assertEquals(setOf(1L), decisions.rows.keys) // decision kept, as the message says
+        // the run finishes its move
+        ledger.upsert(ledger.get(1)!!.copy(remotePath = "r\\Dog\\f1.jpg", movingTo = null))
+        store.files["r\\Dog\\f1.jpg"] = store.files.remove("r\\f1.jpg")!!
+        val again = f.prepare(decisions.all())
+        assertEquals(
+            PrepareResult.NothingToDelete(false, 0, emptyList(), listOf(ReviewDecision(1, ReviewAction.JUNK, 1))),
+            again,
+        )
+        val one = ledger.get(1)!!
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, one.status)
+        assertEquals(now, one.binRequestedAt)
+        assertTrue(decisions.rows.isEmpty())
+    }
+
+    /** A confirmed row a backup run took out of VERIFIED can never apply: its decision is not kept. */
+    @Test fun confirmedRowNoLongerVerifiedIsDroppedNotKept() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        photo(2, ReviewAction.DRIVE_ONLY, size = 9)
+        val f = finisher()
+        val r = f.prepare(decisions.all()) as PrepareResult.Ready
+        ledger.upsert(ledger.get(1)!!.copy(status = BackupStatus.PENDING)) // e.g. re-queued meanwhile
+        assertEquals(ApplyResult.Done(9, 0, 0, leftAlone = 0, dropped = 1), f.apply(r))
+        assertTrue(decisions.rows.isEmpty())
+        assertEquals(1, runs)
+    }
+
+    /** T3: leaving the screen during "Applying..." cancels the caller; the marks, clears and runNow still happen. */
+    @Test fun applyCompletesWhenTheCallerIsCancelled() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        photo(2, ReviewAction.DRIVE_ONLY)
+        photo(3, ReviewAction.KEEP)
+        val entered = CompletableDeferred<Unit>()
+        val gate = CompletableDeferred<Unit>()
+        val slow = object : LedgerStore by ledger {
+            override suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long, binRequestedAt: Long?): Boolean {
+                entered.complete(Unit)
+                gate.await()
+                return ledger.markRemovedIfSettled(mediaId, nowMs, binRequestedAt)
+            }
+        }
+        val f = finisher(slow)
+        val r = f.prepare(decisions.all()) as PrepareResult.Ready
+        val job = launch { f.apply(r) }
+        entered.await()
+        job.cancel()
+        gate.complete(Unit)
+        job.join()
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, ledger.get(1)!!.status)
+        assertEquals(now, ledger.get(1)!!.binRequestedAt)
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, ledger.get(2)!!.status)
+        assertEquals(ReviewKeep(3, now), keeps.rows[3])
+        assertTrue(decisions.rows.isEmpty())
+        assertEquals(1, runs)
+    }
+
+    /** T3: a ledger write that throws mid-loop still starts the drive-side work. */
+    @Test fun runNowStillCalledWhenMarkingThrows() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        val bad = object : LedgerStore by ledger {
+            override suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long, binRequestedAt: Long?): Boolean =
+                throw IllegalStateException()
+        }
+        val f = finisher(bad)
+        val r = f.prepare(decisions.all()) as PrepareResult.Ready
+        try { f.apply(r); throw AssertionError("expected failure") } catch (_: IllegalStateException) {}
         assertEquals(1, runs)
     }
 

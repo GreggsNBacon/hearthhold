@@ -427,6 +427,33 @@ class ReviewViewModelTest {
         assertEquals(emptyList<LeftAlone>(), v.state.value.leftAlone)
     }
 
+    /** I2: Junk already gone from the phone is applied at prepare; Finish reports it as done, even with failures. */
+    @Test fun finish_already_gone_junk_counts_as_done() = runTest {
+        add(1); add(2)
+        val v = vm()
+        v.swipe(Swipe.LEFT)
+        finisher.prepareResult = PrepareResult.NothingToDelete(
+            false, 0, listOf(FailedRow(2, "Not ready")), alreadyGone = listOf(ReviewDecision(1, ReviewAction.JUNK, 1)),
+        )
+        v.startFinish()
+        assertEquals(FinishState.Done(0, 1, 0, 1), v.state.value.finish)
+    }
+
+    /** Confirmed rows that can never apply are not reported as "decision kept, try again". */
+    @Test fun finish_dropped_rows_are_not_reported_as_kept() = runTest {
+        add(1); add(2)
+        val v = vm()
+        v.swipe(Swipe.LEFT); v.swipe(Swipe.LEFT)
+        finisher.prepareResult = PrepareResult.Ready("req", decisions.all(), emptyList())
+        finisher.applyResult = ApplyResult.Done(0, 0, 0, leftAlone = 1, dropped = 1)
+        v.startFinish(); v.onDeleteConfirmed()
+        assertEquals(
+            listOf(LeftAlone("1 item", CHANGED_WHILE_FINISHING), LeftAlone("1 item", DROPPED_WHILE_FINISHING)),
+            v.state.value.leftAlone,
+        )
+        assertEquals(FinishState.Done(0, 0, 0, 2), v.state.value.finish)
+    }
+
     @Test fun finish_nothing_to_delete_lists_left_alone_rows() = runTest {
         add(1)
         val v = vm()

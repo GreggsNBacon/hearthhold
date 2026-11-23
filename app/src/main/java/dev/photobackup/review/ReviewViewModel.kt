@@ -27,6 +27,7 @@ import java.io.IOException
 const val CONNECT_TO_FINISH_MESSAGE = "Connect to home Wi-Fi to finish"
 const val KEEP_HIDE_DAYS = 180L
 const val CHANGED_WHILE_FINISHING = "Changed by a backup while finishing — decision kept, try again"
+const val DROPPED_WHILE_FINISHING = "Changed by a backup while finishing — left as it is"
 
 /** An item Finish left as it was, with a short user-safe reason. [name] is the file name (or a count). */
 data class LeftAlone(val name: String, val reason: String)
@@ -319,8 +320,9 @@ class ReviewViewModel(
                 when (r) {
                     PrepareResult.Offline -> setFinish(FinishState.Error(CONNECT_TO_FINISH_MESSAGE))
                     is PrepareResult.NothingToDelete -> {
-                        if (r.keepOnlyApplied || r.failed.isEmpty()) {
-                            setFinish(FinishState.Done(0, 0, r.keptCount, r.failed.size))
+                        if (r.keepOnlyApplied || r.alreadyGone.isNotEmpty() || r.failed.isEmpty()) {
+                            val junk = r.alreadyGone.count { it.action == ReviewAction.JUNK }
+                            setFinish(FinishState.Done(0, junk, r.keptCount, r.failed.size))
                             reload()
                         } else {
                             setFinish(FinishState.Error(failedMessage(r.failed.size)))
@@ -351,12 +353,13 @@ class ReviewViewModel(
             try {
                 when (val r = finisher.apply(p)) {
                     is ApplyResult.Done -> {
-                        if (r.leftAlone > 0) {
-                            val n = r.leftAlone
-                            val more = LeftAlone("$n ${if (n == 1) "item" else "items"}", CHANGED_WHILE_FINISHING)
-                            _state.update { it.copy(leftAlone = it.leftAlone + more) }
-                        }
-                        setFinish(FinishState.Done(r.freedBytes, r.junkCount, r.keptCount, p.failed.size + r.leftAlone))
+                        val more = listOfNotNull(
+                            counted(r.leftAlone, CHANGED_WHILE_FINISHING),
+                            counted(r.dropped, DROPPED_WHILE_FINISHING),
+                        )
+                        if (more.isNotEmpty()) _state.update { it.copy(leftAlone = it.leftAlone + more) }
+                        val notApplied = p.failed.size + r.leftAlone + r.dropped
+                        setFinish(FinishState.Done(r.freedBytes, r.junkCount, r.keptCount, notApplied))
                         reload()
                     }
                     is ApplyResult.Failed -> {
@@ -372,6 +375,9 @@ class ReviewViewModel(
             }
         }
     }
+
+    private fun counted(n: Int, reason: String) =
+        if (n > 0) LeftAlone("$n ${if (n == 1) "item" else "items"}", reason) else null
 
     /** The user dismissed the system delete dialog. Nothing changed; decisions stay. */
     fun onDeleteCancelled() {

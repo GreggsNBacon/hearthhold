@@ -101,6 +101,8 @@ class BackupEngine(
         const val MOVE_ERROR = "Couldn't move to the chosen folder — will try again"
         const val MOVE_CONFLICT_ERROR = "An interrupted move left two files with this name — kept the original"
         const val BIN_MOVE_ERROR = "Couldn't move to the bin on the drive — will try again"
+        const val CANT_BIN_ERROR =
+            "Can't move to the bin: the drive folder or device name changed — Cancel to keep it on the drive"
 
         /**
          * The text stored as an item's lastError (shown in the Gallery's failed-item dialog). Never the exception
@@ -344,7 +346,8 @@ class BackupEngine(
                 if (!ledger.finishRestore(row.mediaId, to, clock())) unsettled += row.mediaId
                 continue
             }
-            val priorMoveError = row.lastError == MOVE_ERROR || row.lastError == MOVE_CONFLICT_ERROR
+            val priorMoveError = row.lastError == MOVE_ERROR || row.lastError == MOVE_CONFLICT_ERROR ||
+                row.lastError == BIN_MOVE_ERROR
             val keptError = if (priorMoveError) null else row.lastError
             val fixed = when {
                 // movingTo stays: the conflict is re-checked every run until the owner removes one copy, so no
@@ -407,6 +410,11 @@ class BackupEngine(
         return Moves(moved, failed)
     }
 
+    /** A Junk row the engine will never move: say so once, so it is not "Moving to bin…" forever. */
+    private suspend fun cantBin(row: LedgerEntry) {
+        if (row.lastError != CANT_BIN_ERROR) ledger.setLastError(row.mediaId, CANT_BIN_ERROR, clock())
+    }
+
     /** How many moved, and which rows failed to move in this pass. */
     private class Moves(val moved: Int, val failedIds: Set<Long>)
 
@@ -415,8 +423,9 @@ class BackupEngine(
      * the movingTo sequence: [LedgerStore.beginBinMove] records movingTo and binPath (the original path) in one write,
      * then the rename, endMove, and a conditional mark BINNED (binnedAt = now). A row already sitting in the current bin
      * (a crash between the rename and the mark) is just marked. Rows not in today's shape under the current root (old
-     * layout, destination or device name changed) are left alone; so are rows in [skip] and rows with a move or
-     * `.part` pending. Returns the rows that failed. A [RemoteException] stops the run.
+     * layout, destination or device name changed, or a legacy `.Bin` named folder) are never moved: they get
+     * [CANT_BIN_ERROR] so the Bin screen says why (Cancel keeps them drive-only). Rows in [skip] and rows with a move
+     * or `.part` pending are left alone. Returns the rows that failed. A [RemoteException] stops the run.
      */
     private suspend fun binMoves(skip: Set<Long>): Set<Long> {
         val failed = mutableSetOf<Long>()
@@ -426,10 +435,15 @@ class BackupEngine(
             if (row.mediaId in skip || row.movingTo != null || row.partPath != null) continue
             val from = row.remotePath ?: continue
             if (DrivePaths.isInBin(from, root)) {
-                if (row.binPath != null) ledger.markBinned(row.mediaId, from, clock())
+                if (row.binPath != null) ledger.markBinned(row.mediaId, from, clock()) else cantBin(row)
                 continue
             }
-            val (dir, name) = DrivePaths.binTarget(from, root) ?: continue
+            val target = DrivePaths.binTarget(from, root)
+            if (target == null) {
+                cantBin(row)
+                continue
+            }
+            val (dir, name) = target
             if (pauseFirst && itemPauseMs > 0) pause(itemPauseMs)
             pauseFirst = true
             val there = try {

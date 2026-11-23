@@ -1,5 +1,6 @@
 package dev.photobackup.bin
 
+import dev.photobackup.backup.BackupEngine
 import dev.photobackup.backup.MemoryAssignments
 import dev.photobackup.backup.MemoryLedger
 import dev.photobackup.ledger.BackupStatus
@@ -110,6 +111,18 @@ class BinRepositoryTest {
         assertEquals("$camera\\1.jpg", e.remotePath)
         assertNull(e.binRequestedAt)
         assertEquals(setOf("$camera\\1.jpg"), store.files.keys)
+    }
+
+    /** I1: Junk the engine can't bin (outside the current root) still cancels, and its error goes with it. */
+    @Test fun restoreOfAnUnbinnableRowCancelsTheRequestAndClearsItsError() = runBlocking {
+        seed(waiting(1, "Old\\Dev\\Camera\\2026\\1.jpg").copy(lastError = BackupEngine.CANT_BIN_ERROR))
+        assertEquals(BinResult.Done(1, 0), repo().restore(listOf(1)))
+        val e = ledger.get(1)!!
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, e.status)
+        assertEquals("Old\\Dev\\Camera\\2026\\1.jpg", e.remotePath)
+        assertNull(e.binRequestedAt)
+        assertNull(e.lastError)
+        assertEquals(setOf("Old\\Dev\\Camera\\2026\\1.jpg"), store.files.keys)
     }
 
     /** A bin move whose rename landed but whose BINNED mark did not: restore still moves it back. */

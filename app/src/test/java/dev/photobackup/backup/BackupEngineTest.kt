@@ -80,7 +80,7 @@ class MemoryLedger : LedgerStore {
     ) { it.copy(movingTo = target, binPath = from, updatedAtMs = nowMs) }
     override suspend fun markBinned(mediaId: Long, path: String, nowMs: Long) = updateIf(
         mediaId, { it.waitingForBin() && it.binPath != null && it.movingTo == null && it.remotePath == path },
-    ) { it.copy(status = BackupStatus.BINNED, binnedAt = nowMs, updatedAtMs = nowMs) }
+    ) { it.copy(status = BackupStatus.BINNED, binnedAt = nowMs, lastError = null, updatedAtMs = nowMs) }
     override suspend fun finishRestore(mediaId: Long, restoredPath: String, nowMs: Long) = updateIf(
         mediaId, { it.status == BackupStatus.BINNED && it.movingTo == restoredPath },
     ) {
@@ -91,7 +91,7 @@ class MemoryLedger : LedgerStore {
     }
     override suspend fun cancelBinRequest(mediaId: Long, nowMs: Long) = updateIf(
         mediaId, { it.waitingForBin() && it.movingTo == null },
-    ) { it.copy(binRequestedAt = null, binPath = null, updatedAtMs = nowMs) }
+    ) { it.copy(binRequestedAt = null, binPath = null, lastError = null, updatedAtMs = nowMs) }
     override suspend fun deleteBinned(mediaId: Long, remotePath: String) = updateIf(
         mediaId, { it.status == BackupStatus.BINNED && it.movingTo == null && it.remotePath == remotePath },
     ) { null }

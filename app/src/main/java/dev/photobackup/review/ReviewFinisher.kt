@@ -2,6 +2,7 @@ package dev.photobackup.review
 
 import dev.photobackup.backup.LocalOpener
 import dev.photobackup.freeup.FreeUpRepository
+import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.ledger.LedgerRules
 import dev.photobackup.ledger.LedgerStore
@@ -11,6 +12,8 @@ import dev.photobackup.ledger.ReviewKeep
 import dev.photobackup.ledger.ReviewKeepDao
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.smb.RemoteStore
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import java.io.IOException
 
 /** A decision that could not be applied at Finish, with a short user-safe reason (never exception text). */
@@ -20,28 +23,43 @@ sealed interface PrepareResult {
     /** The drive is not reachable; decisions are kept. */
     data object Offline : PrepareResult
 
-    /** Nothing needs the system delete dialog. [keepOnlyApplied] is true when Keep decisions were applied anyway. */
+    /**
+     * Nothing needs the system delete dialog. [keepOnlyApplied] is true when Keep decisions were applied anyway.
+     * [alreadyGone]: Drive only / Junk decisions whose phone copy was already gone, applied without the dialog.
+     */
     data class NothingToDelete(
         val keepOnlyApplied: Boolean,
         val keptCount: Int = 0,
         val failed: List<FailedRow> = emptyList(),
+        val alreadyGone: List<ReviewDecision> = emptyList(),
     ) : PrepareResult
 
     /**
      * Ready for the user's confirmation: [request] is the platform's delete request (opaque here) for the [passed]
-     * Drive only / Junk rows. [keeps] are applied together with them once the user confirms.
+     * Drive only / Junk rows. [keeps] are applied together with them once the user confirms. [alreadyGone] were
+     * applied already (phone copy gone; see [NothingToDelete.alreadyGone]).
      */
     data class Ready(
         val request: Any?,
         val passed: List<ReviewDecision>,
         val failed: List<FailedRow>,
         val keeps: List<ReviewDecision> = emptyList(),
+        val alreadyGone: List<ReviewDecision> = emptyList(),
     ) : PrepareResult
 }
 
 sealed interface ApplyResult {
-    /** [leftAlone]: confirmed rows a backup run changed meanwhile; not marked, their decisions kept. */
-    data class Done(val freedBytes: Long, val junkCount: Int, val keptCount: Int, val leftAlone: Int = 0) : ApplyResult
+    /**
+     * [leftAlone]: confirmed rows a backup run is moving meanwhile; not marked, decisions kept for the next Finish.
+     * [dropped]: confirmed rows no longer VERIFIED (or gone from the ledger); they can never apply, decisions cleared.
+     */
+    data class Done(
+        val freedBytes: Long,
+        val junkCount: Int,
+        val keptCount: Int,
+        val leftAlone: Int = 0,
+        val dropped: Int = 0,
+    ) : ApplyResult
     data class Failed(val message: String) : ApplyResult
 }
 
@@ -56,6 +74,10 @@ interface ReviewFinisher {
  * request for those that passed, and after the user confirms marks them removed (Junk also asks for the bin, in the
  * same conditional write), records Keeps and clears the applied decisions. Cancelling the dialog changes nothing.
  * The drive is used by [prepare] only.
+ *
+ * A Drive only / Junk row whose phone copy is already gone while its row is still VERIFIED (Android deleted it but the
+ * ledger write never landed: a backup's move in between, the app killed or left during apply) is applied by [prepare]
+ * itself with the same conditional write, so Junk still reaches the drive bin.
  */
 class RealReviewFinisher(
     private val ledger: LedgerStore,
@@ -94,43 +116,73 @@ class RealReviewFinisher(
         }
 
         val passedIds = passed.map { it.mediaId }.toSet()
-        val failed = toDelete.filter { it.mediaId !in passedIds }.map { d ->
-            FailedRow(d.mediaId, failedIds[d.mediaId] ?: skipReason(rows[d.mediaId], phone[d.mediaId]))
+        val alreadyGone = applyAlreadyGone(
+            toDelete.filter { it.mediaId !in passedIds && it.mediaId !in failedIds && phone[it.mediaId] == null },
+        )
+        val goneIds = alreadyGone.map { it.mediaId }.toSet()
+        val failed = toDelete.filter { it.mediaId !in passedIds && it.mediaId !in goneIds }.map { d ->
+            FailedRow(d.mediaId, failedIds[d.mediaId] ?: skipReason(ledger.get(d.mediaId), phone[d.mediaId]))
         }
         if (passed.isEmpty()) {
             applyKeeps(keepList)
             this.decisions.clear(stale(failed))
-            return PrepareResult.NothingToDelete(keepList.isNotEmpty(), keepList.size, failed)
+            return PrepareResult.NothingToDelete(keepList.isNotEmpty(), keepList.size, failed, alreadyGone)
         }
         return PrepareResult.Ready(
             request = makeDeleteRequest(passed),
             passed = toDelete.filter { it.mediaId in passedIds },
             failed = failed,
             keeps = keepList,
+            alreadyGone = alreadyGone,
         )
     }
 
-    override suspend fun apply(prepared: PrepareResult.Ready): ApplyResult {
+    /**
+     * The phone copy of each of [gone] has been deleted already: marks the still-VERIFIED, settled rows removed (Junk
+     * with binRequestedAt) and clears their decisions. Returns those applied; the rest are listed by the caller.
+     */
+    private suspend fun applyAlreadyGone(gone: List<ReviewDecision>): List<ReviewDecision> {
+        if (gone.isEmpty()) return emptyList()
+        val now = clock()
+        val applied = gone.filter { d ->
+            val binAt = if (d.action == ReviewAction.JUNK) now else null
+            ledger.markRemovedIfSettled(d.mediaId, now, binRequestedAt = binAt)
+        }
+        if (applied.isNotEmpty()) decisions.clear(applied.map { it.mediaId })
+        return applied
+    }
+
+    /**
+     * Runs to the end even if the caller is cancelled (the user left the screen): Android has already deleted the phone
+     * copies, so the marks must land and [runNow] must fire.
+     */
+    override suspend fun apply(prepared: PrepareResult.Ready): ApplyResult = withContext(NonCancellable) {
         val now = clock()
         val marked = ArrayList<Long>()
+        val dropped = ArrayList<Long>()
         var freed = 0L
-        var junk = 0
-        for (d in prepared.passed) {
-            val size = ledger.get(d.mediaId)?.sizeBytes ?: 0L
-            val isJunk = d.action == ReviewAction.JUNK
-            if (ledger.markRemovedIfSettled(d.mediaId, now, binRequestedAt = if (isJunk) now else null)) {
-                marked += d.mediaId
-                freed += size
-                if (isJunk) junk++
-            }
-        }
+        var junk = prepared.alreadyGone.count { it.action == ReviewAction.JUNK }
         try {
+            for (d in prepared.passed) {
+                val size = ledger.get(d.mediaId)?.sizeBytes ?: 0L
+                val isJunk = d.action == ReviewAction.JUNK
+                if (ledger.markRemovedIfSettled(d.mediaId, now, binRequestedAt = if (isJunk) now else null)) {
+                    marked += d.mediaId
+                    freed += size
+                    if (isJunk) junk++
+                } else if (ledger.get(d.mediaId)?.status != BackupStatus.VERIFIED) {
+                    dropped += d.mediaId // never applicable again; a VERIFIED row (move in flight) retries next Finish
+                }
+            }
             applyKeeps(prepared.keeps, now)
-            decisions.clear(marked + stale(prepared.failed))
+            decisions.clear(marked + dropped + stale(prepared.failed))
         } finally {
             runNow() // Android already deleted the phone copies: start the drive-side work even if a write failed
         }
-        return ApplyResult.Done(freed, junk, prepared.keeps.size, leftAlone = prepared.passed.size - marked.size)
+        ApplyResult.Done(
+            freed, junk, prepared.keeps.size,
+            leftAlone = prepared.passed.size - marked.size - dropped.size, dropped = dropped.size,
+        )
     }
 
     private suspend fun applyKeeps(list: List<ReviewDecision>, now: Long = clock()) {
@@ -141,7 +193,8 @@ class RealReviewFinisher(
 
     /** Why recheck skipped a row without failing it. Only gone or edited rows lose their decision. */
     private fun skipReason(e: LedgerEntry?, m: PhoneMedia?) = when {
-        e == null || m == null -> GONE_FROM_PHONE
+        e == null -> GONE_FROM_PHONE
+        m == null -> if (e.status == BackupStatus.VERIFIED) NOT_READY else GONE_FROM_PHONE // VERIFIED: a move in flight
         LedgerRules.changed(e, m) -> EDITED
         else -> NOT_READY // not VERIFIED yet (e.g. failed earlier, re-uploading) or a drive move in flight
     }

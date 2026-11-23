@@ -69,7 +69,7 @@ interface LedgerDao : LedgerStore {
         beginBinMoveCount(mediaId, from, target, nowMs) > 0
 
     @Query(
-        "UPDATE LedgerEntry SET status = 'BINNED', binnedAt = :nowMs, updatedAtMs = :nowMs " +
+        "UPDATE LedgerEntry SET status = 'BINNED', binnedAt = :nowMs, lastError = NULL, updatedAtMs = :nowMs " +
             "WHERE mediaId = :mediaId AND status = 'REMOVED_FROM_PHONE' AND binRequestedAt IS NOT NULL " +
             "AND binPath IS NOT NULL AND movingTo IS NULL AND remotePath = :path"
     )
@@ -89,7 +89,7 @@ interface LedgerDao : LedgerStore {
         finishRestoreCount(mediaId, restoredPath, nowMs) > 0
 
     @Query(
-        "UPDATE LedgerEntry SET binRequestedAt = NULL, binPath = NULL, updatedAtMs = :nowMs " +
+        "UPDATE LedgerEntry SET binRequestedAt = NULL, binPath = NULL, lastError = NULL, updatedAtMs = :nowMs " +
             "WHERE mediaId = :mediaId AND status = 'REMOVED_FROM_PHONE' AND binRequestedAt IS NOT NULL " +
             "AND movingTo IS NULL"
     )
