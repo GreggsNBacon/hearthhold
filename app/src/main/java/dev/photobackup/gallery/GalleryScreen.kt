@@ -94,7 +94,7 @@ fun GalleryScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val home by status.state.collectAsState()
-    // First show loads everything; later resumes (back from Settings, app switch) re-check the drive.
+    // First show loads everything; later resumes (back from Settings, app switch) reload the phone list and re-check the drive.
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         viewModel.resume()
         status.refreshFreeUp()

@@ -162,6 +162,16 @@ class GalleryViewModelTest {
         assertEquals(DriveState.REACHABLE, vm.state.value.drive)
     }
 
+    /** A folder added in Settings while the Gallery was open: its items must not show as "On drive only". */
+    @Test fun resumeReloadsPhoneListSoNewlyAddedFolderIsNotDriveOnly() {
+        val vm = vm()
+        vm.resume() // first show: phone list empty (folder not added yet)
+        phone = listOf(phone(1, 10)) // folder added in Settings
+        ledger.value = listOf(entry(1, BackupStatus.VERIFIED, 10)) // and backed up meanwhile
+        vm.resume() // back on the Gallery
+        assertEquals(Location.BOTH, vm.state.value.items.single().location)
+    }
+
     @Test fun resumeWhileCheckingDoesNotStartAnother() {
         driveGate = CompletableDeferred()
         val vm = vm()

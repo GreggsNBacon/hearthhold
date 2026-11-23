@@ -138,12 +138,13 @@ class GalleryViewModel(
 
     /**
      * Screen resumed (also on first show): re-check the drive, e.g. after fixing Wi-Fi or Settings, and reload the
-     * phone list if it could not be read in full (no or partial photo access).
+     * phone list. Folders may have been added or removed in Settings, photo access granted, or photos taken; a
+     * stale list would show newly backed-up items as "On drive only". The old list stays shown until the new one
+     * arrives, and items keep their keys, so the grid keeps its scroll position.
      */
     fun resume() {
         if (!started) return start()
-        // Back from the system settings after allowing photo access: reload the phone side too.
-        if (phone.value?.known == false) loadPhone()
+        loadPhone()
         autoCheckDrive()
     }
 
@@ -154,8 +155,12 @@ class GalleryViewModel(
         checkDriveNow()
     }
 
+    private var phoneJob: Job? = null
+
+    /** Latest request wins: an older, slower query never overwrites a newer list. */
     private fun loadPhone() {
-        viewModelScope.launch {
+        phoneJob?.cancel()
+        phoneJob = viewModelScope.launch {
             phone.value = try {
                 Phone(queryPhone())
             } catch (_: PartialMediaAccessException) {
