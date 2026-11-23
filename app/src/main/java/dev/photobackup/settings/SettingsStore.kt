@@ -96,6 +96,7 @@ class SettingsStore internal constructor(
             gestures = readGestures(p),
             second = readSecond(p),
             freeUpNeedsBoth = p[FREE_UP_NEEDS_BOTH] ?: true,
+            staleWarnDays = (p[STALE_WARN_DAYS] ?: 3).coerceIn(1, 30),
         )
     }
 
@@ -135,6 +136,7 @@ class SettingsStore internal constructor(
             p.putOrRemove(SECOND_DESTINATION, s.second?.destination)
         }
         p[FREE_UP_NEEDS_BOTH] = s.freeUpNeedsBoth
+        p[STALE_WARN_DAYS] = s.staleWarnDays
         if (writeLogin) {
             p.putOrRemove(HOST, s.smb?.host)
             p.putOrRemove(SHARE, s.smb?.share)
@@ -185,6 +187,7 @@ class SettingsStore internal constructor(
         val SECOND_PASSWORD = stringPreferencesKey("second_smb_password")
         val SECOND_DESTINATION = stringPreferencesKey("second_destination")
         val FREE_UP_NEEDS_BOTH = booleanPreferencesKey("free_up_needs_both")
+        val STALE_WARN_DAYS = intPreferencesKey("stale_warn_days")
         val DESTINATION = stringPreferencesKey("destination")
         val DEVICE_NAME = stringPreferencesKey("device_name")
         val CHARGING_ONLY = booleanPreferencesKey("charging_only")

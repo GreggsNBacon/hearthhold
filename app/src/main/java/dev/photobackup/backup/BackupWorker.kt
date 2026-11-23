@@ -39,11 +39,17 @@ object BackupMessages {
     const val SETUP = "Finish setup first"
     const val PERMISSION = "Photos permission needed"
     const val PERMISSION_ALL = "Allow access to all photos"
+    const val STALE_NO_COUNT = "Backups have stopped — open Hearthhold"
     const val TIME_LIMIT = "Paused by Android's background time limit — will continue later"
 
     /** Files bigger than all the drive's free space: the run went on with the rest. */
     fun noRoom(n: Int): String =
         if (n == 1) "1 file doesn't fit on the drive — free up space" else "$n files don't fit on the drive — free up space"
+
+    /** The stale-backup warning: no successful run for [days] days and [waiting] items still waiting. */
+    fun stale(days: Int, waiting: Int): String =
+        "No backup for $days ${if (days == 1) "day" else "days"} — " +
+            (if (waiting == 1) "1 item is" else "$waiting items are") + " waiting. Open Hearthhold"
 
     /** Shown while drive files are being moved to their folders. */
     fun moving(n: Int): String = if (n == 1) "Moving 1 file" else "Moving $n files"
@@ -207,12 +213,15 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 idle(repo) {
                     it.copy(
                         lastRunMs = now,
+                        lastSuccessMs = now,
+                        lastStaleWarnMs = null,
                         lastResult = BackupMessages.summary(r.uploaded, r.failed, r.moved, r.moveFailed),
                         lastError = err,
                         driveFreeBytes = r.driveFreeBytes ?: it.driveFreeBytes,
                         secondStatus = secondStatus,
                     )
                 }
+                BackupNotifications.clearStale(applicationContext)
                 // A full drive is a persistent problem (spec: Home + notification); other item failures show in-app.
                 if (r.noRoom > 0) {
                     BackupNotifications.error(applicationContext, BackupMessages.noRoom(r.noRoom))

@@ -72,6 +72,17 @@ class SettingsStoreTest {
         assertEquals(1, store.settings.first().parallelUploads)
     }
 
+    @Test fun staleWarnDaysDefaultsToThreeAndIsClampedOnRead() = runBlocking {
+        val (store, ds) = newStore()
+        assertEquals(3, store.settings.first().staleWarnDays)
+        store.update { it.copy(staleWarnDays = 7) }
+        assertEquals(7, store.settings.first().staleWarnDays)
+        ds.edit { it[intPreferencesKey("stale_warn_days")] = 99 }
+        assertEquals(30, store.settings.first().staleWarnDays)
+        ds.edit { it[intPreferencesKey("stale_warn_days")] = 0 }
+        assertEquals(1, store.settings.first().staleWarnDays)
+    }
+
     @Test fun notifyOnCompletePersists() = runBlocking {
         val (store, _) = newStore()
         store.update { it.copy(notifyOnComplete = false) }

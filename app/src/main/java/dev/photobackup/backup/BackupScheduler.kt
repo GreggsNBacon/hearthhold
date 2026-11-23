@@ -22,6 +22,7 @@ object BackupScheduler {
     const val PERIODIC = "pb_periodic"
     const val NOW = "pb_now"
     const val NIGHT = "pb_night"
+    const val STALE_CHECK = "pb_stale_check"
     const val KEY_CHARGING_ONLY = "chargingOnly"
     const val KEY_IS_TRIGGER = "isTrigger"
 
@@ -56,6 +57,14 @@ object BackupScheduler {
             .build()
         WorkManager.getInstance(context)
             .enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.UPDATE, periodic)
+        enqueueStaleCheck(context)
+    }
+
+    /** The daily stale-backup check: no constraints (it must run exactly when backups are not happening). */
+    fun enqueueStaleCheck(context: Context) {
+        val daily = PeriodicWorkRequestBuilder<StaleCheckWorker>(1, TimeUnit.DAYS).build()
+        WorkManager.getInstance(context)
+            .enqueueUniquePeriodicWork(STALE_CHECK, ExistingPeriodicWorkPolicy.KEEP, daily)
     }
 
     /**

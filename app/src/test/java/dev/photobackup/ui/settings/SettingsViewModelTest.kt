@@ -115,6 +115,16 @@ class SettingsViewModelTest {
         assertEquals(1, settings.settings.first().parallelUploads)
     }
 
+    @Test fun staleWarnDaysIsClampedTo1To30() = runBlocking {
+        val vm = vm()
+        vm.setStaleWarnDays(0).join()
+        assertEquals(1, settings.settings.first().staleWarnDays)
+        vm.setStaleWarnDays(99).join()
+        assertEquals(30, settings.settings.first().staleWarnDays)
+        vm.setStaleWarnDays(5).join()
+        assertEquals(5, settings.settings.first().staleWarnDays)
+    }
+
     @Test fun freeUpAgeIsClampedTo1To36() = runBlocking {
         val vm = vm()
         vm.setFreeUpAge(0).join()

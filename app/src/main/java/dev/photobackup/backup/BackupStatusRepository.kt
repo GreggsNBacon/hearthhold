@@ -31,6 +31,12 @@ data class BackupStatusSnapshot(
     val moving: Int = 0,
     /** The second backup location's status line (see [SecondStatusText]); null when it is off or has not run. */
     val secondStatus: String? = null,
+    /** When a main run last finished Done; null = not since install/upgrade. */
+    val lastSuccessMs: Long? = null,
+    /** When the stale-backup warning was last posted; cleared by a successful run. */
+    val lastStaleWarnMs: Long? = null,
+    /** When the stale check first ran: stands in for [lastSuccessMs] until the first success. */
+    val staleBaselineMs: Long? = null,
 )
 
 /** The second location's status texts. */
@@ -91,6 +97,9 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
             p.putOrRemove(DRIVE_FREE, s.driveFreeBytes)
             p[MOVING] = s.moving
             p.putOrRemove(SECOND_STATUS, s.secondStatus)
+            p.putOrRemove(LAST_SUCCESS, s.lastSuccessMs)
+            p.putOrRemove(LAST_STALE_WARN, s.lastStaleWarnMs)
+            p.putOrRemove(STALE_BASELINE, s.staleBaselineMs)
         }
     }
 
@@ -116,6 +125,9 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
         driveFreeBytes = p[DRIVE_FREE],
         moving = p[MOVING] ?: 0,
         secondStatus = p[SECOND_STATUS],
+        lastSuccessMs = p[LAST_SUCCESS],
+        lastStaleWarnMs = p[LAST_STALE_WARN],
+        staleBaselineMs = p[STALE_BASELINE],
     )
 
     private fun <T> MutablePreferences.putOrRemove(key: Preferences.Key<T>, value: T?) {
@@ -133,6 +145,9 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
         private val DRIVE_FREE = longPreferencesKey("drive_free_bytes")
         private val MOVING = intPreferencesKey("moving")
         private val SECOND_STATUS = stringPreferencesKey("second_status")
+        private val LAST_SUCCESS = longPreferencesKey("last_success_ms")
+        private val LAST_STALE_WARN = longPreferencesKey("last_stale_warn_ms")
+        private val STALE_BASELINE = longPreferencesKey("stale_baseline_ms")
 
         val defaultProvider: (Context) -> BackupStatusRepository = { ctx ->
             BackupStatusRepository(ctx.applicationContext.statusDataStore)

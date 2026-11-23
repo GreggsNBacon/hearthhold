@@ -147,6 +147,8 @@ class SettingsViewModel(
 
     fun setParallelUploads(n: Int): Job = edit { it.copy(parallelUploads = n.coerceIn(1, BackupEngine.MAX_PARALLEL)) }
 
+    fun setStaleWarnDays(days: Int): Job = edit { it.copy(staleWarnDays = days.coerceIn(1, 30)) }
+
     fun setFreeUpAge(months: Int): Job = edit { it.copy(freeUpAgeMonths = months.coerceIn(1, 36)) }
 
     /** Sets what swiping [swipe] does in review (null = No action). Refused if no direction would do anything. */

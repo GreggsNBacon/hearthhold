@@ -34,6 +34,8 @@ data class AppSettings(
     val second: SecondLocation? = null,
     /** With a second location: Free up only deletes phone files verified on both drives. */
     val freeUpNeedsBoth: Boolean = true,
+    /** "Warn if no backup for N days", 1..30: how long backups may stay stuck with items waiting before a warning. */
+    val staleWarnDays: Int = 3,
 ) {
     /** The active window, or null when "Only back up overnight" is off. */
     fun overnightWindow(): OvernightWindow? =

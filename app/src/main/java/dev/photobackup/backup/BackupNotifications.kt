@@ -22,6 +22,7 @@ object BackupNotifications {
     const val ERROR_ID = 1002
     const val DONE_ID = 1003
     const val SECOND_ERROR_ID = 1004
+    const val STALE_ID = 1005
     private const val REQ_REAUTH = 2001
     private const val REQ_OPEN = 2002
     private const val REQ_REAUTH_SECOND = 2003
@@ -105,6 +106,29 @@ object BackupNotifications {
     }
 
     fun clearSecondError(context: Context) = manager(context).cancel(SECOND_ERROR_ID)
+
+    /** The stale-backup warning; tapping opens the app. Same permission and never-throws rules as [error]. */
+    fun stale(context: Context, text: String) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) return
+        try {
+            ensureChannels(context)
+            val n = NotificationCompat.Builder(context, CHANNEL_ERRORS)
+                .setSmallIcon(R.drawable.ic_stat_hearthhold)
+                .setContentTitle("Hearthhold")
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setContentIntent(openAppIntent(context))
+                .build()
+            manager(context).notify(STALE_ID, n)
+        } catch (_: SecurityException) {
+            // Permission revoked between the check and the post.
+        }
+    }
+
+    fun clearStale(context: Context) = manager(context).cancel(STALE_ID)
 
     /** "Backup complete: N files backed up (size)". Quiet channel; posts only with POST_NOTIFICATIONS; never throws. */
     fun complete(context: Context, files: Int, bytes: Long) {

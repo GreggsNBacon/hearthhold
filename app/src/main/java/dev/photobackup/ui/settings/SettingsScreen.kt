@@ -171,6 +171,13 @@ fun SettingsScreen(
             HorizontalDivider()
             FreeUpAge(s, viewModel)
             HorizontalDivider()
+            Stepper(
+                label = "Warn if no backup for (days)",
+                value = s.staleWarnDays,
+                range = 1..30,
+                format = { it.toString() },
+            ) { viewModel.setStaleWarnDays(it) }
+            HorizontalDivider()
             SecondLocationSection(s, state.secondMessage, viewModel, onSetUpSecond)
             HorizontalDivider()
             Gestures(s, state.gestureMessage, viewModel)
