@@ -63,6 +63,9 @@ class FreeUpViewModel(
     private var removalJob: Job? = null
     private var pending: Pending? = null
 
+    /** True while [FreeUpUiState.error] holds a removal result the user has not dismissed or superseded. */
+    private var sticky = false
+
     fun refresh() {
         if (removing) return
         viewModelScope.launch { load() }
@@ -70,7 +73,7 @@ class FreeUpViewModel(
 
     internal suspend fun load() {
         if (removing) return
-        _state.update { it.copy(busy = true, error = null) }
+        _state.update { it.copy(busy = true, error = if (sticky) it.error else null) }
         try {
             val phone = queryPhone().associateBy { it.mediaId }
             val suggestions = SuggestionRule.suggest(repo.verifiedEntries(), phone, clock(), ageMonths(), zone)
@@ -82,7 +85,7 @@ class FreeUpViewModel(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            _state.update { it.copy(error = describe(e)) }
+            if (!sticky) _state.update { it.copy(error = describe(e)) }
         } finally {
             if (!removing) _state.update { it.copy(busy = false) }
         }
@@ -117,26 +120,36 @@ class FreeUpViewModel(
         val selected = _state.value.selectedItems
         if (removing || selected.isEmpty()) return
         removing = true
+        sticky = false
+        var damaged = 0
+        var changed = 0
         _state.update { it.copy(busy = true, error = null, checking = null) }
         removalJob = viewModelScope.launch {
             var published = false
             try {
                 val store = openStore()
                 if (store == null) {
-                    _state.update { it.copy(driveReachable = false, error = CONNECT_HOME_MESSAGE) }
+                    showMessage(CONNECT_HOME_MESSAGE) { it.copy(driveReachable = false) }
                     return@launch
                 }
                 val phone = queryPhone().associateBy { it.mediaId }
                 val safe = store.use {
                     it.connect()
-                    repo.recheck(selected, it, phone, opener) { c, t, b, tb ->
-                        _state.update { s -> s.copy(checking = CheckProgress(c, t, b, tb)) }
-                    }
+                    repo.recheck(selected, it, phone, opener,
+                        onProgress = { c, t, b, tb ->
+                            _state.update { s -> s.copy(checking = CheckProgress(c, t, b, tb)) }
+                        },
+                        onFailed = { reason ->
+                            if (reason == FreeUpRepository.DAMAGED) damaged++ else changed++
+                        },
+                    )
                 }
+                val summary = failureSummary(damaged, changed)
                 if (safe.isEmpty()) {
-                    _state.update { it.copy(error = "Nothing selected can be safely removed") }
+                    showMessage(summary ?: "Nothing selected can be safely removed")
                     return@launch
                 }
+                if (summary != null) showMessage(summary)
                 val sender = makeDeleteRequest(safe)
                 pending = Pending(sender, safe)
                 published = true
@@ -144,7 +157,8 @@ class FreeUpViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _state.update { it.copy(driveReachable = e !is IOException && it.driveReachable, error = describe(e)) }
+                val msg = listOfNotNull(failureSummary(damaged, changed), describe(e)).joinToString("\n")
+                showMessage(msg) { it.copy(driveReachable = e !is IOException && it.driveReachable) }
             } finally {
                 _state.update { it.copy(checking = null) }
                 if (!published) {
@@ -154,6 +168,27 @@ class FreeUpViewModel(
                 }
             }
         }
+    }
+
+    private fun showMessage(msg: String, extra: (FreeUpUiState) -> FreeUpUiState = { it }) {
+        sticky = true
+        _state.update { extra(it).copy(error = msg) }
+    }
+
+    private fun failureSummary(damaged: Int, changed: Int): String? {
+        val n = damaged + changed
+        if (n == 0) return null
+        val parts = listOfNotNull(
+            if (damaged > 0) "$damaged drive ${if (damaged == 1) "copy" else "copies"} damaged" else null,
+            if (changed > 0) "$changed phone ${if (changed == 1) "file" else "files"} changed" else null,
+        ).joinToString(", ")
+        return "$n ${if (n == 1) "item" else "items"} failed the check \u2014 will back up again ($parts)"
+    }
+
+    /** Clears the message shown after a removal attempt. */
+    fun dismissError() {
+        sticky = false
+        _state.update { it.copy(error = null) }
     }
 
     /** Stops the integrity check. Nothing is deleted. */
@@ -175,7 +210,7 @@ class FreeUpViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _state.update { it.copy(error = describe(e)) }
+                showMessage(describe(e))
             } finally {
                 removing = false
                 _state.update { it.copy(busy = false) }

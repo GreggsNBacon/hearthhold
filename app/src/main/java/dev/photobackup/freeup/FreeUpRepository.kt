@@ -37,6 +37,7 @@ class FreeUpRepository(
         phone: Map<Long, PhoneMedia>,
         opener: LocalOpener,
         onProgress: (checked: Int, total: Int, bytesChecked: Long, totalBytes: Long) -> Unit = { _, _, _, _ -> },
+        onFailed: (reason: String) -> Unit = {},
     ): List<LedgerEntry> {
         val ctx = currentCoroutineContext()
         val total = selected.size
@@ -53,8 +54,14 @@ class FreeUpRepository(
                 val reason = integrityFailure(e, path, m!!, store, opener, ctx) { n ->
                     onProgress(i, total, doneBytes + n, totalBytes)
                 }
-                if (reason == null) ok.add(e)
-                else ledger.upsert(e.copy(status = BackupStatus.FAILED, lastError = reason, updatedAtMs = clock()))
+                when (reason) {
+                    null -> ok.add(e)
+                    GONE -> Unit // vanished from the phone meanwhile: drive copy is still valid, just skip it
+                    else -> {
+                        ledger.upsert(e.copy(status = BackupStatus.FAILED, lastError = reason, updatedAtMs = clock()))
+                        onFailed(reason)
+                    }
+                }
             }
             doneBytes += sel.sizeBytes
             onProgress(i + 1, total, doneBytes, totalBytes)
@@ -84,7 +91,7 @@ class FreeUpRepository(
         if (driveHash != recorded) return DAMAGED
         val phoneHash = withContext(Dispatchers.IO) {
             opener.open(m)?.use { input -> Hashing.sha256(input) { ctx.ensureActive() } }
-        }
+        } ?: return GONE
         return if (phoneHash != recorded) PHONE_CHANGED else null
     }
 
@@ -107,5 +114,6 @@ class FreeUpRepository(
     companion object {
         const val DAMAGED = "Drive copy is damaged \u2014 will back up again"
         const val PHONE_CHANGED = "Phone file changed \u2014 will back up again"
+        private const val GONE = "gone"
     }
 }

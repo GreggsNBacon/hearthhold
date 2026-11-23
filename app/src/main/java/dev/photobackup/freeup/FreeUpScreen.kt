@@ -79,7 +79,10 @@ fun FreeUpScreen(viewModel: FreeUpViewModel) {
         }
         val message = if (!state.driveReachable) CONNECT_HOME_MESSAGE else state.error
         if (message != null) {
-            Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 8.dp))
+            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+                if (state.error != null) TextButton(onClick = { viewModel.dismissError() }) { Text("Dismiss") }
+            }
         }
         state.checking?.let { c ->
             Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {

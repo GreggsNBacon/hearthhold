@@ -66,13 +66,16 @@ class FreeUpViewModelTest {
         return PendingIntent.getActivity(ctx, 0, Intent(), PendingIntent.FLAG_IMMUTABLE).intentSender
     }
 
-    private fun vm(gate: CompletableDeferred<Unit>? = null, open: suspend () -> RemoteStore? = { store }) =
+    private var gate: CompletableDeferred<Unit>? = null
+    private val phoneBytes = mutableMapOf<Long, ByteArray>()
+
+    private fun vm(open: suspend () -> RemoteStore? = { store }) =
         FreeUpViewModel(
             repo = FreeUpRepository(ledger),
             queryPhone = { ledger.rows.value.values.map { phone(it) } },
             openStore = { gate?.await(); open() },
             ageMonths = { 6 },
-            opener = LocalOpener { m -> ByteArrayInputStream(bytes(m.mediaId)) },
+            opener = LocalOpener { m -> ByteArrayInputStream(phoneBytes[m.mediaId] ?: bytes(m.mediaId)) },
             makeDeleteRequest = { items -> requests.add(items.map { it.mediaId }); sender() },
             clock = { now },
             zone = ZoneOffset.UTC,
@@ -130,9 +133,6 @@ class FreeUpViewModelTest {
     @Test fun overlappingRefreshDoesNotReEnableButtonAndSecondTapIsIgnored() = kotlinx.coroutines.runBlocking {
         seed(1)
         val v = vm().loadedAndSelected()
-        val gate = CompletableDeferred<Unit>()
-        val v2 = vm(gate).also { it.refresh() } // gate not yet opened: load blocked, so use v for the real check
-        gate.complete(Unit)
         // removal in flight on v (dialog published, not yet answered)
         v.removeAndWait()
         v.refresh()
@@ -142,7 +142,47 @@ class FreeUpViewModelTest {
         v.onDeleteLaunched()
         v.onDeleteResult(false)
         assertFalse(v.state.value.busy)
-        assertNotNull(v2)
+    }
+
+    @Test fun cancelCheckProducesNoDeleteRequest() = kotlinx.coroutines.runBlocking {
+        seed(1)
+        val v = vm().loadedAndSelected()
+        val g = CompletableDeferred<Unit>().also { gate = it }
+        v.removeSelected() // suspends opening the store
+        assertTrue(v.state.value.busy)
+        v.cancelCheck()
+        g.complete(Unit)
+        assertTrue(requests.isEmpty())
+        assertNull(v.state.value.pendingDelete)
+        assertFalse(v.state.value.busy)
+        assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+    }
+
+    @Test fun failureSummarySurvivesTheReload() = kotlinx.coroutines.runBlocking {
+        seed(1, 2, 3)
+        store.files["r\\f2.jpg"] = ByteArray(5) { 9 } // damaged drive copy
+        phoneBytes[3] = ByteArray(5) { 8 } // phone file changed
+        val v = vm().loadedAndSelected()
+        v.removeAndWait()
+        assertEquals(listOf(listOf(1L)), requests)
+        val msg = v.state.value.error!!
+        assertTrue(msg, msg.contains("2 items failed the check"))
+        assertTrue(msg, msg.contains("1 drive copy damaged"))
+        assertTrue(msg, msg.contains("1 phone file changed"))
+        v.onDeleteLaunched(); v.onDeleteResult(false) // reload happens
+        assertEquals(msg, v.state.value.error)
+        v.dismissError()
+        assertNull(v.state.value.error)
+    }
+
+    @Test fun allItemsFailingStillShowsTheSummaryAfterReload() = kotlinx.coroutines.runBlocking {
+        seed(1)
+        store.corruptReads = true
+        val v = vm().loadedAndSelected()
+        v.removeAndWait()
+        assertTrue(requests.isEmpty())
+        assertTrue(v.state.value.error!!.contains("1 item failed the check"))
+        assertFalse(v.state.value.busy)
     }
 
     @Test fun exceptionsBecomeErrorStateNotCrash() = kotlinx.coroutines.runBlocking {

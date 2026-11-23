@@ -8,8 +8,8 @@ import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.smb.FakeRemoteStore
 import dev.photobackup.smb.RemoteException
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -92,7 +92,8 @@ class FreeUpRepositoryTest {
         val progress = mutableListOf<Int>()
         val kept = FreeUpRepository(ledger).recheck(
             listOf(a, b), store, mapOf(1L to phone(a), 2L to phone(b)), opener(),
-        ) { c, t, _, _ -> assertEquals(2, t); progress.add(c) }
+            onProgress = { c, t, _, _ -> assertEquals(2, t); progress.add(c) },
+        )
         assertEquals(listOf(1L, 2L), kept.map { it.mediaId })
         assertEquals(2, progress.last())
     }
@@ -110,14 +111,32 @@ class FreeUpRepositoryTest {
         val e = entry(1, size = 3 * 1024 * 1024)
         val (ledger, store) = setup(e)
         var result: List<LedgerEntry>? = null
-        val job = launch {
+        var maxBytes = 0L
+        lateinit var job: Job
+        job = launch(start = CoroutineStart.LAZY) {
             result = FreeUpRepository(ledger).recheck(listOf(e), store, mapOf(1L to phone(e)), opener(), { _, _, b, _ ->
-                if (b > 0) throw CancellationException("cancel in flight")
+                maxBytes = maxOf(maxBytes, b)
+                if (b > 0) job.cancel() // cancel mid-read; the next chunk's ensureActive must stop the check
             })
         }
+        job.start()
         job.join()
         assertTrue(job.isCancelled)
         assertNull(result)
+        assertTrue("stopped after the first chunk, got $maxBytes", maxBytes in 1..(1024 * 1024))
+        assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+    }
+
+    @Test fun phoneItemVanishedIsDroppedNotFailed() = runBlocking {
+        val e = entry(1)
+        val (ledger, store) = setup(e)
+        var failed = 0
+        val kept = FreeUpRepository(ledger).recheck(
+            listOf(e), store, mapOf(1L to phone(e)), LocalOpener { null }, onFailed = { failed++ },
+        )
+        assertTrue(kept.isEmpty())
+        assertEquals(0, failed)
+        assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
     }
 
     @Test fun recheckPropagatesUnreachableDrive() {
