@@ -80,6 +80,10 @@ interface SecondCopyDao {
         mediaId: Long, expected: String, remotePath: String?, movingTo: String?, lastError: String?, nowMs: Long,
     ): Boolean = endMoveIfCount(mediaId, expected, remotePath, movingTo, lastError, nowMs) > 0
 
+    /** Drops one row (a pending row of an item left waiting). Never touches a drive file. */
+    @Query("DELETE FROM SecondCopy WHERE mediaId = :mediaId")
+    suspend fun delete(mediaId: Long)
+
     @Query("DELETE FROM SecondCopy")
     suspend fun clear()
 }

@@ -88,6 +88,9 @@ class SecondCopyDaoTest {
         assertEquals("boom", dao.get(1)!!.lastError)
         assertEquals(7L, dao.get(1)!!.updatedAtMs)
         assertEquals(SecondStatus.VERIFIED, dao.get(1)!!.status)
+        dao.delete(1)
+        assertNull(dao.get(1))
+        assertEquals(listOf(2L), dao.all().map { it.mediaId })
     }
 
     @Test fun clearRemovesEverything() = runBlocking {

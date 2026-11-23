@@ -72,6 +72,7 @@ class MemorySecondCopies : SecondCopyDao {
         }
         return n
     }
+    override suspend fun delete(mediaId: Long) { rows.update { it - mediaId } }
     override suspend fun clear() { rows.value = emptyMap() }
 }
 
@@ -173,8 +174,7 @@ class SecondBackupEngineTest {
         val r = engine(s2, ledger, copies, phone, main).run()
         assertEquals(SecondResult.Done(1, 0, 0, 1), r)
         assertEquals(SecondStatus.VERIFIED, copies.get(1)!!.status)
-        val waiting = copies.get(2)
-        assertTrue(waiting == null || (waiting.status != SecondStatus.FAILED && waiting.status != SecondStatus.VERIFIED))
+        assertNull(copies.get(2)) // waiting: no row made
         assertNull(s2.files["$dir2\\b.jpg"])
         assertTrue(s2.files.keys.none { it.endsWith(".part") })
         assertEquals(1, main.calls)
@@ -194,9 +194,11 @@ class SecondBackupEngineTest {
     @Test fun adoptsAnIdenticalExistingFile() = runBlocking {
         val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
         val data = bytes(800)
-        ledger.upsert(row(1, data, status = BackupStatus.REMOVED_FROM_PHONE)); s2.put("$dir2\\IMG.jpg", data)
+        ledger.upsert(row(1, data)); s2.put("$dir2\\IMG.jpg", data)
+        // A source must be available (here the phone) before the second drive is touched at all.
+        val phone = Phone(); phone.files["content://media/1"] = data
         val main = Main(null)
-        val r = engine(s2, ledger, copies, main = main).run()
+        val r = engine(s2, ledger, copies, phone, main).run()
         assertEquals(SecondResult.Done(0, 1, 0, 0), r)
         assertEquals(SecondStatus.VERIFIED, copies.get(1)!!.status)
         assertEquals("$dir2\\IMG.jpg", copies.get(1)!!.remotePath)
@@ -566,5 +568,79 @@ class SecondBackupEngineTest {
         val opens = phone.opens
         assertEquals(SecondResult.Done(0, 0, 0, 0), engine(s2, ledger, copies, phone).run())
         assertEquals(opens, phone.opens)
+    }
+
+    // ---- Review fixes ----
+
+    /** Every second-store call except connect, recorded through the failOn hook. */
+    private fun FakeRemoteStore.recordOps(): MutableList<String> {
+        val ops = mutableListOf<String>()
+        failOn = { op, path -> if (op != "connect") synchronized(ops) { ops += "$op $path" }; null }
+        return ops
+    }
+
+    @Test fun waitingItemsNeverTouchTheSecondDriveNorPause() = runBlocking {
+        val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
+        for (id in 1L..5L) ledger.upsert(row(id, bytes(100, id.toInt()), name = "f$id.jpg", status = BackupStatus.REMOVED_FROM_PHONE))
+        val ops = s2.recordOps(); val pauses = mutableListOf<Long>(); val main = Main(null)
+        val r = engine(s2, ledger, copies, main = main, pauses = pauses, pauseMs = 2000).run()
+        assertEquals(SecondResult.Done(0, 0, 0, 5), r)
+        assertEquals(emptyList<String>(), ops)
+        assertEquals(emptyList<Long>(), pauses)
+        assertTrue(s2.dirs.isEmpty())
+        assertEquals(1, main.calls)
+        assertTrue(copies.all().isEmpty())
+    }
+
+    @Test fun mainRowMidMoveWaitsWithoutTouchingTheSecondDrive() = runBlocking {
+        val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
+        ledger.upsert(row(1, bytes(100), status = BackupStatus.REMOVED_FROM_PHONE).copy(movingTo = "B\\Dev\\Dog\\2026\\IMG.jpg"))
+        val ops = s2.recordOps(); val main = Main(FakeRemoteStore())
+        assertEquals(SecondResult.Done(0, 0, 0, 1), engine(s2, ledger, copies, main = main).run())
+        assertEquals(emptyList<String>(), ops)
+        assertEquals(0, main.calls)
+    }
+
+    @Test fun afterTheMainDropsLaterPhoneGoneItemsDoNotTouchTheSecondDrive() = runBlocking {
+        val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
+        val mainStore = object : RemoteStore by FakeRemoteStore() {
+            override suspend fun stat(path: String): dev.photobackup.smb.RemoteEntry? = throw RemoteException.Unreachable()
+        }
+        for (id in 1L..3L) ledger.upsert(row(id, bytes(100, id.toInt()), name = "f$id.jpg", status = BackupStatus.REMOVED_FROM_PHONE))
+        val pauses = mutableListOf<Long>()
+        engine(s2, ledger, copies, main = Main(mainStore), pauses = pauses, pauseMs = 2000).run()
+        val ops = s2.recordOps()
+        // A second run against a main that is already down from the start of this one: nothing touches the drive.
+        val r = engine(s2, ledger, copies, main = Main(null), pauses = pauses, pauseMs = 2000).run()
+        assertEquals(SecondResult.Done(0, 0, 0, 3), r)
+        assertEquals(emptyList<String>(), ops)
+        // First run: item 1 found the main down at its stat (before the second drive); 2 and 3 never touched anything.
+        assertEquals(emptyList<Long>(), pauses)
+        assertTrue(s2.dirs.isEmpty())
+    }
+
+    @Test fun failedNewVersionKeepsTheOldVerifiedCopyTracked() = runBlocking {
+        val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
+        val old = bytes(100, 1); val new = bytes(100, 2); val phone = Phone()
+        s2.put("$dir2\\IMG.jpg", old)
+        val prior = SecondCopy(1, "$dir2\\IMG.jpg", null, null, SecondStatus.VERIFIED, 100, sha(old), null, 1)
+        copies.upsert(prior)
+        ledger.upsert(row(1, new)); phone.files["content://media/1"] = new
+        s2.failOn = { op, _ -> if (op == "rename") IOException("busy") else null }
+        assertEquals(SecondResult.Done(0, 0, 1, 0), engine(s2, ledger, copies, phone).run())
+        val c = copies.get(1)!!
+        assertEquals(SecondStatus.VERIFIED, c.status)
+        assertEquals("$dir2\\IMG.jpg", c.remotePath)
+        assertEquals(sha(old), c.sha256) // still differs from the ledger, so the next run tries again
+        assertEquals(SecondBackupEngine.COPY_ERROR, c.lastError)
+    }
+
+    @Test fun copyDateFallsBackToDateModifiedAndDriveErrorTextIsMapped() = runBlocking {
+        val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
+        val data = bytes(100); val phone = Phone()
+        ledger.upsert(row(1, data).copy(dateTakenMs = 0)); phone.files["content://media/1"] = data
+        engine(s2, ledger, copies, phone).run()
+        assertEquals(10_000L, s2.times["$dir2\\IMG.jpg"])
+        assertEquals(dev.photobackup.smb.MSG_DRIVE_ERROR, SecondBackupEngine.itemError(IOException(dev.photobackup.smb.MSG_DRIVE_ERROR)))
     }
 }

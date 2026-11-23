@@ -9,6 +9,7 @@ import dev.photobackup.ledger.SecondStatus
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.smb.AccessDeniedException
 import dev.photobackup.smb.MSG_ACCESS_DENIED
+import dev.photobackup.smb.MSG_DRIVE_ERROR
 import dev.photobackup.smb.RemoteEntry
 import dev.photobackup.smb.RemoteException
 import dev.photobackup.smb.RemoteStore
@@ -80,9 +81,10 @@ class SecondBackupEngine(
         const val NO_NAME_ERROR = "No free file name in the second location folder"
 
         /** The fixed text stored for a failed item; never the exception text. */
-        fun itemError(e: Throwable): String = when (e) {
-            is AccessDeniedException -> MSG_ACCESS_DENIED
-            is FileNotFoundException -> BackupEngine.NOT_FOUND_ERROR
+        fun itemError(e: Throwable): String = when {
+            e is AccessDeniedException -> MSG_ACCESS_DENIED
+            e.message == MSG_DRIVE_ERROR -> MSG_DRIVE_ERROR
+            e is FileNotFoundException -> BackupEngine.NOT_FOUND_ERROR
             else -> COPY_ERROR
         }
     }
@@ -97,14 +99,15 @@ class SecondBackupEngine(
         class BadSource(val error: IOException?) : Attempt
     }
 
-    private val mover = DriveMover(store)
     private val root = DrivePaths.deviceRoot(settings.destination, settings.deviceName)
 
-    // Main store for this run: asked at most once; down once it failed.
+    // Per run: name reservations; the main store, asked at most once and dropped once it failed.
+    private var mover = DriveMover(store)
     private var mainAsked = false
     private var main: RemoteStore? = null
 
     suspend fun run(): SecondResult = withContext(Dispatchers.IO) {
+        mover = DriveMover(store)
         mainAsked = false
         main = null
         try {
@@ -240,9 +243,18 @@ class SecondBackupEngine(
             if (prior != null && prior.status == SecondStatus.VERIFIED && prior.sha256 == row.localSha256) continue
             if (prior?.partPath != null) { failed++; continue } // its .part could not be removed; cleanup retries
             if (prior?.movingTo != null) { waiting++; continue } // unsettled move: leave the row alone
-            if (pauseFirst && itemPauseMs > 0) pause(itemPauseMs)
-            pauseFirst = true
-            when (copyOne(row, prior)) {
+            // The source is settled first, so an item that can only wait (or whose main copy is damaged) never
+            // touches the second drive and costs no pause.
+            val outcome = when (val src = source(row)) {
+                is Source.Settled -> src.outcome
+                else -> {
+                    if (pauseFirst && itemPauseMs > 0) pause(itemPauseMs)
+                    pauseFirst = true
+                    copyOne(row, prior, src)
+                }
+            }
+            keepPriorCopy(row, prior, outcome)
+            when (outcome) {
                 Outcome.COPIED -> copied++
                 Outcome.ADOPTED -> adopted++
                 Outcome.FAILED -> failed++
@@ -252,7 +264,67 @@ class SecondBackupEngine(
         return SecondResult.Done(copied, adopted, failed, waiting)
     }
 
-    /** `<root>\<desired>\<year>` and the name: the main copy's year and name, else the planner's. */
+    /**
+     * A new version (the main drive re-uploaded an edited file) that did not get its copy this run: the earlier
+     * VERIFIED second copy stays tracked (its sha still differs from the ledger, so the next run tries again), with
+     * this run's error. Not when the failed attempt left a `.part` that cleanup must still track.
+     */
+    private suspend fun keepPriorCopy(row: LedgerEntry, prior: SecondCopy?, outcome: Outcome) {
+        if (prior?.status != SecondStatus.VERIFIED) return
+        if (outcome != Outcome.FAILED && outcome != Outcome.WAITING) return
+        val now = copies.get(row.mediaId)
+        if (now?.partPath != null) return
+        copies.upsert(prior.copy(lastError = now?.lastError ?: prior.lastError, updatedAtMs = clock()))
+    }
+
+    /** Where an item's copy comes from, decided before the second drive is touched. */
+    private sealed interface Source {
+        /** The phone has the file (its hash is checked while copying). */
+        data object Phone : Source
+
+        /** The main drive file, already found at the recorded size. */
+        class Main(val store: RemoteStore, val path: String) : Source
+
+        /** Nothing to copy from this run: waiting, or FAILED (main copy damaged), already recorded. */
+        class Settled(val outcome: Outcome) : Source
+    }
+
+    private suspend fun source(row: LedgerEntry): Source = if (phoneHas(row)) Source.Phone else mainSource(row)
+
+    private fun phoneHas(row: LedgerEntry): Boolean = try {
+        opener.open(media(row))?.use { true } ?: false
+    } catch (_: IOException) {
+        false
+    }
+
+    /**
+     * The main copy as a source: waits when the main row is mid-move or mid-upload (remotePath may be stale) or the main
+     * drive can't be had; FAILED [DAMAGED_ERROR] when it is reachable and the file is missing or of the wrong size.
+     * Writes nothing for a waiting item.
+     */
+    private suspend fun mainSource(row: LedgerEntry): Source {
+        if (row.movingTo != null || row.partPath != null) return Source.Settled(Outcome.WAITING)
+        val main = mainOrNull() ?: return Source.Settled(Outcome.WAITING)
+        val path = row.remotePath ?: return Source.Settled(fail(row, DAMAGED_ERROR))
+        val st = try {
+            main.stat(path)
+        } catch (e: IOException) {
+            if (e is RemoteException) {
+                this.main = null
+                return Source.Settled(Outcome.WAITING)
+            }
+            return Source.Settled(fail(row, itemError(e)))
+        }
+        if (st == null || st.isDirectory || st.sizeBytes != row.sizeBytes) {
+            return Source.Settled(fail(row, DAMAGED_ERROR))
+        }
+        return Source.Main(main, path)
+    }
+
+    /**
+     * `<root>\<desired>\<year>` and the name. The year and name are the main copy's (planner as fallback when its path
+     * is not in today's layout), so the second location keeps the main drive's layout and names, clash names included.
+     */
     private suspend fun target(row: LedgerEntry): Pair<String, String> {
         val folder = folderFor(row.mediaId, row.relativePath)
         val segs = row.remotePath?.split('\\').orEmpty()
@@ -273,7 +345,7 @@ class SecondBackupEngine(
         row.dateModifiedSec, row.dateModifiedSec, row.isVideo, "",
     )
 
-    private suspend fun copyOne(row: LedgerEntry, prior: SecondCopy?): Outcome {
+    private suspend fun copyOne(row: LedgerEntry, prior: SecondCopy?, src: Source): Outcome {
         val sha = row.localSha256!!
         val (dir, name) = target(row)
         val pick = try {
@@ -291,7 +363,7 @@ class SecondBackupEngine(
             }
             NamePick.NoName, NamePick.Aborted -> fail(row, NO_NAME_ERROR)
             is NamePick.Free -> try {
-                copyTo(row, prior, pick.path)
+                copyTo(row, prior, pick.path, src)
             } finally {
                 mover.release(pick.path)
             }
@@ -299,53 +371,45 @@ class SecondBackupEngine(
     }
 
     /** Copies to the reserved [final] name: from the phone when it has a good copy, else from the main drive. */
-    private suspend fun copyTo(row: LedgerEntry, prior: SecondCopy?, final: String): Outcome {
+    private suspend fun copyTo(row: LedgerEntry, prior: SecondCopy?, final: String, src: Source): Outcome {
         val part = RemotePathPlanner.partName(final)
-        val phone = try {
-            opener.open(media(row))
-        } catch (_: IOException) {
-            null
-        }
-        if (phone != null) {
-            when (val a = attempt(row, phone, final, part)) {
-                is Attempt.Done -> return a.outcome
-                is Attempt.BadSource -> {} // edited or unreadable on the phone: use the main copy
+        if (src is Source.Phone) {
+            val phone = try {
+                opener.open(media(row))
+            } catch (_: IOException) {
+                null
+            }
+            if (phone != null) {
+                when (val a = attempt(row, phone, final, part)) {
+                    is Attempt.Done -> return a.outcome
+                    is Attempt.BadSource -> {} // edited or unreadable on the phone: use the main copy
+                }
             }
         }
-        return fromMain(row, prior, final, part)
-    }
-
-    private suspend fun fromMain(row: LedgerEntry, prior: SecondCopy?, final: String, part: String): Outcome {
-        // A main move or upload in flight: remotePath may be stale. Wait for the main engine to settle it.
-        if (row.movingTo != null || row.partPath != null) return waiting(prior)
-        val main = mainOrNull() ?: return waiting(prior)
-        val path = row.remotePath ?: return fail(row, DAMAGED_ERROR)
-        val st = try {
-            main.stat(path)
-        } catch (e: IOException) {
-            if (e is RemoteException) return mainDown(prior)
-            return fail(row, itemError(e))
+        val main = src as? Source.Main ?: when (val m = mainSource(row)) {
+            is Source.Main -> m
+            is Source.Settled -> return if (m.outcome == Outcome.WAITING) waiting(row, prior) else m.outcome
+            Source.Phone -> return waiting(row, prior) // never returned by mainSource
         }
-        if (st == null || st.isDirectory || st.sizeBytes != row.sizeBytes) return fail(row, DAMAGED_ERROR)
         val input = try {
-            main.openRead(path, 0)
+            main.store.openRead(main.path, 0)
         } catch (_: FileNotFoundException) {
             return fail(row, DAMAGED_ERROR)
         } catch (e: IOException) {
-            if (e is RemoteException) return mainDown(prior)
+            if (e is RemoteException) return mainDown(row, prior)
             return fail(row, itemError(e))
         }
         return when (val a = attempt(row, input, final, part)) {
             is Attempt.Done -> a.outcome
             is Attempt.BadSource -> when (val e = a.error) {
                 null -> fail(row, DAMAGED_ERROR)
-                is RemoteException -> mainDown(prior)
+                is RemoteException -> mainDown(row, prior)
                 else -> fail(row, itemError(e))
             }
         }
     }
 
-    /** The main store for this run, asked for at most once; null when it can't be had. */
+    /** The main store for this run, asked for at most once; null when it can't be had (or dropped). */
     private suspend fun mainOrNull(): RemoteStore? {
         if (!mainAsked) {
             mainAsked = true
@@ -358,15 +422,15 @@ class SecondBackupEngine(
         return main
     }
 
-    /** The main drive dropped: every later item that needs it waits too. */
-    private suspend fun mainDown(prior: SecondCopy?): Outcome {
+    /** The main drive dropped: every later item that needs it waits too, without asking again. */
+    private suspend fun mainDown(row: LedgerEntry, prior: SecondCopy?): Outcome {
         main = null
-        return waiting(prior)
+        return waiting(row, prior)
     }
 
-    /** Leaves the item as it was before this run tried it (no row stays no-row-or-pending, never FAILED). */
-    private suspend fun waiting(prior: SecondCopy?): Outcome {
-        if (prior != null) copies.upsert(prior)
+    /** Leaves the item as it was before this run tried it: its earlier row back, or no row; never FAILED. */
+    private suspend fun waiting(row: LedgerEntry, prior: SecondCopy?): Outcome {
+        if (prior != null) copies.upsert(prior) else copies.delete(row.mediaId)
         return Outcome.WAITING
     }
 
@@ -383,7 +447,9 @@ class SecondBackupEngine(
         return when (r) {
             is CopyResult.Verified -> {
                 copies.upsert(copyRow(row, SecondStatus.VERIFIED, remote = final))
-                DriveCopy.setTimesQuietly(store, final, row.dateTakenMs)
+                // As the main engine: date taken, else (date added is not recorded) date modified.
+                val ms = if (row.dateTakenMs > 0) row.dateTakenMs else row.dateModifiedSec * 1000
+                DriveCopy.setTimesQuietly(store, final, ms)
                 Attempt.Done(Outcome.COPIED)
             }
             is CopyResult.OpenFailed -> {

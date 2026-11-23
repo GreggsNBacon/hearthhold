@@ -32,7 +32,10 @@ sealed interface CopyResult {
     /** Renamed, but reading it back failed: the unverified copy stays under the final name. */
     data class ReadBackFailed(val error: IOException) : CopyResult
 
-    /** Renamed, but the read-back SHA-256 differs from what was written: the bad copy stays under the final name. */
+    /**
+     * Renamed, but the read-back SHA-256 differs from [sha], the SHA-256 of what was written: the bad copy stays under
+     * the final name.
+     */
     data class Mismatch(val sha: String) : CopyResult
 }
 
