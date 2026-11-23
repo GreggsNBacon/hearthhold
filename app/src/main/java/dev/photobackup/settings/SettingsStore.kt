@@ -1,0 +1,88 @@
+package dev.photobackup.settings
+
+import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import dev.photobackup.media.SourceFolders
+import dev.photobackup.smb.SmbConfig
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+
+private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
+
+class SettingsStore internal constructor(
+    @Suppress("UNUSED_PARAMETER") context: Context,
+    private val cipher: CredentialCipher,
+    private val dataStore: DataStore<Preferences>,
+) {
+    constructor(context: Context, cipher: CredentialCipher) :
+        this(context, cipher, context.applicationContext.settingsDataStore)
+
+    val settings: Flow<AppSettings> = dataStore.data.map { read(it) }
+
+    suspend fun update(transform: (AppSettings) -> AppSettings) {
+        dataStore.edit { prefs -> write(prefs, transform(read(prefs))) }
+    }
+
+    private fun read(p: Preferences): AppSettings {
+        val host = p[HOST]
+        val share = p[SHARE]
+        val smb = if (!host.isNullOrBlank() && !share.isNullOrBlank()) {
+            SmbConfig(host, share, p[USER], p[PASSWORD]?.let { cipher.decrypt(it) })
+        } else null
+        return AppSettings(
+            smb = smb,
+            destination = p[DESTINATION],
+            deviceName = p[DEVICE_NAME] ?: AppSettings(null, null).deviceName,
+            chargingOnly = p[CHARGING_ONLY] ?: false,
+            freeUpAgeMonths = p[FREE_UP_MONTHS] ?: 6,
+            folders = SourceFolders(
+                camera = p[CAMERA] ?: true,
+                screenshots = p[SCREENSHOTS] ?: true,
+                extraRelativePaths = p[EXTRA_PATHS] ?: emptySet(),
+            ),
+            loopVideos = p[LOOP_VIDEOS] ?: true,
+        )
+    }
+
+    private fun write(p: MutablePreferences, s: AppSettings) {
+        p.putOrRemove(HOST, s.smb?.host)
+        p.putOrRemove(SHARE, s.smb?.share)
+        p.putOrRemove(USER, s.smb?.username)
+        p.putOrRemove(PASSWORD, s.smb?.password?.let { cipher.encrypt(it) })
+        p.putOrRemove(DESTINATION, s.destination)
+        p[DEVICE_NAME] = s.deviceName
+        p[CHARGING_ONLY] = s.chargingOnly
+        p[FREE_UP_MONTHS] = s.freeUpAgeMonths
+        p[CAMERA] = s.folders.camera
+        p[SCREENSHOTS] = s.folders.screenshots
+        p[EXTRA_PATHS] = s.folders.extraRelativePaths
+        p[LOOP_VIDEOS] = s.loopVideos
+    }
+
+    private fun <T> MutablePreferences.putOrRemove(key: Preferences.Key<T>, value: T?) {
+        if (value == null) remove(key) else this[key] = value
+    }
+
+    private companion object {
+        val HOST = stringPreferencesKey("smb_host")
+        val SHARE = stringPreferencesKey("smb_share")
+        val USER = stringPreferencesKey("smb_username")
+        val PASSWORD = stringPreferencesKey("smb_password")
+        val DESTINATION = stringPreferencesKey("destination")
+        val DEVICE_NAME = stringPreferencesKey("device_name")
+        val CHARGING_ONLY = booleanPreferencesKey("charging_only")
+        val FREE_UP_MONTHS = intPreferencesKey("free_up_age_months")
+        val CAMERA = booleanPreferencesKey("folder_camera")
+        val SCREENSHOTS = booleanPreferencesKey("folder_screenshots")
+        val EXTRA_PATHS = stringSetPreferencesKey("folder_extra_paths")
+        val LOOP_VIDEOS = booleanPreferencesKey("loop_videos")
+    }
+}
