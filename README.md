@@ -83,7 +83,6 @@ The chip at the top shows overall status, e.g. "Backing up 3 of 40", "5 waiting"
 
 ## Known limits
 
-- Google Photos Locked Folder is not accessible to the app.
 - FAT32 drives cannot hold files over 4 GB; use exFAT/NTFS/ext4.
 - The first backup can take a long time.
 
