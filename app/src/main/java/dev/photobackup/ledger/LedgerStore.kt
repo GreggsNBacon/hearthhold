@@ -13,9 +13,10 @@ interface LedgerStore {
 
     /**
      * Atomically sets the row REMOVED_FROM_PHONE only if it is still VERIFIED with no drive move in flight (movingTo
-     * null). Returns whether it changed. A read-then-upsert could drop a movingTo marker set in between.
+     * null), setting binRequestedAt to [binRequestedAt] in the same write (review's Junk). Returns whether it changed.
+     * A read-then-upsert could drop a movingTo marker set in between.
      */
-    suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long): Boolean
+    suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long, binRequestedAt: Long? = null): Boolean
 
     /**
      * The targeted writes below change only the columns they name, so a concurrent write to another column (e.g.

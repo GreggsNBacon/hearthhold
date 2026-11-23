@@ -39,7 +39,7 @@ class FreeUpRepository(
         phone: Map<Long, PhoneMedia>,
         opener: LocalOpener,
         onProgress: (checked: Int, total: Int, bytesChecked: Long, totalBytes: Long) -> Unit = { _, _, _, _ -> },
-        onFailed: (reason: String) -> Unit = {},
+        onFailed: (mediaId: Long, reason: String) -> Unit = { _, _ -> },
     ): List<LedgerEntry> {
         val ctx = currentCoroutineContext()
         val total = selected.size
@@ -61,7 +61,7 @@ class FreeUpRepository(
                     GONE -> Unit // vanished from the phone meanwhile: drive copy is still valid, just skip it
                     else -> {
                         markFailed(e, reason)
-                        onFailed(reason)
+                        onFailed(e.mediaId, reason)
                     }
                 }
             }

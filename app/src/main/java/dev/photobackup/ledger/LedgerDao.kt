@@ -28,13 +28,14 @@ interface LedgerDao : LedgerStore {
     override suspend fun delete(mediaId: Long)
 
     @Query(
-        "UPDATE LedgerEntry SET status = 'REMOVED_FROM_PHONE', updatedAtMs = :nowMs " +
+        "UPDATE LedgerEntry SET status = 'REMOVED_FROM_PHONE', updatedAtMs = :nowMs, " +
+            "binRequestedAt = :binRequestedAt " +
             "WHERE mediaId = :mediaId AND status = 'VERIFIED' AND movingTo IS NULL"
     )
-    suspend fun markRemovedIfSettledCount(mediaId: Long, nowMs: Long): Int
+    suspend fun markRemovedIfSettledCount(mediaId: Long, nowMs: Long, binRequestedAt: Long? = null): Int
 
-    override suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long): Boolean =
-        markRemovedIfSettledCount(mediaId, nowMs) > 0
+    override suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long, binRequestedAt: Long?): Boolean =
+        markRemovedIfSettledCount(mediaId, nowMs, binRequestedAt) > 0
 
     @Query("UPDATE LedgerEntry SET lastError = :error, updatedAtMs = :nowMs WHERE mediaId = :mediaId")
     override suspend fun setLastError(mediaId: Long, error: String?, nowMs: Long)

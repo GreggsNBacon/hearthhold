@@ -284,6 +284,16 @@ class ReviewViewModelTest {
         assertEquals(2L, v.cur()); assertEquals(0, v.state.value.summary.junk)
     }
 
+    @Test fun finish_rows_left_alone_at_apply_count_as_failed() = runTest {
+        add(1)
+        val v = vm()
+        v.swipe(Swipe.LEFT)
+        finisher.prepareResult = PrepareResult.Ready("req", decisions.all(), listOf(FailedRow(9, "changed")))
+        finisher.applyResult = ApplyResult.Done(0, 0, 0, leftAlone = 1)
+        v.startFinish(); v.onDeleteConfirmed()
+        assertEquals(FinishState.Done(0, 0, 0, 2), v.state.value.finish)
+    }
+
     @Test fun finish_cancelled_returns_to_idle_without_applying() = runTest {
         add(1)
         val v = vm()

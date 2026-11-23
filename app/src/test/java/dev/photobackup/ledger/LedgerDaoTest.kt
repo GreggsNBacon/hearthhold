@@ -79,6 +79,20 @@ class LedgerDaoTest {
         assertEquals(BackupStatus.FAILED, dao.get(3)!!.status)
     }
 
+    @Test fun markRemovedIfSettledSetsBinRequestedAtInTheSameWrite() = runBlocking {
+        dao.upsert(entry(1, BackupStatus.VERIFIED))
+        dao.upsert(entry(2, BackupStatus.VERIFIED).copy(movingTo = "x\\y.jpg"))
+        dao.upsert(entry(3, BackupStatus.VERIFIED))
+        assertEquals(true, dao.markRemovedIfSettled(1, 99, binRequestedAt = 42))
+        assertEquals(false, dao.markRemovedIfSettled(2, 99, binRequestedAt = 42))
+        assertEquals(true, dao.markRemovedIfSettled(3, 99))
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, dao.get(1)!!.status)
+        assertEquals(42L, dao.get(1)!!.binRequestedAt)
+        assertNull(dao.get(2)!!.binRequestedAt)
+        assertEquals(BackupStatus.VERIFIED, dao.get(2)!!.status)
+        assertNull(dao.get(3)!!.binRequestedAt)
+    }
+
     @Test fun setLastErrorTouchesOnlyTheErrorColumn() = runBlocking {
         dao.upsert(entry(1, BackupStatus.REMOVED_FROM_PHONE).copy(remotePath = "a\\b.jpg", localSha256 = "s"))
         dao.setLastError(1, "oops", 77)

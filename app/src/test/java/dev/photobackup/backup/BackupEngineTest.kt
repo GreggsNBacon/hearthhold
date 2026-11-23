@@ -33,12 +33,14 @@ class MemoryLedger : LedgerStore {
     override suspend fun withPartPath() = rows.value.values.filter { it.partPath != null }
     override suspend fun withMovingTo() = rows.value.values.filter { it.movingTo != null }
     override suspend fun delete(mediaId: Long) { rows.update { it - mediaId } }
-    override suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long): Boolean {
+    override suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long, binRequestedAt: Long?): Boolean {
         var changed = false
         rows.update { m ->
             val e = m[mediaId]
             changed = e != null && e.status == BackupStatus.VERIFIED && e.movingTo == null
-            if (changed) m + (mediaId to e!!.copy(status = BackupStatus.REMOVED_FROM_PHONE, updatedAtMs = nowMs)) else m
+            if (changed) m + (mediaId to e!!.copy(
+                status = BackupStatus.REMOVED_FROM_PHONE, updatedAtMs = nowMs, binRequestedAt = binRequestedAt,
+            )) else m
         }
         return changed
     }

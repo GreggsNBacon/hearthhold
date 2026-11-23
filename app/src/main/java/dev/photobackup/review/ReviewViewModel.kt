@@ -315,7 +315,7 @@ class ReviewViewModel(
             try {
                 when (val r = finisher.apply(p)) {
                     is ApplyResult.Done -> {
-                        setFinish(FinishState.Done(r.freedBytes, r.junkCount, r.keptCount, p.failed.size))
+                        setFinish(FinishState.Done(r.freedBytes, r.junkCount, r.keptCount, p.failed.size + r.leftAlone))
                         reload()
                     }
                     is ApplyResult.Failed -> {

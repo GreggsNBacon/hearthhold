@@ -133,7 +133,7 @@ class FreeUpRepositoryTest {
         val (ledger, store) = setup(e)
         var failed = 0
         val kept = FreeUpRepository(ledger).recheck(
-            listOf(e), store, mapOf(1L to phone(e)), LocalOpener { null }, onFailed = { failed++ },
+            listOf(e), store, mapOf(1L to phone(e)), LocalOpener { null }, onFailed = { _, _ -> failed++ },
         )
         assertTrue(kept.isEmpty())
         assertEquals(0, failed)
@@ -186,7 +186,7 @@ class FreeUpRepositoryTest {
             }
         }
         val failed = mutableListOf<String>()
-        val kept = FreeUpRepository(racing).recheck(listOf(e), store, mapOf(1L to phone(e)), opener(), onFailed = { failed += it })
+        val kept = FreeUpRepository(racing).recheck(listOf(e), store, mapOf(1L to phone(e)), opener(), onFailed = { _, r -> failed += r })
         assertTrue(kept.isEmpty())
         assertEquals(listOf(FreeUpRepository.DAMAGED), failed)
         assertEquals(uploading, ledger.get(1)) // partPath kept, so the next run cleans that .part
@@ -227,9 +227,9 @@ class FreeUpRepositoryTest {
                 inner.upsert(inner.get(1)!!.copy(movingTo = "elsewhere-f1.jpg"))
             }
             override suspend fun get(mediaId: Long): LedgerEntry? = inner.get(mediaId).also { race() }
-            override suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long): Boolean {
+            override suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long, binRequestedAt: Long?): Boolean {
                 race()
-                return inner.markRemovedIfSettled(mediaId, nowMs)
+                return inner.markRemovedIfSettled(mediaId, nowMs, binRequestedAt)
             }
         }
         assertEquals(0, FreeUpRepository(racing).markRemoved(listOf(e)))

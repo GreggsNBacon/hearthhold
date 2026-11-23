@@ -139,7 +139,7 @@ class FreeUpViewModel(
                         onProgress = { c, t, b, tb ->
                             _state.update { s -> s.copy(checking = CheckProgress(c, t, b, tb)) }
                         },
-                        onFailed = { reason ->
+                        onFailed = { _, reason ->
                             if (reason == FreeUpRepository.DAMAGED) damaged++ else changed++
                         },
                     )
