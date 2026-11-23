@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.photobackup.MainActivity
+import dev.photobackup.R
 import dev.photobackup.freeup.formatSize
 
 object BackupNotifications {
@@ -42,7 +43,7 @@ object BackupNotifications {
     fun progress(context: Context, done: Int, total: Int, etaSec: Long?): Notification {
         ensureChannels(context)
         return NotificationCompat.Builder(context, CHANNEL_PROGRESS)
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setSmallIcon(R.drawable.ic_stat_hearthhold)
             .setContentTitle("Backing up $done of $total")
             .setContentText(etaSec?.let { "About ${formatEta(it)} left" })
             .setProgress(total, done, total == 0)
@@ -63,7 +64,7 @@ object BackupNotifications {
         try {
             ensureChannels(context)
             val n = NotificationCompat.Builder(context, CHANNEL_ERRORS)
-                .setSmallIcon(android.R.drawable.stat_notify_error)
+                .setSmallIcon(R.drawable.ic_stat_hearthhold)
                 .setContentTitle("Hearthhold")
                 .setContentText(text)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(text))
@@ -84,7 +85,7 @@ object BackupNotifications {
         try {
             ensureChannels(context)
             val n = NotificationCompat.Builder(context, CHANNEL_DONE)
-                .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+                .setSmallIcon(R.drawable.ic_stat_hearthhold)
                 .setContentTitle("Backup complete")
                 .setContentText(completeText(files, bytes))
                 .setAutoCancel(true)
