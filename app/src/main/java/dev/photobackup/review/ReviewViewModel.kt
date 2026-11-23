@@ -26,7 +26,7 @@ import java.io.IOException
 
 const val CONNECT_TO_FINISH_MESSAGE = "Connect to home Wi-Fi to finish"
 const val KEEP_HIDE_DAYS = 180L
-const val CHANGED_WHILE_FINISHING = "Changed by a backup while finishing — decision kept, try again"
+const val CHANGED_WHILE_FINISHING = "Changed by a backup while finishing â€” decision kept, try again"
 
 /** An item Finish left as it was, with a short user-safe reason. [name] is the file name (or a count). */
 data class LeftAlone(val name: String, val reason: String)
@@ -61,6 +61,11 @@ data class ReviewUiState(
     val leftAlone: List<LeftAlone> = emptyList(),
     /** Folders the deck can be narrowed to: phone folders (no trailing slash) and named folders, sorted. */
     val folderOptions: List<String> = emptyList(),
+    /**
+     * True once, when the deck first runs out with decisions waiting: the screen opens the Finish summary and calls
+     * [ReviewViewModel.finishOfferShown]. Never offered again in this session (Undo, rotation and reloads included).
+     */
+    val offerFinish: Boolean = false,
 )
 
 class ReviewViewModel(
@@ -102,6 +107,7 @@ class ReviewViewModel(
     private var folderOf: Map<Long, String?> = emptyMap() // mediaId -> named folder (assignment/rule)
     private var pinnedId: Long? = null
     private var prepared: PrepareResult.Ready? = null
+    private var finishOffered = false
 
     fun refresh() {
         viewModelScope.launch { lock.withLock { load() } }
@@ -196,11 +202,15 @@ class ReviewViewModel(
     private fun publish(error: String? = _state.value.error) {
         val d = deck()
         pinnedId = d.firstOrNull()?.entry?.mediaId
+        val sum = summary()
+        val offer = !finishOffered && d.isEmpty() && sum.total > 0 && _state.value.finish == FinishState.Idle
+        if (offer) finishOffered = true
         _state.update {
             it.copy(
                 loading = false, error = error, current = d.getOrNull(0), next = d.getOrNull(1),
-                remaining = d.size, summary = summary(), canUndo = history.isNotEmpty() || decided.isNotEmpty(),
+                remaining = d.size, summary = sum, canUndo = history.isNotEmpty() || decided.isNotEmpty(),
                 folderFilter = folderFilter, folderOptions = folderOptions(),
+                offerFinish = it.offerFinish || offer,
             )
         }
     }
@@ -210,6 +220,9 @@ class ReviewViewModel(
             folderOf.values.filterNotNull()
         return all.distinctBy { it.lowercase() }.sortedBy { it.lowercase() }
     }
+
+    /** The screen has opened the Finish summary offered by [ReviewUiState.offerFinish]. */
+    fun finishOfferShown() = _state.update { it.copy(offerFinish = false) }
 
     fun finishSummary(): FinishSummary = summary()
 

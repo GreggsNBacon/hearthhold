@@ -107,13 +107,14 @@ class SettingsViewModel(
 
     /** Sets what swiping [swipe] does in review (null = No action). Refused if no direction would do anything. */
     fun setGesture(swipe: Swipe, action: ReviewAction?): Job = viewModelScope.launch {
-        val current = store.settings.first().gestures
-        if (!canSetGesture(current, swipe, action)) {
-            _state.update { it.copy(gestureMessage = GESTURE_NEEDED) }
-            return@launch
+        var refused = false
+        // Checked inside the transform, so two quick changes can never both pass against the same old settings.
+        store.update { cur ->
+            refused = !canSetGesture(cur.gestures, swipe, action)
+            if (refused) cur
+            else cur.copy(gestures = Swipe.values().associateWith { s -> if (s == swipe) action else cur.gestures[s] })
         }
-        _state.update { it.copy(gestureMessage = null) }
-        store.update { it.copy(gestures = Swipe.values().associateWith { s -> if (s == swipe) action else it.gestures[s] }) }
+        _state.update { it.copy(gestureMessage = if (refused) GESTURE_NEEDED else null) }
     }
 
     fun setCamera(on: Boolean): Job = edit { it.copy(folders = it.folders.copy(camera = on)) }

@@ -484,4 +484,14 @@ class SettingsViewModelTest {
         assertEquals(FolderRules.RESERVED_MESSAGE, newFolderError(".bIn"))
         assertNull(vm.nameError("Bin"))
     }
+
+    @Test fun concurrentGestureChangesNeverLeaveAllNoAction() = runBlocking {
+        val vm = vm()
+        vm.setGesture(Swipe.UP, null).join(); vm.setGesture(Swipe.RIGHT, null).join()
+        // Both checks would pass against the same starting settings; only one may win.
+        val a = vm.setGesture(Swipe.LEFT, null); val b = vm.setGesture(Swipe.DOWN, null)
+        a.join(); b.join()
+        assertTrue(settings.settings.first().gestures.values.any { it != null })
+        assertEquals(SettingsViewModel.GESTURE_NEEDED, vm.state.value.gestureMessage)
+    }
 }

@@ -464,4 +464,27 @@ class ReviewViewModelTest {
         )
         assertEquals(listOf("Nothing needed changing"), doneLines(FinishState.Done(0, 0, 0)))
     }
+
+    @Test fun deck_running_out_with_decisions_offers_finish_once() = runTest {
+        add(1); add(2)
+        val v = vm()
+        assertFalse(v.state.value.offerFinish)
+        v.swipe(Swipe.LEFT)
+        assertFalse(v.state.value.offerFinish)
+        v.swipe(Swipe.RIGHT)
+        assertTrue(v.state.value.offerFinish)
+        v.finishOfferShown()
+        assertFalse(v.state.value.offerFinish)
+        v.undo(); v.swipe(Swipe.RIGHT) // runs out again: not offered a second time
+        assertFalse(v.state.value.offerFinish)
+    }
+
+    @Test fun empty_deck_without_decisions_offers_nothing() = runTest {
+        val v = vm()
+        assertFalse(v.state.value.offerFinish)
+        add(1)
+        v.refresh()
+        v.swipe(Swipe.DOWN) // skip only: the card stays, nothing to finish
+        assertFalse(v.state.value.offerFinish)
+    }
 }

@@ -54,6 +54,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -116,6 +117,16 @@ class AppContainer(context: Context) {
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     val settingsStore: SettingsStore by lazy { SettingsStore(app, KeystoreCredentialCipher()) }
+
+    /**
+     * The saved swipe gestures, kept current for the review deck (which reads them synchronously on every swipe) and
+     * its direction hints. Null until the settings have been read: review ignores swipes and hides hints until then.
+     * Collected from app start; a settings read error falls back to the defaults instead of crashing [appScope].
+     */
+    val gestures: StateFlow<Map<Swipe, ReviewAction?>?> =
+        settingsStore.settings.map<AppSettings, Map<Swipe, ReviewAction?>?> { it.gestures }
+            .catch { e -> if (e is CancellationException) throw e else emit(DEFAULT_GESTURES) }
+            .stateIn(appScope, SharingStarted.Eagerly, null)
     val statusRepository: BackupStatusRepository get() = BackupStatusRepository.get(app)
     val ledger: LedgerDao get() = LedgerDatabase.get(app).ledgerDao()
     val media: LocalMediaSource by lazy { LocalMediaSource(app) }
@@ -308,13 +319,6 @@ class AppContainer(context: Context) {
         }
     }
 
-    /**
-     * The saved swipe gestures, kept current for the review deck (which reads them synchronously on every swipe) and
-     * its corner hints. Starts collecting when first used; the defaults stand in until the settings have been read.
-     */
-    val gestures: StateFlow<Map<Swipe, ReviewAction?>> by lazy {
-        settingsStore.settings.map { it.gestures }.stateIn(appScope, SharingStarted.Eagerly, DEFAULT_GESTURES)
-    }
 
     /** Opens a store for the saved drive, or null when none is set up. */
     private suspend fun driveStoreOrNull(): RemoteStore? = if (settings().smb == null) null else driveStore()
@@ -332,7 +336,17 @@ class AppContainer(context: Context) {
                 queryPhone = { media.query(settings().folders).associateBy { it.mediaId } },
                 opener = media.opener(),
                 makeDeleteRequest = { items -> repo.deleteRequest(app, items) },
-                runNow = { appScope.launch { runCatching { backup.runNow(settings().chargingOnly) } } },
+                runNow = {
+                    appScope.launch {
+                        try {
+                            backup.runNow(settings().chargingOnly)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            // The next scheduled run does the drive-side work instead.
+                        }
+                    }
+                },
             )
             val g = gestures
             ReviewViewModel(
@@ -342,7 +356,7 @@ class AppContainer(context: Context) {
                 keeps = db.reviewKeepDao(),
                 assignments = db.folderAssignmentDao(),
                 folderRules = { settings().folderRules },
-                gestures = { g.value },
+                gestures = { g.value ?: emptyMap() }, // not loaded yet: every swipe is ignored
                 finisher = finisher,
             )
         }

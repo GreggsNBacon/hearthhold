@@ -95,8 +95,15 @@ private fun heading(o: Offset, w: Float, h: Float): Pair<Swipe, Float>? {
 fun ReviewScreen(viewModel: ReviewViewModel, gestures: Map<Swipe, ReviewAction?>, onBack: () -> Unit) {
     val state by viewModel.state.collectAsState()
     var started by rememberSaveable { mutableStateOf(false) }
-    var askFinish by remember { mutableStateOf(false) }
+    var askFinish by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) { viewModel.refresh() }
+    // The deck ran out with decisions waiting: open the Finish summary (offered once per session by the VM).
+    LaunchedEffect(state.offerFinish, started) {
+        if (state.offerFinish && started) {
+            viewModel.finishOfferShown()
+            if (state.finish == FinishState.Idle) askFinish = true
+        }
+    }
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
         if (it.resultCode == Activity.RESULT_OK) viewModel.onDeleteConfirmed() else viewModel.onDeleteCancelled()

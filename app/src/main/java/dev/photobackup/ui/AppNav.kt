@@ -83,7 +83,7 @@ fun AppNav(container: AppContainer) {
             val gestures by container.gestures.collectAsState()
             ReviewScreen(
                 viewModel = viewModel(factory = container.reviewFactory),
-                gestures = gestures,
+                gestures = gestures ?: emptyMap(),
                 onBack = { nav.popBackStack() },
             )
         }
