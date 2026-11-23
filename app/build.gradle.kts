@@ -19,14 +19,29 @@ android {
         versionName = "1.0.0"
     }
 
+    // Optional release signing (owner-managed, gitignored). Only key NAMES are ever reported, never values.
     val keystoreFile = rootProject.file("keystore.properties")
     if (keystoreFile.exists()) {
         val props = Properties().apply { keystoreFile.inputStream().use { load(it) } }
-        signingConfigs.create("release") {
-            storeFile = file(props.getProperty("storeFile"))
-            storePassword = props.getProperty("storePassword")
-            keyAlias = props.getProperty("keyAlias")
-            keyPassword = props.getProperty("keyPassword")
+        val required = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+        val missing = required.filter { props.getProperty(it).isNullOrBlank() }
+        if (missing.isEmpty()) {
+            signingConfigs.create("release") {
+                storeFile = file(props.getProperty("storeFile"))
+                storePassword = props.getProperty("storePassword")
+                keyAlias = props.getProperty("keyAlias")
+                keyPassword = props.getProperty("keyPassword")
+            }
+        } else {
+            // Debug builds and tests still work; any release task fails with a clear message instead of
+            // silently producing an unsigned (or wrongly signed) APK.
+            val message = "keystore.properties is missing: ${missing.joinToString(", ")}. " +
+                "Add them (see README, Build), or delete keystore.properties to build unsigned."
+            gradle.taskGraph.whenReady {
+                if (allTasks.any { it.project == project && it.name.contains("Release") }) {
+                    throw GradleException(message)
+                }
+            }
         }
     }
 

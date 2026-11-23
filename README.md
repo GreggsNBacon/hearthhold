@@ -12,15 +12,15 @@ Android app that backs up your phone's photos and videos over SMB2 to a USB driv
 
 - Plug the USB drive into the router.
 - Enable the router's USB/Samba share and make sure **SMB2 (or SMB3) is enabled**. SMB1 only is not supported.
-- Note the share name; the drive is reached at the router's share (e.g. `\router\share`).
+- Note the share name; the drive is reached at the router's share (e.g. `\\router\share`).
 
 ## First run
 
-- Grant photo/video and notification permissions.
-- Discovery lists the router (or enter its address manually).
+- Discovery lists the router (or enter its address manually), then pick the share.
 - Log in as guest or with credentials.
 - Choose or create the destination folder on the drive.
-- Pick which phone folders (sources) to back up, then enable backup.
+- Grant photo/video and notification permissions. Choose "Allow all": with "Select photos" only some photos can be backed up, and the app says so.
+- Camera and Screenshots are backed up by default; other phone folders can be added later in Settings.
 
 ## How backups behave
 
@@ -29,7 +29,7 @@ Android app that backs up your phone's photos and videos over SMB2 to a USB driv
 - Parallel setting: number of simultaneous uploads (lower is gentler).
 - Overnight window: optionally restrict backups to set hours.
 - Notifications show progress and problems.
-- Interrupted copies resume cleanly; no `.part` files are left behind.
+- Interrupted copies restart from the beginning on the next run; the app cleans up its own `.part` files.
 - **Free up space**: removes only items you choose, after a full hash re-check against the drive copy and Android's own confirmation prompt.
 - Removed videos play from the drive, with loop and 2x speed.
 
@@ -46,7 +46,7 @@ Android app that backs up your phone's photos and videos over SMB2 to a USB driv
 ## Build
 
 - JDK 17. `./gradlew assembleRelease`
-- Signing: create `keystore.properties` in the repo root (gitignored, as are `*.jks`):
+- Signing: create `keystore.properties` in the repo root (gitignored, as are `*.jks` and `*.keystore`):
 
 ```
 storeFile=C:/path/to/your-release.jks
@@ -55,7 +55,7 @@ keyAlias=your-alias
 keyPassword=CHANGE_ME
 ```
 
-- With this file present the output is `app/build/outputs/apk/release/app-release.apk`; without it, `app-release-unsigned.apk`.
+- With this file present the output is `app/build/outputs/apk/release/app-release.apk`; without it, `app-release-unsigned.apk`. If the file exists but one of the four keys is missing or empty, release builds stop with a message naming the missing key.
 - Release builds use R8 shrinking; keep rules are in `app/proguard-rules.pro`.
 
 ## Device test checklist
@@ -70,3 +70,5 @@ keyPassword=CHANGE_ME
 | 6 | Turning Wi-Fi off mid-video, then back on, completes cleanly with no `.part` left | |
 | 7 | Free-up removes only the chosen items after Android's prompt | |
 | 8 | A removed video plays from the drive with loop and 2x speed working | |
+| 9 | Revoking photo permission makes the status show "Photos permission needed" | |
+| 10 | The status sheet shows the drive's free space (not 0) | |
