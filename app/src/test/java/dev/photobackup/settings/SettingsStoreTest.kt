@@ -5,6 +5,9 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.test.core.app.ApplicationProvider
+import dev.photobackup.review.DEFAULT_GESTURES
+import dev.photobackup.review.ReviewAction
+import dev.photobackup.review.Swipe
 import dev.photobackup.smb.SmbConfig
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -106,6 +109,45 @@ class SettingsStoreTest {
         assertFalse(s.loopVideos)
         assertFalse(s.folders.camera)
         assertEquals(setOf("Movies/"), s.folders.extraRelativePaths)
+    }
+
+    @Test fun gesturesDefaultAndRoundTrip() = runBlocking {
+        val (store, _) = newStore()
+        assertEquals(
+            mapOf(
+                Swipe.UP to ReviewAction.KEEP, Swipe.RIGHT to ReviewAction.DRIVE_ONLY,
+                Swipe.LEFT to ReviewAction.JUNK, Swipe.DOWN to ReviewAction.SKIP,
+            ),
+            store.settings.first().gestures,
+        )
+        val custom = mapOf(
+            Swipe.UP to ReviewAction.JUNK, Swipe.RIGHT to null,
+            Swipe.LEFT to ReviewAction.SKIP, Swipe.DOWN to ReviewAction.KEEP,
+        )
+        store.update { it.copy(gestures = custom) }
+        assertEquals(custom, store.settings.first().gestures)
+        store.update { it.copy(gestures = DEFAULT_GESTURES) }
+        assertEquals(DEFAULT_GESTURES, store.settings.first().gestures)
+    }
+
+    @Test fun unknownGestureValueFallsBackToThatDirectionsDefault() = runBlocking {
+        val (store, ds) = newStore()
+        ds.edit {
+            it[stringPreferencesKey("gesture_up")] = "FLY"
+            it[stringPreferencesKey("gesture_right")] = "NONE"
+            it[stringPreferencesKey("gesture_left")] = "KEEP"
+        }
+        val g = store.settings.first().gestures
+        assertEquals(ReviewAction.KEEP, g[Swipe.UP])
+        assertNull(g[Swipe.RIGHT])
+        assertEquals(ReviewAction.KEEP, g[Swipe.LEFT])
+        assertEquals(ReviewAction.SKIP, g[Swipe.DOWN])
+    }
+
+    @Test fun allNoActionFallsBackToDefaults() = runBlocking {
+        val (store, ds) = newStore()
+        ds.edit { p -> listOf("up", "right", "left", "down").forEach { p[stringPreferencesKey("gesture_$it")] = "NONE" } }
+        assertEquals(DEFAULT_GESTURES, store.settings.first().gestures)
     }
 
     @Test fun roundTripsFolderRules() = runBlocking {

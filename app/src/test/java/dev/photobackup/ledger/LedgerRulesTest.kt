@@ -20,6 +20,11 @@ class LedgerRulesTest {
     @Test fun verifiedUnchangedDoesNot() = assertFalse(LedgerRules.needsUpload(entry(VERIFIED), phone()))
     @Test fun editedAfterVerifyNeedsUpload() = assertTrue(LedgerRules.needsUpload(entry(VERIFIED), phone(dateModifiedSec = 999)))
     @Test fun failedNeedsUpload() = assertTrue(LedgerRules.needsUpload(entry(FAILED), phone()))
+    @Test fun binnedNeverNeedsUploadAndIsNeverSafeToRemove() {
+        assertFalse(LedgerRules.needsUpload(entry(BINNED), phone()))
+        assertFalse(LedgerRules.isSafeToRemove(entry(BINNED), phone()))
+    }
+
     @Test fun safeOnlyWhenVerifiedAndUnchanged() {
         assertTrue(LedgerRules.isSafeToRemove(entry(VERIFIED), phone()))
         assertFalse(LedgerRules.isSafeToRemove(entry(PENDING), phone()))

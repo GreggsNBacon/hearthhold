@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Room
 import dev.photobackup.ledger.AppDatabase
 import dev.photobackup.ledger.MIGRATION_1_2
+import dev.photobackup.ledger.MIGRATION_2_3
 import dev.photobackup.ledger.LedgerRules
 import dev.photobackup.media.FolderRules
 import dev.photobackup.media.LocalMediaSource
@@ -58,7 +59,7 @@ object LedgerDatabase {
 
     fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
         instance ?: Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "ledger.db")
-            .addMigrations(MIGRATION_1_2)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
             .build().also { instance = it }
     }
 }

@@ -3,6 +3,9 @@ package dev.photobackup.settings
 import android.os.Build
 import dev.photobackup.backup.OvernightWindow
 import dev.photobackup.media.SourceFolders
+import dev.photobackup.review.DEFAULT_GESTURES
+import dev.photobackup.review.ReviewAction
+import dev.photobackup.review.Swipe
 import dev.photobackup.smb.SmbConfig
 
 data class AppSettings(
@@ -22,6 +25,8 @@ data class AppSettings(
     val overnightEndHour: Int = 6,
     /** Folder rules: normalised phone relative path (e.g. "Pictures/WhatsApp/") to drive folder name. */
     val folderRules: Map<String, String> = emptyMap(),
+    /** Swipe review gestures; null = No action. At least one direction is not null. */
+    val gestures: Map<Swipe, ReviewAction?> = DEFAULT_GESTURES,
 ) {
     /** The active window, or null when "Only back up overnight" is off. */
     fun overnightWindow(): OvernightWindow? =

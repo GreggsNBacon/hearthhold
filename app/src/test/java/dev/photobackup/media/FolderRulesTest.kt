@@ -32,6 +32,15 @@ class FolderRulesTest {
         assertNull(FolderRules.canonical(""))
     }
 
+    @Test fun binIsReserved() {
+        assertNull(FolderRules.canonical(".Bin"))
+        assertNull(FolderRules.canonical(".bin"))
+        assertNull(FolderRules.canonical("  .BIN  "))
+        assertNull(FolderRules.canonical(".Bin."))
+        assertEquals("Bin", FolderRules.canonical("Bin"))
+        assertEquals(".Binder", FolderRules.canonical(".Binder"))
+    }
+
     @Test fun sameIgnoresCase() {
         assertTrue(FolderRules.same("Dog", "dOG"))
         assertTrue(!FolderRules.same("Dog", "Cat"))

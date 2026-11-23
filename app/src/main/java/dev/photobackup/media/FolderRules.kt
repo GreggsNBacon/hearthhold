@@ -4,11 +4,15 @@ import dev.photobackup.backup.RemotePathPlanner
 
 /** Pure resolver for named drive folders: hand-picked folder > folder rule > default (null = source folder). */
 object FolderRules {
-    /** A folder name as it is stored and used on the drive, or null when blank. */
+    /** Reserved drive folder holding binned photos; never a valid named folder. */
+    const val BIN_FOLDER = ".Bin"
+
+    /** A folder name as it is stored and used on the drive, or null when blank or reserved (.Bin). */
     fun canonical(name: String): String? {
         val t = name.trim()
         if (t.isEmpty()) return null
-        return RemotePathPlanner.sanitise(t).trim().ifEmpty { null }
+        val c = RemotePathPlanner.sanitise(t).trim().ifEmpty { null } ?: return null
+        return if (c.equals(BIN_FOLDER, ignoreCase = true)) null else c
     }
 
     fun same(a: String, b: String): Boolean = a.equals(b, ignoreCase = true)

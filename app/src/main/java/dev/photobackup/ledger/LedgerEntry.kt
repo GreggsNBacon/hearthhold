@@ -21,4 +21,10 @@ data class LedgerEntry(
     val updatedAtMs: Long,
     /** New drive path while a move is in flight (set before the rename, cleared after remotePath is updated). */
     val movingTo: String? = null,
+    /** When review asked for this item to go to the bin (before the move on the drive). */
+    val binRequestedAt: Long? = null,
+    /** Where the file sits in the drive's .Bin folder. */
+    val binPath: String? = null,
+    /** When the file landed in the bin; auto-empty counts from here. */
+    val binnedAt: Long? = null,
 )

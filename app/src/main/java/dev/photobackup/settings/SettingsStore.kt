@@ -12,6 +12,9 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dev.photobackup.backup.BackupEngine
 import dev.photobackup.media.SourceFolders
+import dev.photobackup.review.DEFAULT_GESTURES
+import dev.photobackup.review.ReviewAction
+import dev.photobackup.review.Swipe
 import dev.photobackup.smb.SmbConfig
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -65,7 +68,20 @@ class SettingsStore internal constructor(
             overnightStartHour = (p[OVERNIGHT_START] ?: 1).coerceIn(0, 23),
             overnightEndHour = (p[OVERNIGHT_END] ?: 6).coerceIn(0, 23),
             folderRules = (p[FOLDER_RULES] ?: emptySet()).mapNotNull { decodeRule(it) }.toMap(),
+            gestures = readGestures(p),
         )
+    }
+
+    /** One string per direction; a missing or unknown value is that direction's default. Never all "No action". */
+    private fun readGestures(p: Preferences): Map<Swipe, ReviewAction?> {
+        val m = Swipe.values().associateWith { swipe ->
+            when (val v = p[gestureKey(swipe)]) {
+                null -> DEFAULT_GESTURES[swipe]
+                NO_ACTION -> null
+                else -> ReviewAction.values().firstOrNull { it.name == v } ?: DEFAULT_GESTURES[swipe]
+            }
+        }
+        return if (m.values.all { it == null }) DEFAULT_GESTURES else m
     }
 
     /** A lost key or corrupt value must not block the user from re-entering credentials. */
@@ -92,6 +108,7 @@ class SettingsStore internal constructor(
         p[OVERNIGHT_ONLY] = s.overnightOnly
         p[OVERNIGHT_START] = s.overnightStartHour
         p[OVERNIGHT_END] = s.overnightEndHour
+        for (swipe in Swipe.values()) p[gestureKey(swipe)] = s.gestures[swipe]?.name ?: NO_ACTION
         if (s.folderRules.isEmpty()) p.remove(FOLDER_RULES)
         else p[FOLDER_RULES] = s.folderRules.map { (path, name) -> "$path$RULE_SEP$name" }.toSet()
     }
@@ -101,6 +118,9 @@ class SettingsStore internal constructor(
     }
 
     private companion object {
+        const val NO_ACTION = "NONE"
+        fun gestureKey(s: Swipe) = stringPreferencesKey("gesture_" + s.name.lowercase())
+
         const val RULE_SEP = "\u0000"
         val FOLDER_RULES = stringSetPreferencesKey("folder_rules")
 

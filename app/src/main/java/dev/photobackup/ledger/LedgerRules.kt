@@ -9,6 +9,7 @@ object LedgerRules {
     fun needsUpload(existing: LedgerEntry?, phone: PhoneMedia): Boolean = when {
         existing == null -> true
         existing.status == BackupStatus.VERIFIED -> changed(existing, phone)
+        existing.status == BackupStatus.BINNED -> false
         else -> true
     }
 
