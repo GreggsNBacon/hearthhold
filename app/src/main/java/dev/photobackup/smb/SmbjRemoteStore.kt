@@ -24,6 +24,10 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.ConnectException
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import javax.net.SocketFactory
 import java.net.NoRouteToHostException
 import java.net.SocketException
 import java.net.SocketTimeoutException
@@ -43,13 +47,27 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
     override suspend fun connect(): DriveInfo = withContext(Dispatchers.IO) {
         closeQuietly()
         try {
+            val factory = ConnectTimeoutSocketFactory(CONNECT_TIMEOUT_S.toInt() * 1000)
             val smbConfig = SmbjConfig.builder()
-                .withTimeout(CONNECT_TIMEOUT_S, TimeUnit.SECONDS)
-                .withSoTimeout(CONNECT_TIMEOUT_S, TimeUnit.SECONDS)
+                // Socket soTimeout is left at 0: smbj tears the connection down on a read timeout,
+                // which would kill the session during any idle gap. Only TCP connect has a 5 s limit.
+                .withReadTimeout(OP_TIMEOUT_S, TimeUnit.SECONDS)
+                .withWriteTimeout(OP_TIMEOUT_S, TimeUnit.SECONDS)
+                .withTransactTimeout(OP_TIMEOUT_S, TimeUnit.SECONDS)
+                .withSocketFactory(factory)
                 .withDialects(SMB2Dialect.SMB_2_1, SMB2Dialect.SMB_3_0, SMB2Dialect.SMB_3_0_2, SMB2Dialect.SMB_3_1_1)
                 .build()
             val c = SMBClient(smbConfig).also { client = it }
-            val conn = c.connect(config.host).also { connection = it }
+            val conn = try {
+                c.connect(config.host)
+            } catch (e: Throwable) {
+                // TCP connected but the link dropped during SMB2 negotiate: SMB1-only servers
+                // typically just close the socket when they see an SMB2 negotiate.
+                if (factory.connected && (isDropped(e) || isNegotiationFailure(e)) && !isTcpConnectFailure(e)) {
+                    throw RemoteException.Smb1Only("Connection dropped during SMB2 negotiation: ${e.message}")
+                }
+                throw e
+            }.also { connection = it }
             val auth = if (config.username == null) {
                 AuthenticationContext.guest()
             } else {
@@ -120,8 +138,14 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
             SMB2CreateDisposition.FILE_CREATE, // never OVERWRITE: fails if the file exists
             emptySet(),
         )
-        val out = file.getOutputStream(false)
+        val out = try {
+            file.getOutputStream(false)
+        } catch (e: Throwable) {
+            runCatching { file.close() }
+            throw e
+        }
         object : FilterOutputStream(out) {
+            private var closed = false
             override fun write(b: ByteArray, off: Int, len: Int) {
                 try { out.write(b, off, len) } catch (e: Throwable) { throw mapOp(e) }
             }
@@ -135,6 +159,8 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
             }
 
             override fun close() {
+                if (closed) return
+                closed = true
                 try { out.close() } catch (e: Throwable) { throw mapOp(e) } finally { runCatching { file.close() } }
             }
         }
@@ -208,6 +234,7 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
 
     companion object {
         private const val CONNECT_TIMEOUT_S = 5L
+        private const val OP_TIMEOUT_S = 60L
         private const val FS_UNKNOWN = "UNKNOWN"
         private val NOT_FOUND = setOf(
             NtStatus.STATUS_OBJECT_NAME_NOT_FOUND,
@@ -235,6 +262,7 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
         /** Maps errors from connect/authenticate/share-connect. */
         internal fun mapConnect(e: Throwable): Throwable {
             if (e is RemoteException) return e
+            if (e is SMBApiException) return mapOp(e)
             if (isNegotiationFailure(e)) return RemoteException.Smb1Only(e.message ?: "Negotiation failed")
             val mapped = mapOp(e)
             if (mapped !== e) return mapped
@@ -255,6 +283,17 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
                     (m.contains("negotiat") || m.contains("dialect"))
             }
 
+        private fun isTcpConnectFailure(e: Throwable): Boolean =
+            generateSequence(e) { it.cause }.take(6).any {
+                it is ConnectException || it is SocketTimeoutException || it is UnknownHostException ||
+                    it is NoRouteToHostException
+            }
+
+        private fun isDropped(e: Throwable): Boolean =
+            generateSequence(e) { it.cause }.take(6).any {
+                it is EOFException || it is SocketException || it is TransportException
+            }
+
         private fun isNetwork(e: Throwable): Boolean =
             generateSequence(e) { it.cause }.take(6).any {
                 it is ConnectException || it is SocketTimeoutException || it is UnknownHostException ||
@@ -262,4 +301,31 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
                     it is TimeoutException || it is TransportException
             }
     }
+}
+
+/** Socket factory with a real TCP connect timeout; records whether TCP connect succeeded. */
+internal class ConnectTimeoutSocketFactory(private val timeoutMs: Int) : SocketFactory() {
+    @Volatile var connected = false
+        private set
+
+    private fun open(addr: InetSocketAddress, local: InetSocketAddress? = null): Socket {
+        val sock = Socket()
+        try {
+            local?.let { sock.bind(it) }
+            sock.connect(addr, timeoutMs)
+        } catch (e: Throwable) {
+            runCatching { sock.close() }
+            throw e
+        }
+        connected = true
+        return sock
+    }
+
+    override fun createSocket(): Socket = Socket()
+    override fun createSocket(host: String, port: Int): Socket = open(InetSocketAddress(host, port))
+    override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket =
+        open(InetSocketAddress(host, port), InetSocketAddress(localHost, localPort))
+    override fun createSocket(host: InetAddress, port: Int): Socket = open(InetSocketAddress(host, port))
+    override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int): Socket =
+        open(InetSocketAddress(address, port), InetSocketAddress(localAddress, localPort))
 }

@@ -41,6 +41,14 @@ class FakeRemoteStoreTest {
         assertEquals(listOf("a.part"), s.writes)
     }
 
+    @Test fun truncateLimitIsPerStream() = runBlocking {
+        val s = FakeRemoteStore(truncateWritesAfter = 10)
+        s.openWrite("a").use { it.write(ByteArray(8)) }
+        s.openWrite("b").use { it.write(ByteArray(8)) }
+        assertEquals(8, s.files["a"]!!.size)
+        assertEquals(8, s.files["b"]!!.size)
+    }
+
     @Test fun mkdirsListStatRenameDeleteAndFailOn() = runBlocking {
         val s = FakeRemoteStore()
         s.mkdirs("B\\P\\2026")

@@ -17,7 +17,6 @@ class FakeRemoteStore(
 
     /** Paths opened for write, in order. */
     val writes: MutableList<String> = mutableListOf()
-    private var totalWritten = 0L
 
     private fun check(op: String, path: String) {
         failOn?.invoke(op, path)?.let { throw it }
@@ -67,15 +66,16 @@ class FakeRemoteStore(
         writes.add(path)
         files[path] = ByteArray(0)
         return object : OutputStream() {
+            private var streamWritten = 0L
             override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
             override fun write(b: ByteArray, off: Int, len: Int) {
                 check("write", path)
                 val limit = truncateWritesAfter
                 val allowed =
-                    if (limit == null) len else minOf(len.toLong(), maxOf(0L, limit - totalWritten)).toInt()
+                    if (limit == null) len else minOf(len.toLong(), maxOf(0L, limit - streamWritten)).toInt()
                 if (allowed > 0) {
                     files[path] = files.getValue(path) + b.copyOfRange(off, off + allowed)
-                    totalWritten += allowed
+                    streamWritten += allowed
                 }
                 if (allowed < len) throw IOException("Simulated write failure after $limit bytes")
             }
