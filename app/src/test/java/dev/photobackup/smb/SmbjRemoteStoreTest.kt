@@ -96,4 +96,55 @@ class SmbjAccessDeniedMappingTest {
     @Test fun accessDeniedDuringConnectIsAuthFailed() {
         assertTrue(SmbjRemoteStore.mapConnect(api(NtStatus.STATUS_ACCESS_DENIED)) is RemoteException.AuthFailed)
     }
+
+    @Test fun wrappedErrorsGetFriendlyText() {
+        assertEquals("Drive error — will try again", SmbjRemoteStore.mapOp(IllegalStateException("x")).message)
+        assertEquals(MSG_DRIVE_ERROR, SmbjRemoteStore.mapOp(IllegalArgumentException("Collection is empty")).message)
+        val rt = SmbjRemoteStore.mapOp(com.hierynomus.smbj.common.SMBRuntimeException("internal"))
+        assertTrue(rt is IOException && rt !is RemoteException)
+        assertEquals(MSG_DRIVE_ERROR, rt.message)
+    }
+
+    private val dontSet = com.hierynomus.msfscc.fileinformation.FileBasicInformation.DONT_SET
+
+    @Test fun setTimesSetsCreationAndLastWrite() {
+        val calls = mutableListOf<com.hierynomus.msfscc.fileinformation.FileBasicInformation>()
+        SmbjRemoteStore.setTimesWithFallback(1_700_000_000_000L) { calls += it }
+        assertEquals(1, calls.size)
+        assertEquals(1_700_000_000_000L, calls[0].lastWriteTime.toEpochMillis())
+        assertEquals(1_700_000_000_000L, calls[0].creationTime.toEpochMillis())
+    }
+
+    @Test fun setTimesRetriesWithLastWriteOnlyWhenCreationIsRefused() {
+        val calls = mutableListOf<com.hierynomus.msfscc.fileinformation.FileBasicInformation>()
+        SmbjRemoteStore.setTimesWithFallback(1_700_000_000_000L) {
+            calls += it
+            if (calls.size == 1) throw SMBApiException(NtStatus.STATUS_ACCESS_DENIED.value, null, "no", null)
+        }
+        assertEquals(2, calls.size)
+        assertEquals(1_700_000_000_000L, calls[1].lastWriteTime.toEpochMillis())
+        assertEquals(dontSet.windowsTimeStamp, calls[1].creationTime.windowsTimeStamp)
+        assertEquals(dontSet.windowsTimeStamp, calls[1].lastAccessTime.windowsTimeStamp)
+        assertEquals(dontSet.windowsTimeStamp, calls[1].changeTime.windowsTimeStamp)
+    }
+
+    @Test fun setTimesRetryFailurePropagates() {
+        var n = 0
+        val e = runCatching {
+            SmbjRemoteStore.setTimesWithFallback(1L) { n++; throw IllegalStateException("refused $n") }
+        }.exceptionOrNull()
+        assertEquals(2, n)
+        assertEquals("refused 2", e?.message)
+    }
+
+    @Test fun setTimesDoesNotRetryANetworkFailure() {
+        var n = 0
+        val e = runCatching {
+            SmbjRemoteStore.setTimesWithFallback(1L) {
+                n++; throw com.hierynomus.protocol.transport.TransportException("link down")
+            }
+        }.exceptionOrNull()
+        assertEquals(1, n)
+        assertTrue(e is com.hierynomus.protocol.transport.TransportException)
+    }
 }

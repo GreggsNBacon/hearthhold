@@ -35,12 +35,18 @@ import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
-/** smbj-backed [RemoteStore]. All suspend functions run on Dispatchers.IO. */
+/**
+ * smbj-backed [RemoteStore]. All suspend functions run on Dispatchers.IO.
+ *
+ * After [connect], file operations may be called concurrently (the backup engine's parallel workers share one
+ * store): smbj's Connection hands out message ids/credits under a lock and matches responses by id, so one session
+ * carries concurrent requests. Each operation opens its own file handle.
+ */
 class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
-    private var client: SMBClient? = null
-    private var connection: Connection? = null
-    private var session: Session? = null
-    private var share: DiskShare? = null
+    @Volatile private var client: SMBClient? = null
+    @Volatile private var connection: Connection? = null
+    @Volatile private var session: Session? = null
+    @Volatile private var share: DiskShare? = null
 
     private fun requireShare(): DiskShare = share ?: throw IOException("Not connected")
 
@@ -198,13 +204,10 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
     }
 
     override suspend fun setTimes(path: String, modifiedMs: Long) = io {
-        val t = FileTime.ofEpochMillis(modifiedMs)
         // Handle opened with FILE_WRITE_ATTRIBUTES only; attributes 0 and DONT_SET leave everything else alone.
         val entry = SmbOpenArgs.setTimes().open(requireShare(), path)
         try {
-            entry.setFileInformation(
-                FileBasicInformation(t, FileBasicInformation.DONT_SET, t, FileBasicInformation.DONT_SET, 0L)
-            )
+            setTimesWithFallback(modifiedMs) { entry.setFileInformation(it) }
         } finally {
             runCatching { entry.close() }
         }
@@ -241,15 +244,31 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
         )
 
         /**
+         * Sets creation + last-write time to [modifiedMs]; if the server refuses that (some Samba builds reject a
+         * creation time), retries once with last-write only. A network failure is not retried.
+         */
+        internal fun setTimesWithFallback(modifiedMs: Long, apply: (FileBasicInformation) -> Unit) {
+            val t = FileTime.ofEpochMillis(modifiedMs)
+            val unset = FileBasicInformation.DONT_SET
+            try {
+                apply(FileBasicInformation(t, unset, t, unset, 0L))
+            } catch (e: Exception) {
+                if (e is CancellationException || isNetwork(e)) throw e
+                apply(FileBasicInformation(unset, unset, t, unset, 0L))
+            }
+        }
+
+        /**
          * Maps errors from file operations on an established connection. Anything that is not already an
-         * IOException (unmapped smbj runtime errors, IllegalArgumentException, ...) is wrapped in one, so the backup
-         * engine fails just that item instead of the whole worker. Cancellation and VM errors pass through.
+         * IOException (unmapped smbj runtime errors, IllegalArgumentException, ...) is wrapped in one with the
+         * user-facing [MSG_DRIVE_ERROR] (it ends up as the item's error), so the backup engine fails just that item
+         * instead of the whole worker. Cancellation and VM errors pass through.
          */
         internal fun mapOp(e: Throwable): Throwable {
             val known = mapKnown(e, connecting = false)
             return when (known) {
                 is IOException, is CancellationException, is VirtualMachineError -> known
-                else -> IOException(known.javaClass.simpleName, known)
+                else -> IOException(MSG_DRIVE_ERROR, known)
             }
         }
 
@@ -269,7 +288,7 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
                 else -> IOException("${e.status}: ${e.message}", e)
             }
             isNetwork(e) -> RemoteException.Unreachable(e.message ?: "Drive unreachable")
-            e is SMBRuntimeException -> IOException(e.message, e)
+            e is SMBRuntimeException -> IOException(MSG_DRIVE_ERROR, e)
             else -> e
         }
 

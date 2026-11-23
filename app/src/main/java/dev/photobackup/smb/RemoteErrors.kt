@@ -6,6 +6,9 @@ import java.io.IOException
 const val MSG_SMB_VERSION = "Couldn't agree a file-sharing version with the drive. On the router, make sure SMB2 is " +
     "enabled: USB Application → Network Place (Samba) Share"
 
+/** Item error text for an unexpected (wrapped, non-IO) drive library error; the item is retried next run. */
+const val MSG_DRIVE_ERROR = "Drive error — will try again"
+
 const val MSG_ACCESS_DENIED = "You don't have permission to open this on the drive"
 
 /** Errors that stop a backup run: the drive or the login is unusable, not just one file. */

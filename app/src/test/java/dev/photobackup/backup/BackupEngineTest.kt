@@ -375,6 +375,7 @@ class BackupEngineTest {
         val r = engine(store, ledger, data).run(listOf(media(5000, id = 1), media(5000, id = 2)))
         assertEquals(BackupResult.Done(1, 0, 1), counts(r))
         assertEquals(BackupStatus.FAILED, ledger.get(1)!!.status)
+        assertEquals("Drive error — will try again", ledger.get(1)!!.lastError) // not a bare class name
         assertNull(ledger.get(1)!!.partPath)
         assertEquals(BackupStatus.VERIFIED, ledger.get(2)!!.status)
     }
