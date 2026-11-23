@@ -9,6 +9,7 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkInfo
 import androidx.work.WorkerParameters
 import dev.photobackup.media.PartialMediaAccessException
+import dev.photobackup.settings.SettingsUnreadableException
 import dev.photobackup.smb.RemoteException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -176,6 +177,10 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             idle(repo) { it.copy(lastResult = null, lastError = text) }
             BackupNotifications.error(applicationContext, text)
             Result.success()
+        } catch (_: SettingsUnreadableException) {
+            // Can't tell what is configured: claim nothing (no "finish setup"), just try again later.
+            idle(repo) { it }
+            Result.retry()
         } catch (e: Exception) {
             // Class name only, never the message: it could carry connection details.
             Log.w("Hearthhold", "backup failed: " + e.javaClass.simpleName)

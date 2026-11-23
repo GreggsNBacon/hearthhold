@@ -36,6 +36,8 @@ import kotlinx.coroutines.withContext
 
 data class SettingsUiState(
     val settings: AppSettings? = null,
+    /** The settings could not be read: the screen shows "Couldn't read settings — Retry". */
+    val settingsError: Boolean = false,
     val testing: Boolean = false,
     val driveMessage: String? = null,
     /** Phone folders with photos or videos, for the "Add folder" browser; null until loaded. */
@@ -80,11 +82,43 @@ class SettingsViewModel(
     private val _state = MutableStateFlow(SettingsUiState())
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
 
+    private var settingsJob: Job? = null
+
     init {
-        viewModelScope.launch { store.settings.collect { s -> _state.update { it.copy(settings = s) } } }
+        collectSettings()
     }
 
-    private fun edit(t: (AppSettings) -> AppSettings): Job = viewModelScope.launch { store.update(t) }
+    private fun collectSettings() {
+        settingsJob?.cancel()
+        settingsJob = viewModelScope.launch {
+            try {
+                store.settings.collect { s -> _state.update { it.copy(settings = s, settingsError = false) } }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _state.update { it.copy(settings = null, settingsError = true) }
+            }
+        }
+    }
+
+    /** "Couldn't read settings — Retry". */
+    fun retrySettings() {
+        _state.update { it.copy(settingsError = false) }
+        collectSettings()
+    }
+
+    /** Launches a settings read/write that must never crash: a failure shows the retry state instead. */
+    private fun launchSafe(block: suspend () -> Unit): Job = viewModelScope.launch {
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            _state.update { it.copy(settings = null, settingsError = true) }
+        }
+    }
+
+    private fun edit(t: (AppSettings) -> AppSettings): Job = launchSafe { store.update(t) }
 
     fun setChargingOnly(on: Boolean): Job = editAndReschedule { it.copy(chargingOnly = on) }
 
@@ -97,7 +131,7 @@ class SettingsViewModel(
     }
 
     /** Saves, then re-schedules background work (charging constraint and the overnight job) from the saved values. */
-    private fun editAndReschedule(t: (AppSettings) -> AppSettings): Job = viewModelScope.launch {
+    private fun editAndReschedule(t: (AppSettings) -> AppSettings): Job = launchSafe {
         store.update(t)
         val s = store.settings.first()
         backup.scheduleAll(s.chargingOnly, s.overnightWindow())
@@ -116,7 +150,7 @@ class SettingsViewModel(
     fun setFreeUpAge(months: Int): Job = edit { it.copy(freeUpAgeMonths = months.coerceIn(1, 36)) }
 
     /** Sets what swiping [swipe] does in review (null = No action). Refused if no direction would do anything. */
-    fun setGesture(swipe: Swipe, action: ReviewAction?): Job = viewModelScope.launch {
+    fun setGesture(swipe: Swipe, action: ReviewAction?): Job = launchSafe {
         var refused = false
         // Checked inside the transform, so two quick changes can never both pass against the same old settings.
         store.update { cur ->

@@ -214,6 +214,13 @@ class BackupWorkerTest {
         assertEquals("Not reachable", status().secondStatus)
     }
 
+    @Test fun unreadableSettingsRetriesAndClaimsNothing() {
+        runner = BackupRunner { _ -> throw dev.photobackup.settings.SettingsUnreadableException() }
+        assertEquals(ListenableWorker.Result.retry(), runWorker())
+        assertNull(status().lastError)
+        assertFalse(status().inProgress)
+    }
+
     @Test fun unexpectedExceptionRetries() {
         runner = BackupRunner { _ -> throw IllegalStateException("boom") }
         assertEquals(ListenableWorker.Result.retry(), runWorker())

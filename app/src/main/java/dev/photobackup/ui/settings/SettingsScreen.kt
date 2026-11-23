@@ -1,5 +1,6 @@
 package dev.photobackup.ui.settings
 
+import dev.photobackup.ui.SettingsErrorNotice
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -85,6 +86,10 @@ fun SettingsScreen(
             }
         },
     ) {
+        if (s == null && state.settingsError) {
+            SettingsErrorNotice(onRetry = viewModel::retrySettings, modifier = Modifier.fillMaxSize())
+            return@Screen
+        }
         if (s == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             return@Screen

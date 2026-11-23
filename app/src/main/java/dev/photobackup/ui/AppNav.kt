@@ -13,6 +13,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -34,6 +36,7 @@ import dev.photobackup.gallery.ViewerListHolder
 import dev.photobackup.player.ViewerScreen
 import dev.photobackup.review.ReviewScreen
 import dev.photobackup.settings.AppSettings
+import dev.photobackup.settings.SettingsRead
 import dev.photobackup.ui.settings.SettingsScreen
 import dev.photobackup.ui.setup.SetupScreen
 import dev.photobackup.ui.setup.SetupViewModel
@@ -56,14 +59,31 @@ object Routes {
 
     /** Setup until a drive and a destination are saved; then the Gallery (the main screen). */
     fun start(s: AppSettings): String = if (s.smb == null || s.destination.isNullOrBlank()) SETUP else GALLERY
+
+    /** Not a nav route: the "Couldn't read settings — Retry" screen shown instead of NavHost. Never [SETUP]. */
+    const val SETTINGS_RETRY = "settings-retry"
+
+    /** An unreadable settings file must never send the user to setup (it could overwrite the saved drive). */
+    fun start(r: SettingsRead): String = when (r) {
+        is SettingsRead.Ok -> start(r.settings)
+        SettingsRead.Error -> SETTINGS_RETRY
+    }
 }
 
 @Composable
 fun AppNav(container: AppContainer) {
-    val start by produceState<String?>(null) { value = Routes.start(container.settingsStore.settings.first()) }
+    var attempt by remember { mutableStateOf(0) }
+    val start by produceState<String?>(null, attempt) {
+        value = null
+        value = Routes.start(container.settingsStore.settingsResult.first())
+    }
     val startRoute = start
     if (startRoute == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        return
+    }
+    if (startRoute == Routes.SETTINGS_RETRY) {
+        SettingsErrorNotice(onRetry = { attempt++ }, modifier = Modifier.fillMaxSize())
         return
     }
     val nav = rememberNavController()
@@ -155,7 +175,9 @@ fun AppNav(container: AppContainer) {
             val index = entry.arguments?.getInt("index") ?: 0
             // The list is gone after process death: go back to where it came from.
             val items = remember(source) { container.viewerLists.get(source).orEmpty() }
-            val loop by remember { container.settingsStore.settings.map { it.loopVideos } }.collectAsState(initial = true)
+            val loop by remember {
+                container.settingsStore.settingsResult.map { r -> (r as? SettingsRead.Ok)?.settings?.loopVideos ?: true }
+            }.collectAsState(initial = true)
             val root by produceState<Loaded<SmbRoot?>?>(null) { value = Loaded(container.driveRoot()) }
             val loaded = root
             if (loaded == null) {

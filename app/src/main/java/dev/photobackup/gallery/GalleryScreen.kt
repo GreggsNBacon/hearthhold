@@ -1,5 +1,6 @@
 package dev.photobackup.gallery
 
+import dev.photobackup.ui.MSG_SETTINGS_UNREADABLE
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -204,6 +205,7 @@ fun GalleryScreen(
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
+            if (home.settingsError) Banner(MSG_SETTINGS_UNREADABLE, status::retrySettings)
             when (state.drive) {
                 DriveState.UNREACHABLE -> Banner("Drive not reachable — items only on the drive are greyed out")
                 DriveState.CHECKING -> Banner("Checking the drive…")

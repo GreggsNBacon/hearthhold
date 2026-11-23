@@ -1,5 +1,6 @@
 package dev.photobackup.ui
 
+import dev.photobackup.settings.SettingsUnreadableException
 import dev.photobackup.smb.AccessDeniedException
 import dev.photobackup.smb.MSG_ACCESS_DENIED
 import dev.photobackup.smb.RemoteException
@@ -10,6 +11,8 @@ const val MSG_AUTH = "Wrong username or password"
 const val MSG_UNREACHABLE = "Can't reach the drive — check you're on home Wi-Fi"
 const val MSG_SHARE = "Shared folder not found on the drive"
 const val MSG_SMB1 = dev.photobackup.smb.MSG_SMB_VERSION
+/** Shown wherever the settings file can't be read; the Retry button sits next to it. */
+const val MSG_SETTINGS_UNREADABLE = "Couldn't read settings — Retry"
 const val MSG_FULL = "The drive is full"
 
 /** User-facing text for a drive error. Never includes the exception text (it can carry connection details). */
@@ -19,6 +22,7 @@ fun userMessage(e: Throwable): String = when (e) {
     is RemoteException.ShareNotFound -> MSG_SHARE
     is RemoteException.Smb1Only -> MSG_SMB1
     is RemoteException.DriveFull -> MSG_FULL
+    is SettingsUnreadableException -> MSG_SETTINGS_UNREADABLE
     is DriveNotConfiguredException -> "Finish setup first"
     is AccessDeniedException -> MSG_ACCESS_DENIED
     is java.io.FileNotFoundException -> "Folder not found on the drive"

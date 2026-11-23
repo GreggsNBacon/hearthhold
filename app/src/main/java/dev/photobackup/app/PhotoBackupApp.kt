@@ -227,7 +227,13 @@ class AppContainer(context: Context) {
 
     /** Saves the viewer's loop toggle. */
     fun setLoopVideos(loop: Boolean) {
-        appScope.launch { settingsStore.update { it.copy(loopVideos = loop) } }
+        appScope.launch {
+            try {
+                settingsStore.update { it.copy(loopVideos = loop) }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e // unreadable settings: the toggle is just not saved
+            }
+        }
     }
 
     /**

@@ -24,6 +24,8 @@ enum class Reachability { UNKNOWN, CHECKING, YES, NO }
 
 data class HomeUiState(
     val settings: AppSettings? = null,
+    /** The settings could not be read (not the same as "not set up"): the screen offers Retry. */
+    val settingsError: Boolean = false,
     val status: BackupStatusSnapshot? = null,
     val waiting: Int = 0,
     val backedUp: Int = 0,
@@ -71,9 +73,11 @@ class HomeViewModel(
     private var reachJob: Job? = null
     private var freeUpJob: Job? = null
     private var autoChecked = false
+    private val settingsSource = settings
+    private var settingsJob: Job? = null
 
     init {
-        viewModelScope.launch { settings.collect { s -> _state.update { it.copy(settings = s) } } }
+        collectSettings()
         viewModelScope.launch { status.collect { s -> _state.update { it.copy(status = s) } } }
         viewModelScope.launch {
             counts.collect { c ->
@@ -86,6 +90,26 @@ class HomeViewModel(
                 }
             }
         }
+    }
+
+    private fun collectSettings() {
+        settingsJob?.cancel()
+        settingsJob = viewModelScope.launch {
+            try {
+                settingsSource.collect { s -> _state.update { it.copy(settings = s, settingsError = false) } }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Unreadable settings file: say so (Retry) instead of crashing or looking like "not set up".
+                _state.update { it.copy(settings = null, settingsError = true) }
+            }
+        }
+    }
+
+    /** "Couldn't read settings — Retry". */
+    fun retrySettings() {
+        _state.update { it.copy(settingsError = false) }
+        collectSettings()
     }
 
     private fun Map<BackupStatus, Int>.n(s: BackupStatus) = this[s] ?: 0

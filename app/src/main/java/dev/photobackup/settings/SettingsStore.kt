@@ -17,7 +17,18 @@ import dev.photobackup.review.ReviewAction
 import dev.photobackup.review.Swipe
 import dev.photobackup.smb.SmbConfig
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
+import java.io.IOException
+
+/** The settings file could not be read (I/O error or corrupt file). Carries no detail on purpose. */
+class SettingsUnreadableException : IOException("settings unreadable")
+
+/** One read of the settings: the values, or "could not read" (never mistaken for "not set up"). */
+sealed interface SettingsRead {
+    data class Ok(val settings: AppSettings) : SettingsRead
+    object Error : SettingsRead
+}
 
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
@@ -29,7 +40,21 @@ class SettingsStore internal constructor(
     constructor(context: Context, cipher: CredentialCipher) :
         this(context, cipher, context.applicationContext.settingsDataStore)
 
-    val settings: Flow<AppSettings> = dataStore.data.map { read(it) }
+    /** Every read as a value: an I/O or corruption error becomes [SettingsRead.Error]; cancellation passes through. */
+    val settingsResult: Flow<SettingsRead> = dataStore.data
+        .map<Preferences, SettingsRead> { SettingsRead.Ok(read(it)) }
+        .catch { e -> if (e is IOException) emit(SettingsRead.Error) else throw e }
+
+    /**
+     * The settings, or a [SettingsUnreadableException] when they can't be read. Consumers must catch it (never
+     * treat it as "not set up"); prefer [settingsResult] where an error is a normal state.
+     */
+    val settings: Flow<AppSettings> = settingsResult.map {
+        when (it) {
+            is SettingsRead.Ok -> it.settings
+            SettingsRead.Error -> throw SettingsUnreadableException()
+        }
+    }
 
     /**
      * Read-transform-write. When the transform leaves the drive login unchanged, the stored login (including the
