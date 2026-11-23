@@ -9,11 +9,11 @@ object RemotePathPlanner {
 
     private const val ILLEGAL = "\\/:*?\"<>|"
 
-    fun targetDir(destination: String, deviceName: String, m: PhoneMedia, zone: ZoneId): String {
+    fun targetDir(destination: String, deviceName: String, m: PhoneMedia, zone: ZoneId, folder: String? = null): String {
         val epochMs = if (m.dateTakenMs > 0) m.dateTakenMs else m.dateAddedSec * 1000
         val date = Instant.ofEpochMilli(epochMs).atZone(zone)
         val dest = destination.replace('/', '\\').trim('\\')
-        val source = sourceFolder(m.relativePath)
+        val source = if (folder != null) sanitise(folder) else sourceFolder(m.relativePath)
         val parts = listOf(dest, sanitise(deviceName), source, date.year.toString())
         return parts.filter { it.isNotEmpty() }.joinToString("\\")
     }

@@ -64,9 +64,10 @@ class BackupEngineTest {
         parallel: Int = 1,
         pauseMs: Long = 0,
         pause: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
+        folderFor: suspend (Long, String) -> String? = { _, _ -> null },
     ) = BackupEngine(
         store, ledger, { data?.let { ByteArrayInputStream(it) } }, settings, { 1234L }, fat32Max, slack,
-        parallelUploads = parallel, itemPauseMs = pauseMs, pause = pause,
+        parallelUploads = parallel, itemPauseMs = pauseMs, pause = pause, folderFor = folderFor,
     )
 
     @Test fun uploadsAndVerifiesNewItem() = runBlocking {
@@ -81,6 +82,19 @@ class BackupEngineTest {
         assertNull(e.partPath)
         assertFalse(store.files.keys.any { it.endsWith(".part") })
         assertTrue(store.deletes.isEmpty())
+    }
+
+    @Test fun uploadsIntoDesiredFolder() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(5000)
+        val seen = mutableListOf<Pair<Long, String>>()
+        val r = engine(store, ledger, data, folderFor = { id, rel -> seen += id to rel; "Dog" })
+            .run(listOf(media(data.size.toLong())))
+        assertEquals(BackupResult.Done(1, 0, 0), counts(r))
+        val target = "B\\Dev\\Dog\\2026\\IMG.jpg"
+        assertArrayEquals(data, store.files[target])
+        assertEquals(target, ledger.get(1)!!.remotePath)
+        assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+        assertEquals(listOf(1L to "DCIM/Camera/"), seen)
     }
 
     @Test fun neverOverwritesDifferentFileWithSameName() = runBlocking {

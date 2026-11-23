@@ -5,6 +5,7 @@ import androidx.room.Room
 import dev.photobackup.ledger.AppDatabase
 import dev.photobackup.ledger.MIGRATION_1_2
 import dev.photobackup.ledger.LedgerRules
+import dev.photobackup.media.FolderRules
 import dev.photobackup.media.LocalMediaSource
 import dev.photobackup.settings.KeystoreCredentialCipher
 import dev.photobackup.settings.SettingsStore
@@ -66,6 +67,7 @@ class ProductionBackupRunner(private val context: Context) : BackupRunner {
         if (smb == null || destination.isNullOrBlank()) throw SetupIncompleteException()
 
         val ledger = LedgerDatabase.get(context).ledgerDao()
+        val assignments = LedgerDatabase.get(context).folderAssignmentDao()
         val media = LocalMediaSource(context)
         val items = media.query(settings.folders) // may throw SecurityException without media permission
         val totalBytes = items
@@ -82,6 +84,7 @@ class ProductionBackupRunner(private val context: Context) : BackupRunner {
                 settings = BackupSettings(destination, settings.deviceName, ZoneId.systemDefault()),
                 clock = System::currentTimeMillis,
                 parallelUploads = settings.parallelUploads,
+                folderFor = { id, rel -> FolderRules.desired(rel, assignments.get(id)?.folder, settings.folderRules) },
             )
             return engine.run(items) { done, total, bytes -> onProgress(done, total, bytes, totalBytes) }
         } finally {

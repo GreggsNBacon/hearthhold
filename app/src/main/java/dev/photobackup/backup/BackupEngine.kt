@@ -80,6 +80,8 @@ class BackupEngine(
     parallelUploads: Int = 1,
     private val itemPauseMs: Long = DEFAULT_ITEM_PAUSE_MS,
     private val pause: suspend (Long) -> Unit = { delay(it) },
+    /** The desired folder for an item (null = the default source folder). Reused for drive-only rows with no PhoneMedia. */
+    private val folderFor: suspend (mediaId: Long, relativePath: String) -> String? = { _, _ -> null },
 ) {
     companion object {
         const val FAT32_ERROR = "too big for this drive's format (FAT32, 4 GB limit)"
@@ -277,7 +279,8 @@ class BackupEngine(
         state: RunState,
         onProgress: (Int, Int, Long) -> Unit,
     ): Outcome {
-        val dir = RemotePathPlanner.targetDir(settings.destination, settings.deviceName, m, settings.zone)
+        val folder = folderFor(m.mediaId, m.relativePath)
+        val dir = RemotePathPlanner.targetDir(settings.destination, settings.deviceName, m, settings.zone, folder)
         val name = RemotePathPlanner.sanitise(m.displayName)
 
         // 4. Pick and reserve a free name, or adopt an identical existing file.

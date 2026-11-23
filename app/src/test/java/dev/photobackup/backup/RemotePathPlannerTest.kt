@@ -32,6 +32,19 @@ class RemotePathPlannerTest {
     @Test fun sanitisesDeviceName() = assertEquals("My_Phone", sanitise("My/Phone"))
     @Test fun normalisesDestinationSeparators() = assertEquals("A\\B\\Pixel\\Camera\\2026", targetDir("/A/B/", "Pixel", phone(dateTakenMs = ms(2026, 3, 14)), UTC))
 
+    @Test fun folderReplacesSourceSegment() = assertEquals(
+        "Hearthhold\\Pixel 9\\Memes\\2025",
+        targetDir("Hearthhold", "Pixel 9", phone(dateTakenMs = ms(2025, 5, 1), relativePath = "Pictures/WhatsApp/"), UTC, folder = "Memes"),
+    )
+    @Test fun folderIsSanitised() = assertEquals(
+        "B\\P\\a_b\\2025",
+        targetDir("B", "P", phone(dateTakenMs = ms(2025, 5, 1)), UTC, folder = "a/b"),
+    )
+    @Test fun nullFolderKeepsSourceSegment() = assertEquals(
+        "Hearthhold\\Pixel 9\\WhatsApp\\2025",
+        targetDir("Hearthhold", "Pixel 9", phone(dateTakenMs = ms(2025, 5, 1), relativePath = "Pictures/WhatsApp/"), UTC, folder = null),
+    )
+
     private fun dirFor(rel: String) = targetDir("B", "P", phone(dateTakenMs = ms(2026, 3, 14), relativePath = rel), UTC)
 
     @Test fun sourceFolderCamera() = assertEquals("B\\P\\Camera\\2026", dirFor("DCIM/Camera/"))
