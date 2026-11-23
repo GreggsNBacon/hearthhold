@@ -92,7 +92,12 @@ Remote access (Immich on a spare PC, router WireGuard VPN) and Google Photos are
 
 ### Freeing space
 - The user picks the items. The app calls `createDeleteRequest`, and Android shows its own confirmation. On success, the ledger records `removed_from_phone`. The drive copy is untouched.
-- Before building the request, re-check that each item is still `verified` and that its remote file still exists with the expected size.
+- *Owner's decision (2026-11-22): full integrity check before every deletion.* Before building the request, for each selected item:
+  - re-check that it is still `verified`;
+  - re-read the **drive copy in full** and compare its SHA-256 with the hash recorded at backup time;
+  - re-hash the **phone file** and compare it with that same recorded hash.
+
+  Only items that pass all three checks go into the delete request. A failing item is marked `failed` (the reason is shown on screen) and re-queued for backup, and it is never deleted. The screen shows progress ("Checking 12 of 40 · 3.1 GB") and can be cancelled. Checking is slower, but it is the guarantee.
 - *My call:* use delete, not trash (`createTrashRequest`). Trash would keep using space for 30 days, which defeats the purpose.
 
 ### Discovery
