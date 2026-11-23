@@ -34,6 +34,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.ZoneId
 
 /** What the UI needs from the background scheduler; tests record the calls. */
@@ -72,6 +73,7 @@ class AppContainer(context: Context) {
             save = { user, pass ->
                 settingsStore.update { s -> s.copy(smb = s.smb?.copy(username = user, password = pass)) }
             },
+            onReauthSaved = { onReauthSaved() },
         )
     }
 
@@ -85,18 +87,29 @@ class AppContainer(context: Context) {
         authPrompt.withAuthRetry { cfg -> storeFactory(cfg).use { it.connect() } }
     }
 
+    /** A new login was saved (from any screen or the notification): clear the stale error and resume backing up. */
+    private suspend fun onReauthSaved() {
+        reauthSaves++
+        BackupNotifications.clearError(app)
+        backup.runNow(settings().chargingOnly)
+    }
+
+    @Volatile private var reauthSaves = 0
+
     /** Opens the "Re-enter drive password" dialog and checks the new login against the drive. */
     suspend fun reenterPassword() {
         authPrompt.prompt { cfg -> storeFactory(cfg).use { it.connect() } }
-        BackupNotifications.clearError(app)
     }
 
     /** Tapped the "Wrong username or password" notification: ask, then retry the backup that failed. */
     fun reauthFromNotification() {
         appScope.launch {
             try {
-                reenterPassword()
-                backup.runNow(settings().chargingOnly)
+                // The saved login first; the dialog only appears if the drive refuses it (or it is unreadable).
+                val before = reauthSaves
+                checkDrive()
+                // The prompt already cleared/resumed if it saved a new login; otherwise the saved login works now.
+                if (reauthSaves == before) onReauthSaved()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -112,13 +125,16 @@ class AppContainer(context: Context) {
         } catch (_: SecurityException) {
             return 0
         }
-        return SuggestionRule.suggest(
-            ledger.byStatus(BackupStatus.VERIFIED),
-            phone.associateBy { it.mediaId },
-            System.currentTimeMillis(),
-            s.freeUpAgeMonths,
-            ZoneId.systemDefault(),
-        ).sumOf { it.sizeBytes }
+        val verified = ledger.byStatus(BackupStatus.VERIFIED)
+        return withContext(Dispatchers.Default) {
+            SuggestionRule.suggest(
+                verified,
+                phone.associateBy { it.mediaId },
+                System.currentTimeMillis(),
+                s.freeUpAgeMonths,
+                ZoneId.systemDefault(),
+            ).sumOf { it.sizeBytes }
+        }
     }
 
     val setupFactory: ViewModelProvider.Factory = viewModelFactory {

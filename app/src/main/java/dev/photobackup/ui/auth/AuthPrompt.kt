@@ -28,6 +28,8 @@ data class AuthRequest(val username: String, val error: String? = null, val busy
 class AuthPrompt(
     private val load: suspend () -> SmbConfig?,
     private val save: suspend (username: String, password: String) -> Unit,
+    /** Called once after a new login has been verified and saved (clears the stale error, resumes backups). */
+    private val onReauthSaved: suspend () -> Unit = {},
 ) {
     private val _request = MutableStateFlow<AuthRequest?>(null)
     val request: StateFlow<AuthRequest?> = _request.asStateFlow()
@@ -101,6 +103,7 @@ class AuthPrompt(
             try {
                 val result = block(next)
                 save(user, pass)
+                onReauthSaved()
                 return result
             } catch (_: RemoteException.AuthFailed) {
                 error = MSG_AUTH

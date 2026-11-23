@@ -148,6 +148,26 @@ class SetupViewModelTest {
         assertEquals(Routes.HOME, Routes.start(s))
     }
 
+    @Test fun finishDoesNotOverwriteLoginUpdatedSinceTest() = runBlocking {
+        val vm = vm().toCredentials()
+        vm.setGuest(false); vm.setUsername("greg"); vm.setPassword("pw")
+        vm.testConnection().join()
+        // The re-enter dialog changed the saved login after the test.
+        settings.update { it.copy(smb = it.smb?.copy(password = "updated")) }
+        vm.onFolderPicked("Phone backup")
+        vm.onPermissionsDone()
+        vm.finish().join()
+        val s = settings.settings.first()
+        assertEquals("updated", s.smb?.password)
+        assertEquals("Phone backup", s.destination)
+    }
+
+    @Test fun uiStateToStringRedactsPassword() {
+        val text = SetupUiState(password = "hunter2").toString()
+        assertTrue(!text.contains("hunter2"))
+        assertTrue(text.contains("password=***"))
+    }
+
     @Test fun startRouteIsSetupUntilDriveAndDestinationSet() {
         assertEquals(Routes.SETUP, Routes.start(AppSettings(null, null)))
         assertEquals(Routes.SETUP, Routes.start(AppSettings(SmbConfig("h", "s", null, null), null)))

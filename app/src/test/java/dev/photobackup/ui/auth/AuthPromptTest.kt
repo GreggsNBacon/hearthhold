@@ -20,9 +20,12 @@ class AuthPromptTest {
     private var saved: SmbConfig? = SmbConfig("nas", "usb", "greg", "old")
     private val saves = mutableListOf<Pair<String, String>>()
 
+    private var reauthSaved = 0
+
     private fun prompt() = AuthPrompt(
         load = { saved },
         save = { u, p -> saves += u to p; saved = saved?.copy(username = u, password = p) },
+        onReauthSaved = { reauthSaved++ },
     )
 
     /** Fails with AuthFailed unless the password is "new". */
@@ -119,5 +122,33 @@ class AuthPromptTest {
         } catch (_: DriveNotConfiguredException) {
         }
     }
-}
 
+    @Test fun reauthSavedCallbackRunsOnceAfterSuccessfulSave() = runTest {
+        val p = prompt()
+        val result = async { p.withAuthRetry(needsNew) }
+        runCurrent()
+        p.submit("greg", "still wrong")
+        runCurrent()
+        assertEquals(0, reauthSaved)
+        p.submit("greg", "new")
+        result.await()
+        assertEquals(1, reauthSaved)
+    }
+
+    @Test fun reauthSavedCallbackNotRunOnCancelOrWithoutPrompt() = runTest {
+        val p = prompt()
+        assertEquals(42, p.withAuthRetry { 42 })
+        val r = async { runCatching { p.withAuthRetry<Unit> { throw RemoteException.AuthFailed() } } }
+        runCurrent()
+        p.cancel()
+        r.await()
+        assertEquals(0, reauthSaved)
+    }
+
+    @Test fun savedLoginIsTriedBeforeAnyPrompt() = runTest {
+        val p = prompt()
+        p.withAuthRetry { cfg -> assertEquals("old", cfg.password) }
+        assertNull(p.request.value)
+        assertEquals(0, reauthSaved)
+    }
+}

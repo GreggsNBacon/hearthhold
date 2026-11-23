@@ -39,7 +39,11 @@ data class SetupUiState(
     val message: String? = null,
     val destination: String? = null,
     val finished: Boolean = false,
-)
+) {
+    override fun toString() =
+        "SetupUiState(step=$step, host=$host, share=$share, guest=$guest, username=$username, password=***, " +
+            "destination=$destination, finished=$finished)"
+}
 
 /** Media read + notifications, as the platform names them for [sdk]. */
 fun setupPermissions(sdk: Int): List<String> =
@@ -165,13 +169,13 @@ class SetupViewModel(
     /** Saves drive + destination, schedules background backups and starts the first one. */
     fun finish(): Job {
         val s = _state.value
-        val cfg = config(s)
         val destination = s.destination
-        if (cfg == null || destination.isNullOrBlank()) return Job().apply { complete() }
+        // The login was saved at "Test connection" and may have been updated since; only the destination is written here.
+        if (destination.isNullOrBlank()) return Job().apply { complete() }
         _state.update { it.copy(busy = true, message = null) }
         return viewModelScope.launch {
             try {
-                settingsStore.update { it.copy(smb = cfg, destination = destination) }
+                settingsStore.update { it.copy(destination = destination) }
                 val chargingOnly = settingsStore.settings.first().chargingOnly
                 backup.scheduleAll(chargingOnly)
                 backup.runNow(chargingOnly)

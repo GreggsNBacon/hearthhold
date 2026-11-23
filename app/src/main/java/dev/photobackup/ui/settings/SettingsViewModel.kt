@@ -76,6 +76,10 @@ class SettingsViewModel(
             try {
                 val saved = store.settings.first().smb
                 val user = username.trim()
+                if (!guest && password.isEmpty() && saved?.username == user && saved.password == null) {
+                    _state.update { it.copy(driveMessage = "Enter the drive password") }
+                    return@launch
+                }
                 val cfg = when {
                     guest -> SmbConfig(host.trim(), share.trim(), null, null)
                     password.isEmpty() && saved?.username == user -> SmbConfig(host.trim(), share.trim(), user, saved.password)

@@ -34,6 +34,8 @@ class MainActivity : ComponentActivity() {
     private fun handleIntent(intent: Intent?) {
         if (intent?.getBooleanExtra(EXTRA_REAUTH, false) != true) return
         intent.removeExtra(EXTRA_REAUTH)
+        // Re-opened from Recents: the extra is stale, do not prompt again.
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
         container.reauthFromNotification()
     }
 

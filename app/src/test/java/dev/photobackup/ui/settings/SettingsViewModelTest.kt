@@ -71,6 +71,15 @@ class SettingsViewModelTest {
         assertEquals(setOf("Pictures/WhatsApp/"), settings.settings.first().folders.extraRelativePaths)
     }
 
+    @Test fun saveDriveRequiresPasswordWhenSavedOneIsUnreadable() = runBlocking {
+        settings.update { it.copy(smb = SmbConfig("nas", "usb", "greg", null)) }
+        val vm = vm()
+        vm.saveDrive("nas", "usb", guest = false, username = "greg", password = "").join()
+        assertEquals("Enter the drive password", vm.state.value.driveMessage)
+        assertEquals(true, opened.isEmpty())
+        assertEquals(null, settings.settings.first().smb?.password)
+    }
+
     @Test fun saveDriveKeepsSavedPasswordWhenBlankAndTestsFirst() = runBlocking {
         val vm = vm()
         vm.saveDrive("nas2", "usb", guest = false, username = "greg", password = "").join()
