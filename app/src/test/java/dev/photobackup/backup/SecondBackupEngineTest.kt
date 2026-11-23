@@ -46,6 +46,21 @@ class MemorySecondCopies : SecondCopyDao {
     }
     override suspend fun byStatus(status: SecondStatus) = rows.value.values.filter { it.status == status }
     override suspend fun withMovingTo() = rows.value.values.filter { it.movingTo != null }
+
+    /** Needs the ledger join; the health check is tested on Room instead. */
+    override suspend fun healthBatch(limit: Int): List<SecondCopy> = error("not used by the engine")
+    override suspend fun markCheckedCount(mediaId: Long, remotePath: String, sha: String, nowMs: Long): Int {
+        var n = 0
+        rows.update { m ->
+            val e = m[mediaId]
+            if (e != null && e.status == SecondStatus.VERIFIED && e.remotePath == remotePath && e.sha256 == sha &&
+                e.movingTo == null && e.partPath == null
+            ) {
+                n = 1; m + (mediaId to e.copy(lastCheckedAt = nowMs))
+            } else { n = 0; m }
+        }
+        return n
+    }
     override suspend fun beginMoveCount(mediaId: Long, from: String, target: String, nowMs: Long): Int {
         var n = 0
         rows.update { m ->

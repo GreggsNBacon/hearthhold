@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -63,6 +64,10 @@ fun StatusSheetContent(
     onReenter: () -> Unit,
     /** Opens "Re-enter second location password". */
     onReenterSecond: () -> Unit = {},
+    /** Opens the damaged-files list (health check). */
+    onShowDamaged: () -> Unit = {},
+    /** Closes it. */
+    onHideDamaged: () -> Unit = {},
     /** Opens Swipe review. */
     onReview: () -> Unit = {},
     /** Files flagged too big for this drive's format (FAT32). */
@@ -87,6 +92,16 @@ fun StatusSheetContent(
                     Text(line, Modifier.weight(1f))
                     if (state.secondNeedsPassword) TextButton(onClick = onReenterSecond) { Text("Re-enter password") }
                 }
+            }
+        }
+        state.healthLine(System.currentTimeMillis())?.let { line ->
+            val tappable = state.healthTappable
+            if (tappable) {
+                Card(onClick = onShowDamaged, Modifier.fillMaxWidth()) {
+                    Text(line, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
+                }
+            } else {
+                Card(Modifier.fillMaxWidth()) { Text(line, Modifier.padding(16.dp)) }
             }
         }
         val limits = driveLimitLines(state.status?.driveFreeBytes, tooBig)
@@ -116,6 +131,31 @@ fun StatusSheetContent(
         }
         OutlinedButton(onClick = onReview, modifier = Modifier.fillMaxWidth()) { Text("Swipe review") }
     }
+    state.damaged?.let { DamagedDialog(it, onHideDamaged) }
+}
+
+/** The damaged drive files: name and error for each, read from the ledger. */
+@Composable
+private fun DamagedDialog(details: DamagedDetails, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("OK") } },
+        title = { Text("Damaged on drive") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                when {
+                    details.failed -> Text("Couldn't read the list. Try again later.")
+                    details.files.isEmpty() -> Text("No damaged files now.")
+                    else -> details.files.forEach { f ->
+                        Column {
+                            Text(f.name, style = MaterialTheme.typography.bodyLarge)
+                            Text(f.error, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        },
+    )
 }
 
 @Composable

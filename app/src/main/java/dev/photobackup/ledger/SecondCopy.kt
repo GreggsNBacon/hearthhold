@@ -102,6 +102,25 @@ interface SecondCopyDao {
     suspend fun demoteIfVerified(mediaId: Long, remotePath: String, sha: String, nowMs: Long): Boolean =
         demoteCount(mediaId, remotePath, sha, SecondStatus.VERIFIED, SecondStatus.FAILED, SECOND_MISSING_ERROR, nowMs) > 0
 
+    /**
+     * Up to [limit] copies the health check may read: VERIFIED, path recorded, no move or `.part` in flight, and of
+     * the ledger row's current hash (no bin request). Never checked first, then oldest checked.
+     */
+    @Query(
+        "SELECT c.* FROM SecondCopy c JOIN LedgerEntry e ON e.mediaId = c.mediaId " +
+            "WHERE c.status = 'VERIFIED' AND c.remotePath IS NOT NULL AND c.sha256 IS NOT NULL " +
+            "AND c.movingTo IS NULL AND c.partPath IS NULL AND c.sha256 = e.localSha256 AND e.binRequestedAt IS NULL " +
+            "ORDER BY c.lastCheckedAt IS NOT NULL, c.lastCheckedAt, c.mediaId LIMIT :limit"
+    )
+    suspend fun healthBatch(limit: Int): List<SecondCopy>
+
+    /** Sets lastCheckedAt only while the row is still that same settled VERIFIED copy. Never touches a drive file. */
+    @Query(
+        "UPDATE SecondCopy SET lastCheckedAt = :nowMs WHERE mediaId = :mediaId AND status = 'VERIFIED' " +
+            "AND remotePath = :remotePath AND sha256 = :sha AND movingTo IS NULL AND partPath IS NULL"
+    )
+    suspend fun markCheckedCount(mediaId: Long, remotePath: String, sha: String, nowMs: Long): Int
+
     @Query(
         "UPDATE SecondCopy SET movingTo = NULL, status = :to, lastError = :error, updatedAtMs = :nowMs " +
             "WHERE mediaId = :mediaId AND movingTo = :expected AND remotePath IS :from"

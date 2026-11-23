@@ -165,6 +165,13 @@ interface LedgerDao : LedgerStore {
     )
     suspend fun countWithError(error: String): Int
 
+    /** Rows with this exact error, leaving out bin rows (as [countWithError] does): the damaged-files list. */
+    @Query(
+        "SELECT * FROM LedgerEntry WHERE lastError = :error AND binRequestedAt IS NULL AND status != 'BINNED' " +
+            "ORDER BY displayName, mediaId"
+    )
+    suspend fun withError(error: String): List<LedgerEntry>
+
     @Query("SELECT * FROM LedgerEntry ORDER BY dateTakenMs DESC")
     override fun observeAll(): Flow<List<LedgerEntry>>
 }

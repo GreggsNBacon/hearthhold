@@ -52,7 +52,12 @@ object HealthGate {
  * copy). The bad file is never deleted. The only deletes are a failed repair's own leftovers on the main drive: its
  * `.part`, or the new copy it just made when that failed its read-back or could not be recorded on the row.
  *
- * A second-location pass (re-check of SecondCopy rows) is meant to slot in next to [checkMain] with its own batch.
+ * Second location ([checkSecond]): VERIFIED copies of the ledger's current hash, oldest-checked first, with their own
+ * batch and byte cap. Missing, wrong size or a different hash: the row is demoted (the existing conditional rule,
+ * [SecondCopyDao.demoteIfVerified]) so the next run copies it again; the file is left as it is. A per-file error
+ * rotates the row; a lost connection stops that pass only.
+ *
+ * Each pass stops once [byteCap] bytes have been read from its drive (always at least one file).
  * Nothing is logged; stored errors are fixed texts.
  */
 class HealthCheck(
@@ -61,9 +66,12 @@ class HealthCheck(
     private val opener: LocalOpener,
     private val clock: () -> Long,
     private val batchSize: Int = BATCH_SIZE,
+    /** Bytes one pass may read from one drive; the pass stops once this much is read (always at least one file). */
+    private val byteCap: Long = BYTE_CAP,
 ) {
     companion object {
         const val BATCH_SIZE = 200
+        const val BYTE_CAP = 2L * 1024 * 1024 * 1024
         const val NO_GOOD_COPY_ERROR = "Damaged on drive — no good copy left"
     }
 
@@ -125,8 +133,10 @@ class HealthCheck(
             var repaired = 0
             var damaged = 0
             var completed = true
+            var bytes = 0L
             try {
                 for (row in ledger.healthBatch(batchSize)) {
+                    if (bytes >= byteCap) break
                     coroutineContext.ensureActive()
                     when (checkOne(store, mover, second, row)) {
                         Outcome.HEALTHY -> checked++
@@ -134,6 +144,7 @@ class HealthCheck(
                         Outcome.DAMAGED -> { checked++; damaged++ }
                         Outcome.SKIPPED, Outcome.WAITING -> {}
                     }
+                    bytes += row.sizeBytes
                 }
             } catch (e: RemoteException) {
                 // The main drive dropped: stop. Rows not reached keep their old lastCheckedAt.
@@ -141,6 +152,43 @@ class HealthCheck(
             }
             HealthPass(checked, repaired, damaged, completed)
         }
+
+    /**
+     * Checks up to [batchSize] second-location copies on [store] (connected). [HealthPass.damaged] counts the copies
+     * demoted for re-copy; nothing is ever repaired or deleted here.
+     */
+    suspend fun checkSecond(store: RemoteStore): HealthPass = withContext(Dispatchers.IO) {
+        var checked = 0
+        var demoted = 0
+        var completed = true
+        var bytes = 0L
+        try {
+            for (c in copies.healthBatch(batchSize)) {
+                if (bytes >= byteCap) break
+                coroutineContext.ensureActive()
+                val path = c.remotePath!!
+                val sha = c.sha256!!
+                val ok = try {
+                    intactAt(store, path, c.sizeBytes, sha)
+                } catch (_: FileNotFoundException) {
+                    false
+                } catch (e: IOException) {
+                    if (e is RemoteException) throw e
+                    null // a per-file problem: rotate the row, judge nothing
+                }
+                when (ok) {
+                    true -> if (copies.markCheckedCount(c.mediaId, path, sha, clock()) > 0) checked++
+                    false -> if (copies.demoteIfVerified(c.mediaId, path, sha, clock())) { checked++; demoted++ }
+                    null -> copies.markCheckedCount(c.mediaId, path, sha, clock())
+                }
+                bytes += c.sizeBytes
+            }
+        } catch (e: RemoteException) {
+            // The second drive dropped: stop this pass only. Rows not reached keep their old lastCheckedAt.
+            completed = false
+        }
+        HealthPass(checked, repaired = 0, damaged = demoted, completed = completed)
+    }
 
     /** A RemoteException from [store] propagates (the pass stops). */
     private suspend fun checkOne(store: RemoteStore, mover: DriveMover, second: SecondSource, row: LedgerEntry): Outcome {
@@ -165,9 +213,13 @@ class HealthCheck(
         return Outcome.SKIPPED
     }
 
-    private suspend fun intact(store: RemoteStore, row: LedgerEntry, path: String, sha: String): Boolean {
+    private suspend fun intact(store: RemoteStore, row: LedgerEntry, path: String, sha: String): Boolean =
+        intactAt(store, path, row.sizeBytes, sha)
+
+    /** Present, of [size] and hashing to [sha] on a full read. */
+    private suspend fun intactAt(store: RemoteStore, path: String, size: Long, sha: String): Boolean {
         val st = store.stat(path)
-        if (st == null || st.isDirectory || st.sizeBytes != row.sizeBytes) return false
+        if (st == null || st.isDirectory || st.sizeBytes != size) return false
         return DriveCopy.hash(store, path) == sha
     }
 
@@ -356,8 +408,10 @@ class HealthCheck(
 
 /**
  * Runs the health check at the end of a backup run (after uploads and the second step, under the same BackupLock
- * hold), at most once per [HealthGate.INTERVAL_MS]. Owns any second store it opens and closes it. Records the gate
- * only when the pass ran to its end, and the counts either way. A failure here never fails the backup run; nothing is
+ * hold), at most once per [HealthGate.INTERVAL_MS]: the main pass, then (second location on) the second pass. Shows
+ * "checking" in the status store while it runs. Owns any second store it opens (one per run, shared by main-pass
+ * repairs and the second pass) and closes it. Records the gate only when the main pass ran to its end, and the counts
+ * either way; a second pass cut short or failed leaves the main results as they are. A failure here never fails the backup run; nothing is
  * logged but a class name.
  */
 class HealthStep(
@@ -370,6 +424,7 @@ class HealthStep(
 ) {
     suspend fun runIfDue(mainStore: RemoteStore) {
         var opened: RemoteStore? = null
+        var marked = false
         try {
             val now = clock()
             if (!HealthGate.isDue(status.status.first().lastHealthCheckMs, now)) return
@@ -379,20 +434,42 @@ class HealthStep(
                 if (e is CancellationException) throw e
                 null
             }
+            // Opened at most once per run (first asked by a repair or by the second pass); null = it can't be had.
+            var asked = false
+            var second: RemoteStore? = null
             val provider: (suspend () -> RemoteStore?)? = cfg?.let { c ->
                 {
-                    val s = openStore(c).also { opened = it }
-                    s.connect()
-                    s
+                    if (!asked) {
+                        asked = true
+                        second = try {
+                            openStore(c).also { opened = it }.also { it.connect() }
+                        } catch (e: Exception) {
+                            if (e is CancellationException) throw e
+                            null
+                        }
+                    }
+                    second
                 }
             }
+            marked = true
+            status.update { it.copy(healthChecking = true) }
             val pass = check.checkMain(mainStore, provider)
+            var secondChecked = 0
+            if (provider != null) {
+                try {
+                    provider()?.let { secondChecked = check.checkSecond(it).checked }
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    runCatching { Log.w("Hearthhold", "second health check failed: " + e.javaClass.simpleName) }
+                }
+            }
             val damaged = check.damagedTotal()
             status.update {
                 it.copy(
                     lastHealthCheckMs = if (pass.completed) now else it.lastHealthCheckMs,
-                    healthChecked = pass.checked,
+                    healthChecked = pass.checked + secondChecked,
                     healthDamaged = damaged,
+                    healthChecking = false,
                 )
             }
         } catch (e: Exception) {
@@ -401,6 +478,7 @@ class HealthStep(
             runCatching { Log.w("Hearthhold", "health check failed: " + e.javaClass.simpleName) }
         } finally {
             runCatching { opened?.close() }
+            if (marked) withContext(NonCancellable) { runCatching { status.update { it.copy(healthChecking = false) } } }
         }
     }
 }

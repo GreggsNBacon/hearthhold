@@ -141,5 +141,10 @@ class FakeRemoteStore(
         }
     }
 
-    override fun close() {}
+    /** True once close() was called. */
+    var closed = false
+
+    override fun close() {
+        closed = true
+    }
 }

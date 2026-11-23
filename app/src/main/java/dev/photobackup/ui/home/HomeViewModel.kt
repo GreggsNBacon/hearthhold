@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.photobackup.app.BackupControl
 import dev.photobackup.backup.BackupStatusSnapshot
+import dev.photobackup.backup.HealthStatusText
 import dev.photobackup.backup.SecondStatusText
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.settings.AppSettings
@@ -22,6 +23,12 @@ import kotlinx.coroutines.launch
 
 enum class Reachability { UNKNOWN, CHECKING, YES, NO }
 
+/** One damaged drive file for the health check details: its name and the ledger's error text. */
+data class DamagedFile(val name: String, val error: String)
+
+/** The open damaged-files list. [failed]: it could not be read (shown as a message, never a crash). */
+data class DamagedDetails(val files: List<DamagedFile>, val failed: Boolean = false)
+
 data class HomeUiState(
     val settings: AppSettings? = null,
     /** The settings could not be read (not the same as "not set up"): the screen offers Retry. */
@@ -33,7 +40,16 @@ data class HomeUiState(
     val reach: Reachability = Reachability.UNKNOWN,
     val reachMessage: String? = null,
     val freeUpBytes: Long = 0,
+    /** The damaged-files list, while it is open; null = closed. */
+    val damaged: DamagedDetails? = null,
 ) {
+    /** The health check line for the status sheet; null = none yet. */
+    fun healthLine(nowMs: Long): String? = HealthStatusText.of(status, nowMs)
+
+    /** "N damaged — tap for details" is showing. */
+    val healthTappable: Boolean
+        get() = status?.let { !it.healthChecking && it.lastHealthCheckMs != null && it.healthDamaged > 0 } ?: false
+
     /** A login is saved but its password can't be decrypted (e.g. after a phone restore). */
     val needsPassword: Boolean get() = passwordUnreadable(settings)
 
@@ -66,6 +82,8 @@ class HomeViewModel(
     private val backup: BackupControl,
     /** Opens the "Re-enter second location password" dialog; throws if cancelled. */
     private val reenterSecondPassword: suspend () -> Unit = {},
+    /** The damaged drive files (ledger rows marked by the health check). */
+    private val damagedFiles: suspend () -> List<DamagedFile> = { emptyList() },
 ) : ViewModel() {
     private val _state = MutableStateFlow(HomeUiState())
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
@@ -180,6 +198,22 @@ class HomeViewModel(
             }
         }
     }
+
+    /** Opens the damaged-files list (read from the ledger now). A read failure shows a message instead. */
+    fun showDamaged() {
+        viewModelScope.launch {
+            val details = try {
+                DamagedDetails(damagedFiles())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                DamagedDetails(emptyList(), failed = true)
+            }
+            _state.update { it.copy(damaged = details) }
+        }
+    }
+
+    fun hideDamaged() = _state.update { it.copy(damaged = null) }
 
     /** Re-enter the second location's password; on success runs [onDone]. A cancelled dialog does nothing. */
     fun reenterSecond(onDone: () -> Unit = {}) {

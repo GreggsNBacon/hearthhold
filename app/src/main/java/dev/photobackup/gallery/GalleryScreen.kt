@@ -271,6 +271,8 @@ fun GalleryScreen(
                 },
                 onReenter = { status.reenter(onDone = refreshAll) },
                 onReenterSecond = { status.reenterSecond() },
+                onShowDamaged = { status.showDamaged() },
+                onHideDamaged = { status.hideDamaged() },
                 onReview = {
                     showSheet = false
                     onReview()

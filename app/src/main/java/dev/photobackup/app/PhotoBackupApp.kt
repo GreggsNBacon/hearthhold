@@ -15,6 +15,7 @@ import dev.photobackup.bin.BinRepository
 import dev.photobackup.bin.BinViewModel
 import dev.photobackup.backup.BackupScheduler
 import dev.photobackup.backup.BackupStatusRepository
+import dev.photobackup.backup.HealthCheck
 import dev.photobackup.backup.LedgerDatabase
 import dev.photobackup.backup.OvernightWindow
 import dev.photobackup.discovery.HostDiscovery
@@ -50,6 +51,7 @@ import dev.photobackup.smb.SmbConfig
 import dev.photobackup.smb.SmbjRemoteStore
 import dev.photobackup.ui.auth.AuthPrompt
 import dev.photobackup.ui.auth.AuthRetryingStore
+import dev.photobackup.ui.home.DamagedFile
 import dev.photobackup.ui.home.HomeViewModel
 import dev.photobackup.ui.home.passwordUnreadable
 import dev.photobackup.ui.settings.SettingsViewModel
@@ -364,6 +366,9 @@ class AppContainer(context: Context) {
                 freeUpBytes = { freeUpBytes(it) },
                 backup = backup,
                 reenterSecondPassword = { reenterSecondPassword() },
+                damagedFiles = {
+                    ledger.withError(HealthCheck.NO_GOOD_COPY_ERROR).map { DamagedFile(it.displayName, it.lastError ?: "") }
+                },
             )
         }
     }

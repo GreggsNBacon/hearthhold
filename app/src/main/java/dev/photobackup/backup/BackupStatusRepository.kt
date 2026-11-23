@@ -39,11 +39,40 @@ data class BackupStatusSnapshot(
     val staleBaselineMs: Long? = null,
     /** When a health check pass last ran to its end (the once-per-20-h gate); null = never. */
     val lastHealthCheckMs: Long? = null,
-    /** Files the last health check pass read and judged (a pass cut short counts what it got through). */
+    /** Files the last health check read and judged, both drives (a pass cut short counts what it got through). */
     val healthChecked: Int = 0,
     /** Ledger rows marked "Damaged on drive — no good copy left", as of the last health check pass. */
     val healthDamaged: Int = 0,
+    /** A health check pass is running right now (after the backup's own result was published). */
+    val healthChecking: Boolean = false,
 )
+
+/** The status sheet's health check line. */
+object HealthStatusText {
+    const val CHECKING = "Checking drive health…"
+    private const val DAY_MS = 24L * 60 * 60 * 1000
+
+    fun damaged(n: Int) = "$n damaged — tap for details"
+
+    fun allGood(lastMs: Long, nowMs: Long): String {
+        val days = ((nowMs - lastMs) / DAY_MS).coerceAtLeast(0)
+        val ago = when (days) {
+            0L -> "today"
+            1L -> "1 day ago"
+            else -> "$days days ago"
+        }
+        return "Health check: all good (last checked $ago)"
+    }
+
+    /** null = no line (never checked and not checking). Checking wins, then damaged, then all good. */
+    fun of(s: BackupStatusSnapshot?, nowMs: Long): String? = when {
+        s == null -> null
+        s.healthChecking -> CHECKING
+        s.lastHealthCheckMs == null -> null
+        s.healthDamaged > 0 -> damaged(s.healthDamaged)
+        else -> allGood(s.lastHealthCheckMs, nowMs)
+    }
+}
 
 /** The second location's status texts. */
 object SecondStatusText {
@@ -109,16 +138,21 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
             p.putOrRemove(LAST_HEALTH_CHECK, s.lastHealthCheckMs)
             p[HEALTH_CHECKED] = s.healthChecked
             p[HEALTH_DAMAGED] = s.healthDamaged
+            p[HEALTH_CHECKING] = s.healthChecking
         }
     }
 
     /**
-     * Process start: a persisted "in progress" with no run holding [isRunning] is left over from a killed process
-     * (OOM, force-stop). Clear it so the chip and "Back up now" don't stay stuck until the next run. The check runs
+     * Process start: a persisted "in progress" (or "checking drive health") with no run holding [isRunning] is left
+     * over from a killed process (OOM, force-stop). Clear it so the chip and "Back up now" don't stay stuck until the next run. The check runs
      * inside the edit, so a run that starts meanwhile (and takes its lock before writing) is never overwritten.
      */
     suspend fun clearStaleProgress(isRunning: () -> Boolean) = update { s ->
-        if (s.inProgress && !isRunning()) s.copy(inProgress = false, done = 0, total = 0, etaSec = null, moving = 0) else s
+        if ((s.inProgress || s.healthChecking) && !isRunning()) {
+            s.copy(inProgress = false, done = 0, total = 0, etaSec = null, moving = 0, healthChecking = false)
+        } else {
+            s
+        }
     }
 
     suspend fun recordDriveFree(bytes: Long) = update { it.copy(driveFreeBytes = bytes) }
@@ -140,6 +174,7 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
         lastHealthCheckMs = p[LAST_HEALTH_CHECK],
         healthChecked = p[HEALTH_CHECKED] ?: 0,
         healthDamaged = p[HEALTH_DAMAGED] ?: 0,
+        healthChecking = p[HEALTH_CHECKING] ?: false,
     )
 
     private fun <T> MutablePreferences.putOrRemove(key: Preferences.Key<T>, value: T?) {
@@ -163,6 +198,7 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
         private val LAST_HEALTH_CHECK = longPreferencesKey("last_health_check_ms")
         private val HEALTH_CHECKED = intPreferencesKey("health_checked")
         private val HEALTH_DAMAGED = intPreferencesKey("health_damaged")
+        private val HEALTH_CHECKING = booleanPreferencesKey("health_checking")
 
         val defaultProvider: (Context) -> BackupStatusRepository = { ctx ->
             BackupStatusRepository(ctx.applicationContext.statusDataStore)

@@ -7,6 +7,7 @@ import dev.photobackup.ledger.AppDatabase
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerDao
 import dev.photobackup.ledger.LedgerEntry
+import dev.photobackup.ledger.SECOND_MISSING_ERROR
 import dev.photobackup.ledger.SecondCopy
 import dev.photobackup.ledger.SecondStatus
 import dev.photobackup.smb.AccessDeniedException
@@ -81,12 +82,13 @@ class HealthCheckTest {
         }
     }
 
-    private fun check(batch: Int = HealthCheck.BATCH_SIZE) = HealthCheck(
+    private fun check(batch: Int = HealthCheck.BATCH_SIZE, byteCap: Long = HealthCheck.BYTE_CAP) = HealthCheck(
         ledger = dao,
         copies = db.secondCopyDao(),
         opener = { m -> phone[m.mediaId]?.let { ByteArrayInputStream(it) } },
         clock = { now },
         batchSize = batch,
+        byteCap = byteCap,
     )
 
     // ---- batch selection ----
@@ -422,7 +424,7 @@ class HealthCheckTest {
         assertNull(repo.status.first().lastHealthCheckMs)
     }
 
-    @Test fun stepOpensTheSecondStoreOnlyWhenARepairNeedsIt() = runBlocking {
+    @Test fun stepOpensTheSecondStoreOncePerRunSharedByRepairAndSecondPass() = runBlocking {
         put(row(1))
         second.mkdirs("B2")
         second.files["B2\\img1.jpg"] = good
@@ -432,11 +434,214 @@ class HealthCheckTest {
         val repo = repo()
         val opened = mutableListOf<SmbConfig>()
         step(repo, cfg, opened).runIfDue(main)
-        assertTrue(opened.isEmpty())
-        // Next day, damaged with the phone copy gone: the second store is opened once.
+        assertEquals(listOf(cfg), opened) // for the second pass
+        // Next day, damaged with the phone copy gone: repaired from the second copy, still one open for the run.
         now += 21L * 60 * 60 * 1000
         main.files[path(1)] = bad
         step(repo, cfg, opened).runIfDue(main)
+        assertEquals(listOf(cfg, cfg), opened)
+        assertArrayEquals(good, main.files[dao.get(1)!!.remotePath!!])
+    }
+
+    // ---- byte cap ----
+
+    @Test fun byteCapIsTwoGigabytes() = assertEquals(2L * 1024 * 1024 * 1024, HealthCheck.BYTE_CAP)
+
+    @Test fun mainPassStopsOnceTheByteCapIsReadButAlwaysChecksOne() = runBlocking {
+        put(row(1, checked = 1))
+        put(row(2, checked = 2))
+        put(row(3, checked = 3))
+        // Cap smaller than one file: still one file.
+        val one = check(byteCap = 1).checkMain(main, null)
+        assertEquals(1, one.checked)
+        assertTrue(one.completed)
+        assertEquals(now, dao.get(1)!!.lastCheckedAt)
+        assertEquals(2L, dao.get(2)!!.lastCheckedAt)
+        // Cap of two files: two.
+        now += 1
+        val two = check(byteCap = 2L * good.size).checkMain(main, null)
+        assertEquals(2, two.checked)
+        assertEquals(now, dao.get(2)!!.lastCheckedAt)
+        assertEquals(now, dao.get(3)!!.lastCheckedAt)
+        assertEquals(now - 1, dao.get(1)!!.lastCheckedAt)
+    }
+
+    // ---- second location pass ----
+
+    private fun spath(id: Long) = "B2\\img$id.jpg"
+
+    /** A ledger row (main file healthy) plus a VERIFIED second copy whose file holds [onSecond]. */
+    private suspend fun putSecond(
+        id: Long, checked: Long? = null, onSecond: ByteArray? = good, copy: (SecondCopy) -> SecondCopy = { it },
+    ) {
+        put(row(id))
+        second.mkdirs("B2")
+        if (onSecond != null) second.files[spath(id)] = onSecond
+        db.secondCopyDao().upsert(
+            copy(SecondCopy(id, spath(id), null, null, SecondStatus.VERIFIED, good.size.toLong(), sha(good), null, 1, checked))
+        )
+    }
+
+    @Test fun secondHealthyCopyGetsLastCheckedAtOnly() = runBlocking {
+        putSecond(1)
+        val pass = check().checkSecond(second)
+        assertEquals(HealthPass(checked = 1, repaired = 0, damaged = 0, completed = true), pass)
+        val c = db.secondCopyDao().get(1)!!
+        assertEquals(SecondStatus.VERIFIED, c.status)
+        assertEquals(now, c.lastCheckedAt)
+        assertNull(c.lastError)
+        assertTrue(second.writes.isEmpty())
+    }
+
+    @Test fun secondMissingWrongSizeOrBadHashIsDemotedAndNeverDeleted() = runBlocking {
+        putSecond(1, onSecond = null)
+        putSecond(2, onSecond = "short".toByteArray())
+        putSecond(3, onSecond = bad)
+        val pass = check().checkSecond(second)
+        assertEquals(3, pass.damaged)
+        assertEquals(3, pass.checked)
+        for (id in 1L..3L) {
+            val c = db.secondCopyDao().get(id)!!
+            assertEquals(SecondStatus.FAILED, c.status)
+            assertEquals(SECOND_MISSING_ERROR, c.lastError)
+            assertEquals(spath(id), c.remotePath)
+        }
+        assertTrue(second.deletes.isEmpty())
+        assertTrue(second.writes.isEmpty())
+        assertTrue(main.deletes.isEmpty())
+        assertArrayEquals(bad, second.files[spath(3)])
+        // Main rows are not touched by the second pass.
+        for (id in 1L..3L) assertNull(dao.get(id)!!.lastError)
+    }
+
+    @Test fun secondPassSkipsUnsettledOrStaleCopies() = runBlocking {
+        putSecond(1, onSecond = bad) { it.copy(sha256 = "older") } // not the ledger's hash
+        putSecond(2, onSecond = bad) { it.copy(movingTo = "B2\\x.jpg") }
+        putSecond(3, onSecond = bad) { it.copy(partPath = "B2\\y.part") }
+        putSecond(4, onSecond = bad) { it.copy(status = SecondStatus.UPLOADING) }
+        putSecond(5, onSecond = bad) { it.copy(status = SecondStatus.FAILED) }
+        val pass = check().checkSecond(second)
+        assertEquals(0, pass.checked)
+        for (id in 1L..5L) {
+            val c = db.secondCopyDao().get(id)!!
+            assertNull(c.lastCheckedAt)
+            assertNull(c.lastError)
+        }
+    }
+
+    @Test fun secondPassIsOldestCheckedFirstAndLimited() = runBlocking {
+        putSecond(1, checked = 50)
+        putSecond(2, checked = null)
+        putSecond(3, checked = 10)
+        val pass = check(batch = 2).checkSecond(second)
+        assertEquals(2, pass.checked)
+        assertEquals(now, db.secondCopyDao().get(2)!!.lastCheckedAt)
+        assertEquals(now, db.secondCopyDao().get(3)!!.lastCheckedAt)
+        assertEquals(50L, db.secondCopyDao().get(1)!!.lastCheckedAt)
+    }
+
+    @Test fun secondPassHonoursTheByteCap() = runBlocking {
+        putSecond(1, checked = 1)
+        putSecond(2, checked = 2)
+        val pass = check(byteCap = 1).checkSecond(second)
+        assertEquals(1, pass.checked)
+        assertEquals(now, db.secondCopyDao().get(1)!!.lastCheckedAt)
+        assertEquals(2L, db.secondCopyDao().get(2)!!.lastCheckedAt)
+    }
+
+    @Test fun secondPerFileErrorRotatesTheRowWithoutDemoting() = runBlocking {
+        putSecond(1, checked = 1)
+        putSecond(2, checked = 2, onSecond = bad)
+        second.failOn = { op, p -> if (op == "openRead" && p == spath(1)) AccessDeniedException() else null }
+        val pass = check().checkSecond(second)
+        assertTrue(pass.completed)
+        val c1 = db.secondCopyDao().get(1)!!
+        assertEquals(SecondStatus.VERIFIED, c1.status)
+        assertEquals(now, c1.lastCheckedAt)
+        assertNull(c1.lastError)
+        assertEquals(SecondStatus.FAILED, db.secondCopyDao().get(2)!!.status) // the pass went on
+    }
+
+    @Test fun secondConnectionLossStopsThePass() = runBlocking {
+        putSecond(1, onSecond = bad)
+        second.failOn = { op, _ -> if (op == "stat") RemoteException.Unreachable() else null }
+        val pass = check().checkSecond(second)
+        assertFalse(pass.completed)
+        val c = db.secondCopyDao().get(1)!!
+        assertEquals(SecondStatus.VERIFIED, c.status)
+        assertNull(c.lastCheckedAt)
+    }
+
+    @Test fun stepWithSecondOffNeverChecksTheSecondDrive() = runBlocking {
+        putSecond(1, onSecond = bad)
+        val opened = mutableListOf<SmbConfig>()
+        step(repo(), null, opened).runIfDue(main)
+        assertTrue(opened.isEmpty())
+        val c = db.secondCopyDao().get(1)!!
+        assertEquals(SecondStatus.VERIFIED, c.status)
+        assertNull(c.lastCheckedAt)
+    }
+
+    @Test fun stepWithSecondOnChecksItAndClosesTheStore() = runBlocking {
+        putSecond(1, onSecond = bad)
+        putSecond(2)
+        val repo = repo()
+        val opened = mutableListOf<SmbConfig>()
+        step(repo, cfg, opened).runIfDue(main)
         assertEquals(listOf(cfg), opened)
+        assertEquals(SecondStatus.FAILED, db.secondCopyDao().get(1)!!.status)
+        assertEquals(now, db.secondCopyDao().get(2)!!.lastCheckedAt)
+        assertTrue(second.closed)
+        val s = repo.status.first()
+        assertEquals(now, s.lastHealthCheckMs)
+        assertEquals(0, s.healthDamaged) // second-drive demotes are not "damaged"
+    }
+
+    @Test fun stepMainDropStillRunsTheSecondPassAndSecondDropKeepsMainResults() = runBlocking {
+        putSecond(1, onSecond = bad)
+        main.failOn = { op, _ -> if (op == "stat") RemoteException.Unreachable() else null }
+        val repo = repo()
+        step(repo, cfg, mutableListOf()).runIfDue(main)
+        assertEquals(SecondStatus.FAILED, db.secondCopyDao().get(1)!!.status)
+        assertNull(repo.status.first().lastHealthCheckMs) // main pass cut short: gate stays open
+
+        main.failOn = null
+        main.files[path(1)] = bad // damaged, no phone copy, second copy now FAILED: no good copy
+        second.failOn = { op, _ -> if (op == "connect") RemoteException.Unreachable() else null }
+        step(repo, cfg, mutableListOf()).runIfDue(main)
+        val s = repo.status.first()
+        assertEquals(now, s.lastHealthCheckMs)
+        assertEquals(1, s.healthDamaged)
+        assertEquals(HealthCheck.NO_GOOD_COPY_ERROR, dao.get(1)!!.lastError)
+    }
+
+    @Test fun stepShowsCheckingWhileThePassRuns() = runBlocking {
+        put(row(1))
+        val repo = repo()
+        var seen: Boolean? = null
+        main.failOn = { op, _ ->
+            if (op == "stat" && seen == null) seen = runBlocking { repo.status.first().healthChecking }
+            null
+        }
+        assertFalse(repo.status.first().healthChecking)
+        step(repo, null, mutableListOf()).runIfDue(main)
+        assertEquals(true, seen)
+        assertFalse(repo.status.first().healthChecking)
+    }
+
+    @Test fun staleCheckingFlagIsClearedAtProcessStart() = runBlocking {
+        val repo = repo()
+        repo.update { it.copy(healthChecking = true) }
+        repo.clearStaleProgress { false }
+        assertFalse(repo.status.first().healthChecking)
+    }
+
+    @Test fun damagedListHasNoGoodCopyRowsOnlyAndLeavesOutBinRows() = runBlocking {
+        put(row(1).copy(lastError = HealthCheck.NO_GOOD_COPY_ERROR))
+        put(row(2).copy(lastError = BackupEngine.MOVE_ERROR))
+        put(row(3, status = BackupStatus.REMOVED_FROM_PHONE).copy(lastError = HealthCheck.NO_GOOD_COPY_ERROR, binRequestedAt = 5))
+        put(row(4))
+        val list = dao.withError(HealthCheck.NO_GOOD_COPY_ERROR)
+        assertEquals(listOf(1L), list.map { it.mediaId })
     }
 }
