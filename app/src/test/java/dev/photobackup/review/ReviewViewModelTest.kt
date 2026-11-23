@@ -10,6 +10,7 @@ import dev.photobackup.ledger.ReviewDecisionDao
 import dev.photobackup.ledger.ReviewKeep
 import dev.photobackup.ledger.ReviewKeepDao
 import dev.photobackup.media.PhoneMedia
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -28,7 +29,11 @@ import org.junit.Test
 
 private class FakeDecisions : ReviewDecisionDao {
     val rows = LinkedHashMap<Long, ReviewDecision>()
-    override suspend fun upsert(d: ReviewDecision) { rows[d.mediaId] = d }
+    var failUpsert = false
+    override suspend fun upsert(d: ReviewDecision) {
+        if (failUpsert) throw java.io.IOException("disk")
+        rows[d.mediaId] = d
+    }
     override suspend fun delete(mediaId: Long) { rows.remove(mediaId) }
     override suspend fun lastDecided() = rows.values.maxWithOrNull(compareBy({ it.decidedAt }, { it.mediaId }))
     override suspend fun all() = rows.values.sortedWith(compareBy({ it.decidedAt }, { it.mediaId }))
@@ -74,11 +79,12 @@ class ReviewViewModelTest {
     private val phone = LinkedHashMap<Long, PhoneMedia>()
     private var gestures: Map<Swipe, ReviewAction?> = DEFAULT_GESTURES
     private var rules: Map<String, String> = emptyMap()
+    private var gate: CompletableDeferred<Unit>? = null
 
     @Before fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
         ledger = MemoryLedger(); decisions = FakeDecisions(); keeps = FakeKeeps(); assignments = FakeAssignments()
-        finisher = FakeFinisher(); phone.clear(); gestures = DEFAULT_GESTURES; rules = emptyMap()
+        finisher = FakeFinisher(); gate = null; phone.clear(); gestures = DEFAULT_GESTURES; rules = emptyMap()
     }
 
     @After fun tearDown() = Dispatchers.resetMain()
@@ -94,7 +100,7 @@ class ReviewViewModelTest {
     }
 
     private fun vm(clock: () -> Long = { now }) = ReviewViewModel(
-        ledger = ledger, queryPhone = { phone.values.toList() }, decisions = decisions, keeps = keeps,
+        ledger = ledger, queryPhone = { gate?.await(); phone.values.toList() }, decisions = decisions, keeps = keeps,
         assignments = assignments, folderRules = { rules }, gestures = { gestures }, finisher = finisher, clock = clock,
     ).also { it.refresh() }
 
@@ -314,5 +320,70 @@ class ReviewViewModelTest {
         v.startFinish()
         v.swipe(Swipe.UP); v.undo()
         assertEquals(1, decisions.rows.size); assertEquals(2L, v.cur())
+    }
+
+    @Test fun swipe_during_inflight_refresh_is_not_lost() = runTest {
+        add(1); add(2)
+        val v = vm()
+        gate = CompletableDeferred()
+        v.refresh() // suspends in the phone query
+        v.swipe(Swipe.LEFT)
+        gate!!.complete(Unit)
+        assertEquals(2L, v.cur())
+        assertEquals(ReviewAction.JUNK, decisions.rows[1]?.action)
+        assertEquals(1, v.state.value.summary.junk)
+    }
+
+    @Test fun undo_is_disabled_after_finish_consumes_decisions() = runTest {
+        add(1); add(2)
+        val v = vm()
+        v.swipe(Swipe.LEFT)
+        assertTrue(v.state.value.canUndo)
+        finisher.prepareResult = PrepareResult.Ready("req", decisions.all(), emptyList())
+        finisher.applyResult = ApplyResult.Done(100, 1, 0)
+        v.startFinish()
+        decisions.rows.clear(); ledger.upsert(ledger.get(1)!!.copy(status = BackupStatus.REMOVED_FROM_PHONE))
+        v.onDeleteConfirmed()
+        assertFalse(v.state.value.canUndo)
+        v.dismissFinish()
+        v.undo()
+        assertEquals(2L, v.cur()); assertTrue(decisions.rows.isEmpty())
+    }
+
+    @Test fun failed_write_rolls_back_card_and_undo_state() = runTest {
+        add(1); add(2)
+        val v = vm()
+        decisions.failUpsert = true
+        v.swipe(Swipe.LEFT)
+        assertEquals(1L, v.cur()); assertFalse(v.state.value.canUndo)
+        assertEquals("Something went wrong", v.state.value.error)
+        assertEquals(0, v.state.value.summary.junk)
+    }
+
+    @Test fun deck_load_io_error_is_not_the_wifi_message() = runTest {
+        val v = ReviewViewModel(ledger, { throw java.io.IOException("x") }, decisions, keeps, assignments,
+            { rules }, { gestures }, finisher) { now }
+        v.refresh()
+        assertEquals("Something went wrong", v.state.value.error)
+    }
+
+    @Test fun changed_phone_file_is_excluded() = runTest {
+        add(1); add(2)
+        phone[1] = phone[1]!!.copy(dateModifiedSec = 99)
+        assertEquals(2L, vm().cur())
+    }
+
+    @Test fun keep_boundary_is_exactly_180_days() = runTest {
+        add(1); add(2)
+        keeps.upsert(ReviewKeep(1, now - 180 * day)); keeps.upsert(ReviewKeep(2, now - 180 * day - 1))
+        val v = vm()
+        assertEquals(2L, v.cur()); assertEquals(1, v.state.value.remaining)
+    }
+
+    @Test fun phone_subfolder_is_not_matched_by_folder_filter() = runTest {
+        add(1, path = "Pictures/"); add(2, path = "Pictures/Sub/")
+        val v = vm()
+        v.setFolderFilter("Pictures")
+        assertEquals(1, v.state.value.remaining); assertEquals(1L, v.cur())
     }
 }

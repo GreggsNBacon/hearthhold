@@ -75,8 +75,14 @@ class ReviewViewModel(
         class Skipped(val mediaId: Long, val previousOrder: List<Long>) : Step
     }
 
-    /** Serialises persistence and refreshes so a refresh never reads the DB between a swipe and its write. */
+    /** Serialises DB writes and refreshes. */
     private val lock = Mutex()
+
+    /**
+     * Changes made in memory whose DB write has not finished (null = delete). A refresh overlays these on what it
+     * read, so a swipe made during a refresh is never lost. Touched only on the main thread.
+     */
+    private val pending = HashMap<Long, ReviewAction?>()
 
     private var eligible: List<ReviewCard> = emptyList() // oldest first
     private var entries: Map<Long, LedgerEntry> = emptyMap()
@@ -103,6 +109,7 @@ class ReviewViewModel(
             val dec = decisions.all()
             decided.clear()
             dec.forEach { decided[it.mediaId] = it.action }
+            for ((id, a) in pending) if (a == null) decided.remove(id) else decided[id] = a
             entries = verified.associateBy { it.mediaId }
             eligible = verified
                 .filter { it.mediaId !in kept && LedgerRules.isSafeToRemove(it, phone[it.mediaId]) }
@@ -111,6 +118,15 @@ class ReviewViewModel(
             folderOf = eligible.associate {
                 it.entry.mediaId to FolderRules.desired(it.phone.relativePath, assigned[it.entry.mediaId], rules)
             }
+            // Drop undo steps that no longer match reality (e.g. decisions consumed by Finish).
+            val open = eligible.map { it.entry.mediaId }.toSet()
+            history.removeAll { step ->
+                when (step) {
+                    is Step.Decided -> step.mediaId !in decided
+                    is Step.Skipped -> step.mediaId !in open || step.mediaId in decided
+                }
+            }
+            skipped = skipped.filter { it in open }
             publish(error = null)
         } catch (e: CancellationException) {
             throw e
@@ -119,10 +135,11 @@ class ReviewViewModel(
         }
     }
 
-    private fun describe(e: Exception): String = when (e) {
-        is SecurityException -> "Photo access is needed"
-        is IOException -> CONNECT_TO_FINISH_MESSAGE
-        else -> "Something went wrong" // never the exception text
+    /** User-safe message, never the exception text. Only Finish treats a network error as "connect to Wi-Fi". */
+    private fun describe(e: Exception, finishing: Boolean = false): String = when {
+        e is SecurityException -> "Photo access is needed"
+        finishing && e is IOException -> CONNECT_TO_FINISH_MESSAGE
+        else -> "Something went wrong"
     }
 
     fun setFolderFilter(filter: String?) {
@@ -195,19 +212,23 @@ class ReviewViewModel(
             return
         }
         val at = clock()
-        history.addLast(Step.Decided(id))
+        val step = Step.Decided(id)
+        history.addLast(step)
         decided[id] = action
+        pending[id] = action
         pinnedId = null
         publish()
         viewModelScope.launch {
             try {
                 lock.withLock { decisions.upsert(ReviewDecision(id, action, at)) }
+                if (pending[id] == action) pending.remove(id)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (decided[id] == action) {
+                if (pending[id] == action) {
+                    pending.remove(id)
                     decided.remove(id)
-                    history.removeLastOrNull()
+                    history.remove(step)
                     pinnedId = id
                     publish(error = describe(e))
                 }
@@ -234,17 +255,22 @@ class ReviewViewModel(
 
     private fun restore(id: Long) {
         val prev = decided.remove(id)
+        pending[id] = null
         pinnedId = id
         publish()
         viewModelScope.launch {
             try {
                 lock.withLock { decisions.delete(id) }
+                if (id in pending && pending[id] == null) pending.remove(id)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (prev != null) decided[id] = prev
-                pinnedId = null
-                publish(error = describe(e))
+                if (id in pending && pending[id] == null) {
+                    pending.remove(id)
+                    if (prev != null) decided[id] = prev
+                    pinnedId = null
+                    publish(error = describe(e))
+                }
             }
         }
     }
@@ -273,7 +299,7 @@ class ReviewViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                setFinish(FinishState.Error(describe(e)))
+                setFinish(FinishState.Error(describe(e, finishing = true)))
             }
         }
     }
@@ -300,7 +326,7 @@ class ReviewViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                setFinish(FinishState.Error(describe(e)))
+                setFinish(FinishState.Error(describe(e, finishing = true)))
                 reload()
             }
         }
