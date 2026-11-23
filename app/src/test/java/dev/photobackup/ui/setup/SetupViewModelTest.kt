@@ -41,7 +41,10 @@ private class PlainCipher : CredentialCipher {
 
 class FakeBackupControl : BackupControl {
     val calls = mutableListOf<String>()
-    override fun scheduleAll(chargingOnly: Boolean) { calls += "scheduleAll($chargingOnly)" }
+    override fun scheduleAll(chargingOnly: Boolean, night: dev.photobackup.backup.OvernightWindow?) {
+        calls += if (night == null) "scheduleAll($chargingOnly)" else
+            "scheduleAll($chargingOnly, night=${night.startHour}-${night.endHour})"
+    }
     override fun runNow(chargingOnly: Boolean) { calls += "runNow($chargingOnly)" }
 }
 

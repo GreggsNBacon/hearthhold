@@ -39,9 +39,21 @@ class SettingsViewModel(
 
     private fun edit(t: (AppSettings) -> AppSettings): Job = viewModelScope.launch { store.update(t) }
 
-    fun setChargingOnly(on: Boolean): Job = viewModelScope.launch {
-        store.update { it.copy(chargingOnly = on) }
-        backup.scheduleAll(on)
+    fun setChargingOnly(on: Boolean): Job = editAndReschedule { it.copy(chargingOnly = on) }
+
+    fun setOvernightOnly(on: Boolean): Job = editAndReschedule { it.copy(overnightOnly = on) }
+
+    /** Hours 0..23; anything else is ignored. Start may be after end (the window then spans midnight). */
+    fun setOvernightHours(start: Int, end: Int): Job {
+        if (start !in 0..23 || end !in 0..23) return Job().apply { complete() }
+        return editAndReschedule { it.copy(overnightStartHour = start, overnightEndHour = end) }
+    }
+
+    /** Saves, then re-schedules background work (charging constraint and the overnight job) from the saved values. */
+    private fun editAndReschedule(t: (AppSettings) -> AppSettings): Job = viewModelScope.launch {
+        store.update(t)
+        val s = store.settings.first()
+        backup.scheduleAll(s.chargingOnly, s.overnightWindow())
     }
 
     fun setDeviceName(name: String): Job {

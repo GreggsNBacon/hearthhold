@@ -176,8 +176,9 @@ class SetupViewModel(
         return viewModelScope.launch {
             try {
                 settingsStore.update { it.copy(destination = destination) }
-                val chargingOnly = settingsStore.settings.first().chargingOnly
-                backup.scheduleAll(chargingOnly)
+                val saved = settingsStore.settings.first()
+                val chargingOnly = saved.chargingOnly
+                backup.scheduleAll(chargingOnly, saved.overnightWindow())
                 backup.runNow(chargingOnly)
                 _state.update { it.copy(finished = true) }
             } catch (e: CancellationException) {

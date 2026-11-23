@@ -9,6 +9,7 @@ import dev.photobackup.settings.KeystoreCredentialCipher
 import dev.photobackup.settings.SettingsStore
 import dev.photobackup.smb.SmbjRemoteStore
 import kotlinx.coroutines.flow.first
+import java.time.LocalTime
 import java.time.ZoneId
 
 /** Thrown by a runner when there is no drive or destination configured yet. */
@@ -31,6 +32,17 @@ object BackupRunnerFactory {
     }
 
     @Volatile var notifyOnComplete: suspend (Context) -> Boolean = defaultNotifyOnComplete
+
+    /** The overnight window when "Only back up overnight" is on, else null. */
+    val defaultOvernightWindow: suspend (Context) -> OvernightWindow? = { ctx ->
+        SettingsStore(ctx.applicationContext, KeystoreCredentialCipher()).settings.first().overnightWindow()
+    }
+
+    @Volatile var overnightWindow: suspend (Context) -> OvernightWindow? = defaultOvernightWindow
+
+    val defaultNow: () -> LocalTime = { LocalTime.now() }
+
+    @Volatile var now: () -> LocalTime = defaultNow
 }
 
 object LedgerDatabase {

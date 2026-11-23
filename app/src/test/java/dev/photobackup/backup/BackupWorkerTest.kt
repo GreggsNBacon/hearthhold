@@ -38,6 +38,8 @@ class BackupWorkerTest {
     private lateinit var app: Application
     private lateinit var repo: BackupStatusRepository
     private var notifyEnabled = true
+    private var window: OvernightWindow? = null
+    private var clockTime: java.time.LocalTime = java.time.LocalTime.of(12, 0)
     private var runner: BackupRunner = BackupRunner { _ -> BackupResult.Done(0, 0, 0) }
 
     @Before fun setUp() {
@@ -48,12 +50,16 @@ class BackupWorkerTest {
         BackupStatusRepository.provider = { repo }
         BackupRunnerFactory.create = { runner }
         BackupRunnerFactory.notifyOnComplete = { notifyEnabled }
+        BackupRunnerFactory.overnightWindow = { window }
+        BackupRunnerFactory.now = { clockTime }
     }
 
     @After fun tearDown() {
         BackupStatusRepository.provider = BackupStatusRepository.defaultProvider
         BackupRunnerFactory.create = BackupRunnerFactory.defaultCreate
         BackupRunnerFactory.notifyOnComplete = BackupRunnerFactory.defaultNotifyOnComplete
+        BackupRunnerFactory.overnightWindow = BackupRunnerFactory.defaultOvernightWindow
+        BackupRunnerFactory.now = BackupRunnerFactory.defaultNow
     }
 
     private fun runWorker(): ListenableWorker.Result = runBlocking {
@@ -345,5 +351,89 @@ class BackupWorkerTest {
         runner = BackupRunner { _ -> BackupResult.Done(2, 0, 0, bytesUploaded = 100) }
         assertEquals(ListenableWorker.Result.success(), runWorker())
         assertTrue(doneNotifications().isEmpty())
+    }
+
+    // --- Overnight window ---
+
+    private fun counting(): java.util.concurrent.atomic.AtomicInteger {
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        runner = BackupRunner { _ -> calls.incrementAndGet(); BackupResult.Done(1, 0, 0) }
+        return calls
+    }
+
+    private fun worker(vararg pairs: Pair<String, Any>) =
+        TestListenableWorkerBuilder<BackupWorker>(app).setInputData(androidx.work.workDataOf(*pairs)).build()
+
+    @Test fun automaticRunOutsideWindowWaitsWithoutTouchingTheDrive() {
+        val calls = counting()
+        window = OvernightWindow(1, 6); clockTime = java.time.LocalTime.of(14, 0)
+        runBlocking { repo.update { it.copy(lastRunMs = 42, lastError = "old problem") } }
+        assertEquals(ListenableWorker.Result.success(), runWorker())
+        assertEquals(0, calls.get())
+        val s = status()
+        assertEquals("Waiting for overnight window (1:00–6:00)", s.lastResult)
+        assertEquals(42L, s.lastRunMs)
+        assertEquals("old problem", s.lastError) // a real problem stays visible
+        assertFalse(s.inProgress)
+        // The new-media trigger too.
+        runBlocking { workerFor(false, isTrigger = true).doWork() }
+        assertEquals(0, calls.get())
+    }
+
+    @Test fun automaticRunInsideWindowRuns() {
+        val calls = counting()
+        window = OvernightWindow(23, 5); clockTime = java.time.LocalTime.of(2, 0)
+        runWorker()
+        assertEquals(1, calls.get())
+    }
+
+    @Test fun backUpNowAlwaysRuns() {
+        val calls = counting()
+        window = OvernightWindow(1, 6); clockTime = java.time.LocalTime.of(14, 0)
+        runBlocking { worker(BackupScheduler.KEY_MANUAL to true).doWork() }
+        assertEquals(1, calls.get())
+        // and runNow marks its work as manual
+        BackupScheduler.runNow(app, chargingOnly = false)
+        val info = WorkManager.getInstance(app).getWorkInfosForUniqueWork("pb_now").get().single()
+        val impl = WorkManager.getInstance(app) as androidx.work.impl.WorkManagerImpl
+        val spec = impl.workDatabase.workSpecDao().getWorkSpec(info.id.toString())!!
+        assertTrue(spec.input.getBoolean(BackupScheduler.KEY_MANUAL, false))
+    }
+
+    @Test fun windowOffRunsAnyTime() {
+        val calls = counting()
+        window = null; clockTime = java.time.LocalTime.of(14, 0)
+        runWorker()
+        assertEquals(1, calls.get())
+    }
+
+    private fun nightSpec(): androidx.work.impl.model.WorkSpec? {
+        val info = WorkManager.getInstance(app).getWorkInfosForUniqueWork(BackupScheduler.NIGHT).get()
+            .singleOrNull { !it.state.isFinished } ?: return null
+        val impl = WorkManager.getInstance(app) as androidx.work.impl.WorkManagerImpl
+        return impl.workDatabase.workSpecDao().getWorkSpec(info.id.toString())
+    }
+
+    @Test fun scheduleAllEnqueuesNightJobAtNextWindowStart() {
+        BackupScheduler.scheduleAll(
+            app, chargingOnly = true, night = OvernightWindow(1, 6), now = java.time.LocalTime.of(22, 0),
+        )
+        val spec = nightSpec()!!
+        assertEquals(java.time.Duration.ofHours(3).toMillis(), spec.initialDelay)
+        assertTrue(spec.input.getBoolean(BackupScheduler.KEY_IS_NIGHT, false))
+        assertTrue(spec.constraints.requiresCharging())
+        // Turning the window off cancels it.
+        BackupScheduler.scheduleAll(app, chargingOnly = true, night = null)
+        assertNull(nightSpec())
+    }
+
+    @Test fun nightJobReschedulesItselfForTheNextNight() {
+        window = OvernightWindow(1, 6); clockTime = java.time.LocalTime.of(1, 30)
+        val calls = counting()
+        runBlocking {
+            worker(BackupScheduler.KEY_IS_NIGHT to true, BackupScheduler.KEY_CHARGING_ONLY to false).doWork()
+        }
+        assertEquals(1, calls.get())
+        assertEquals(java.time.Duration.ofMinutes(23 * 60 + 30).toMillis(), nightSpec()!!.initialDelay)
     }
 }

@@ -80,6 +80,7 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
             HorizontalDivider()
             SwitchRow("Only back up while charging", s.chargingOnly) { viewModel.setChargingOnly(it) }
             SwitchRow("Notify when a backup finishes", s.notifyOnComplete) { viewModel.setNotifyOnComplete(it) }
+            Overnight(s, viewModel)
             HorizontalDivider()
             Stepper(
                 label = "Files at once (faster, but busier router)",
@@ -104,6 +105,18 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
         Text(label, Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = onChange)
     }
+}
+
+@Composable
+private fun Overnight(s: AppSettings, vm: SettingsViewModel) {
+    SwitchRow("Only back up overnight", s.overnightOnly) { vm.setOvernightOnly(it) }
+    if (!s.overnightOnly) return
+    Text(
+        "Automatic backups wait for this window. \"Back up now\" always runs.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Stepper("From", s.overnightStartHour, 0..23, { "$it:00" }) { vm.setOvernightHours(it, s.overnightEndHour) }
+    Stepper("Until", s.overnightEndHour, 0..23, { "$it:00" }) { vm.setOvernightHours(s.overnightStartHour, it) }
 }
 
 /** A label with − value + buttons; [onChange] gets the new value, always inside [range]. */

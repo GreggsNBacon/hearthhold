@@ -52,6 +52,9 @@ class SettingsStore internal constructor(
             loopVideos = p[LOOP_VIDEOS] ?: true,
             notifyOnComplete = p[NOTIFY_ON_COMPLETE] ?: true,
             parallelUploads = (p[PARALLEL_UPLOADS] ?: 1).coerceIn(1, BackupEngine.MAX_PARALLEL),
+            overnightOnly = p[OVERNIGHT_ONLY] ?: false,
+            overnightStartHour = (p[OVERNIGHT_START] ?: 1).coerceIn(0, 23),
+            overnightEndHour = (p[OVERNIGHT_END] ?: 6).coerceIn(0, 23),
         )
     }
 
@@ -74,6 +77,9 @@ class SettingsStore internal constructor(
         p[LOOP_VIDEOS] = s.loopVideos
         p[NOTIFY_ON_COMPLETE] = s.notifyOnComplete
         p[PARALLEL_UPLOADS] = s.parallelUploads
+        p[OVERNIGHT_ONLY] = s.overnightOnly
+        p[OVERNIGHT_START] = s.overnightStartHour
+        p[OVERNIGHT_END] = s.overnightEndHour
     }
 
     private fun <T> MutablePreferences.putOrRemove(key: Preferences.Key<T>, value: T?) {
@@ -95,5 +101,8 @@ class SettingsStore internal constructor(
         val LOOP_VIDEOS = booleanPreferencesKey("loop_videos")
         val NOTIFY_ON_COMPLETE = booleanPreferencesKey("notify_on_complete")
         val PARALLEL_UPLOADS = intPreferencesKey("parallel_uploads")
+        val OVERNIGHT_ONLY = booleanPreferencesKey("overnight_only")
+        val OVERNIGHT_START = intPreferencesKey("overnight_start_hour")
+        val OVERNIGHT_END = intPreferencesKey("overnight_end_hour")
     }
 }

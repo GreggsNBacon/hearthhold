@@ -57,17 +57,32 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         val repo = BackupStatusRepository.get(applicationContext)
         val chargingOnly = inputData.getBoolean(BackupScheduler.KEY_CHARGING_ONLY, false)
         val isTrigger = inputData.getBoolean(BackupScheduler.KEY_IS_TRIGGER, false)
+        val manual = inputData.getBoolean(BackupScheduler.KEY_MANUAL, false)
+        val isNight = inputData.getBoolean(BackupScheduler.KEY_IS_NIGHT, false)
+        // Read once up front. Unknown (settings unreadable) counts as "no window": better to back up than not.
+        val windowRead = if (manual) null else runCatching { BackupRunnerFactory.overnightWindow(applicationContext) }
+        val window = windowRead?.getOrNull()
         try {
             if (!BackupLock.mutex.tryLock()) return Result.success() // another run is active; leave status alone
             try {
+                // Automatic runs wait for the overnight window; "Back up now" always runs. No drive access here.
+                if (window != null && !window.contains(BackupRunnerFactory.now())) {
+                    idle(repo) { it.copy(lastResult = BackupWindow.waitingMessage(window)) }
+                    return Result.success()
+                }
                 return runBackup(repo)
             } finally {
                 BackupLock.mutex.unlock()
             }
         } finally {
-            // Last on purpose: REPLACE on pb_trigger cancels this very worker when it is the trigger.
+            // Last on purpose: REPLACE on pb_trigger / pb_night cancels this very worker when it is that job.
             try {
                 BackupScheduler.enqueueTrigger(applicationContext, chargingOnly, replace = isTrigger)
+                if (isNight && windowRead != null && windowRead.isSuccess) {
+                    // Next night (or cancel, if the window was switched off meanwhile).
+                    val next = window?.let { BackupWindow.untilNextStart(BackupRunnerFactory.now(), it.start) }
+                    BackupScheduler.enqueueNight(applicationContext, chargingOnly, window, next)
+                }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
             }

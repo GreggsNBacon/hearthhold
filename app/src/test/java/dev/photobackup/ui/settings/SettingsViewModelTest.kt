@@ -64,6 +64,28 @@ class SettingsViewModelTest {
         assertEquals(false, settings.settings.first().notifyOnComplete)
     }
 
+    @Test fun overnightToggleSavesAndReschedules() = runBlocking {
+        val vm = vm()
+        vm.setOvernightOnly(true).join()
+        assertEquals(true, settings.settings.first().overnightOnly)
+        vm.setOvernightHours(23, 5).join()
+        vm.setOvernightHours(24, -1).join() // ignored: out of range
+        val s = settings.settings.first()
+        assertEquals(23, s.overnightStartHour)
+        assertEquals(5, s.overnightEndHour)
+        vm.setOvernightOnly(false).join()
+        assertEquals(
+            listOf("scheduleAll(false, night=1-6)", "scheduleAll(false, night=23-5)", "scheduleAll(false)"),
+            backup.calls,
+        )
+    }
+
+    @Test fun chargingToggleKeepsTheNightSchedule() = runBlocking {
+        settings.update { it.copy(overnightOnly = true) }
+        vm().setChargingOnly(true).join()
+        assertEquals(listOf("scheduleAll(true, night=1-6)"), backup.calls)
+    }
+
     @Test fun parallelUploadsIsClampedTo1To4() = runBlocking {
         val vm = vm()
         vm.setParallelUploads(3).join()

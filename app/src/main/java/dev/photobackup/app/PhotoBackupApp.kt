@@ -13,6 +13,7 @@ import dev.photobackup.backup.BackupNotifications
 import dev.photobackup.backup.BackupScheduler
 import dev.photobackup.backup.BackupStatusRepository
 import dev.photobackup.backup.LedgerDatabase
+import dev.photobackup.backup.OvernightWindow
 import dev.photobackup.discovery.HostDiscovery
 import dev.photobackup.discovery.ShareLister
 import dev.photobackup.freeup.FreeUpRepository
@@ -50,7 +51,8 @@ import java.time.ZoneId
 
 /** What the UI needs from the background scheduler; tests record the calls. */
 interface BackupControl {
-    fun scheduleAll(chargingOnly: Boolean)
+    /** [night]: the overnight window when "Only back up overnight" is on, else null. */
+    fun scheduleAll(chargingOnly: Boolean, night: OvernightWindow?)
     fun runNow(chargingOnly: Boolean)
 }
 
@@ -89,7 +91,8 @@ class AppContainer(context: Context) {
     val storeFactory: (SmbConfig) -> RemoteStore = { SmbjRemoteStore(it) }
 
     val backup: BackupControl = object : BackupControl {
-        override fun scheduleAll(chargingOnly: Boolean) = BackupScheduler.scheduleAll(app, chargingOnly)
+        override fun scheduleAll(chargingOnly: Boolean, night: OvernightWindow?) =
+            BackupScheduler.scheduleAll(app, chargingOnly, night)
         override fun runNow(chargingOnly: Boolean) = BackupScheduler.runNow(app, chargingOnly)
     }
 

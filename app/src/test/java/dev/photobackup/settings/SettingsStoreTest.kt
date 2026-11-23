@@ -46,6 +46,17 @@ class SettingsStoreTest {
         assertTrue(s.folders.camera)
         assertTrue(s.notifyOnComplete)
         assertEquals(1, s.parallelUploads)
+        assertFalse(s.overnightOnly)
+        assertEquals(1, s.overnightStartHour)
+        assertEquals(6, s.overnightEndHour)
+        assertNull(s.overnightWindow())
+    }
+
+    @Test fun overnightWindowPersists() = runBlocking {
+        val (store, _) = newStore()
+        store.update { it.copy(overnightOnly = true, overnightStartHour = 23, overnightEndHour = 5) }
+        val s = store.settings.first()
+        assertEquals(dev.photobackup.backup.OvernightWindow(23, 5), s.overnightWindow())
     }
 
     @Test fun parallelUploadsPersistsAndIsClampedOnRead() = runBlocking {
