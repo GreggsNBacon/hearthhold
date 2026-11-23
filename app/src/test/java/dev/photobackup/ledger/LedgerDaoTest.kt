@@ -78,4 +78,41 @@ class LedgerDaoTest {
         assertEquals("x\\y.jpg", dao.get(2)!!.movingTo)
         assertEquals(BackupStatus.FAILED, dao.get(3)!!.status)
     }
+
+    @Test fun setLastErrorTouchesOnlyTheErrorColumn() = runBlocking {
+        dao.upsert(entry(1, BackupStatus.REMOVED_FROM_PHONE).copy(remotePath = "a\\b.jpg", localSha256 = "s"))
+        dao.setLastError(1, "oops", 77)
+        val e = dao.get(1)!!
+        assertEquals("oops", e.lastError)
+        assertEquals(77L, e.updatedAtMs)
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, e.status)
+        assertEquals("a\\b.jpg", e.remotePath)
+        assertEquals("s", e.localSha256)
+    }
+
+    @Test fun beginMoveOnlyWhenNoMoveIsRecordedAndThePathIsUnchanged() = runBlocking {
+        dao.upsert(entry(1, BackupStatus.VERIFIED).copy(remotePath = "a\\x.jpg"))
+        dao.upsert(entry(2, BackupStatus.VERIFIED).copy(remotePath = "a\\y.jpg", movingTo = "c\\y.jpg"))
+        dao.upsert(entry(3, BackupStatus.VERIFIED).copy(remotePath = "a\\z (1).jpg"))
+        assertEquals(true, dao.beginMove(1, "a\\x.jpg", "c\\x.jpg", 5))
+        assertEquals(false, dao.beginMove(2, "a\\y.jpg", "d\\y.jpg", 5))
+        assertEquals(false, dao.beginMove(3, "a\\z.jpg", "c\\z.jpg", 5))
+        assertEquals(false, dao.beginMove(4, "a\\w.jpg", "c\\w.jpg", 5))
+        assertEquals("c\\x.jpg", dao.get(1)!!.movingTo)
+        assertEquals("c\\y.jpg", dao.get(2)!!.movingTo)
+        assertNull(dao.get(3)!!.movingTo)
+    }
+
+    @Test fun endMoveSetsOnlyPathMarkerAndError() = runBlocking {
+        dao.upsert(entry(1, BackupStatus.VERIFIED).copy(remotePath = "a\\x.jpg", movingTo = "c\\x.jpg", lastError = "e"))
+        dao.markRemovedIfSettledCount(1, 1) // refused: a move is recorded
+        dao.upsert(dao.get(1)!!.copy(status = BackupStatus.REMOVED_FROM_PHONE))
+        dao.endMove(1, "c\\x.jpg", null, null, 9)
+        val e = dao.get(1)!!
+        assertEquals("c\\x.jpg", e.remotePath)
+        assertNull(e.movingTo)
+        assertNull(e.lastError)
+        assertEquals(9L, e.updatedAtMs)
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, e.status)
+    }
 }

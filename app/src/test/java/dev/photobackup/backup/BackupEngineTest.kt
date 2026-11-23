@@ -42,6 +42,25 @@ class MemoryLedger : LedgerStore {
         }
         return changed
     }
+    override suspend fun setLastError(mediaId: Long, error: String?, nowMs: Long) {
+        rows.update { m -> m[mediaId]?.let { m + (mediaId to it.copy(lastError = error, updatedAtMs = nowMs)) } ?: m }
+    }
+    override suspend fun beginMove(mediaId: Long, from: String, target: String, nowMs: Long): Boolean {
+        var changed = false
+        rows.update { m ->
+            val e = m[mediaId]
+            changed = e != null && e.movingTo == null && e.partPath == null && e.remotePath == from
+            if (changed) m + (mediaId to e!!.copy(movingTo = target, updatedAtMs = nowMs)) else m
+        }
+        return changed
+    }
+    override suspend fun endMove(mediaId: Long, remotePath: String?, movingTo: String?, lastError: String?, nowMs: Long) {
+        rows.update { m ->
+            m[mediaId]?.let {
+                m + (mediaId to it.copy(remotePath = remotePath, movingTo = movingTo, lastError = lastError, updatedAtMs = nowMs))
+            } ?: m
+        }
+    }
     override fun observeCounts(): Flow<Map<BackupStatus, Int>> =
         rows.map { m -> m.values.groupingBy { it.status }.eachCount() }
     override fun observeAll(): Flow<List<LedgerEntry>> =

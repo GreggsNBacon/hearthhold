@@ -287,10 +287,129 @@ class BackupEngineMoveTest {
         engine(store, ledger, toDog).run(emptyList())
         val e = ledger.get(1)!!
         assertEquals("$camera\\IMG.jpg", e.remotePath)
-        assertNull(e.movingTo)
+        // The conflict stays recorded (movingTo kept) until one copy is gone, so no later run duplicates the file.
+        assertEquals("$dog\\IMG.jpg", e.movingTo)
         assertEquals(BackupEngine.MOVE_CONFLICT_ERROR, e.lastError)
         assertArrayEquals(mine, store.files["$camera\\IMG.jpg"])
         assertArrayEquals(other, store.files["$dog\\IMG.jpg"])
+    }
+
+    @Test fun conflictIsNotMovedAgainOnLaterRuns() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(100)
+        seed(store, ledger, row(1, "$camera\\IMG.jpg", movingTo = "$dog\\IMG.jpg"), data)
+        store.mkdirs(dog); store.files["$dog\\IMG.jpg"] = data
+        repeat(3) {
+            val r = engine(store, ledger, toDog).run(emptyList()) as BackupResult.Done
+            assertEquals(0, r.moved)
+        }
+        assertEquals(setOf("$camera\\IMG.jpg", "$dog\\IMG.jpg"), store.files.keys)
+        assertEquals(BackupEngine.MOVE_CONFLICT_ERROR, ledger.get(1)!!.lastError)
+        assertEquals("$camera\\IMG.jpg", ledger.get(1)!!.remotePath)
+    }
+
+    @Test fun conflictSettlesOnceOwnerDeletesTheNewCopy() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(100)
+        seed(store, ledger, row(1, "$camera\\IMG.jpg", movingTo = "$dog\\IMG.jpg"), data)
+        store.mkdirs(dog); store.files["$dog\\IMG.jpg"] = data
+        engine(store, ledger, toDog).run(emptyList())
+        store.files.remove("$dog\\IMG.jpg") // the owner removes the extra copy on the PC
+        val r = engine(store, ledger, toDog).run(emptyList()) as BackupResult.Done
+        assertEquals(1, r.moved)
+        assertEquals(setOf("$dog\\IMG.jpg"), store.files.keys)
+        val e = ledger.get(1)!!
+        assertEquals("$dog\\IMG.jpg", e.remotePath)
+        assertNull(e.movingTo)
+        assertNull(e.lastError)
+    }
+
+    @Test fun conflictSettlesOnceOwnerDeletesTheOldCopy() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(100)
+        seed(store, ledger, row(1, "$camera\\IMG.jpg", movingTo = "$dog\\IMG.jpg"), data)
+        store.mkdirs(dog); store.files["$dog\\IMG.jpg"] = data
+        engine(store, ledger, toDog).run(emptyList())
+        store.files.remove("$camera\\IMG.jpg")
+        engine(store, ledger, toDog).run(emptyList())
+        val e = ledger.get(1)!!
+        assertEquals("$dog\\IMG.jpg", e.remotePath)
+        assertNull(e.movingTo)
+        assertNull(e.lastError)
+        assertEquals(setOf("$dog\\IMG.jpg"), store.files.keys)
+    }
+
+    // --- Concurrent ledger writes (Free up does not take BackupLock) ---
+
+    @Test fun moveFailureDoesNotUndoAConcurrentFreeUpMark() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger()
+        seed(store, ledger, row(1, "$camera\\IMG.jpg"))
+        store.failOn = { op, _ ->
+            if (op == "mkdirs") {
+                runBlocking { assertTrue(ledger.markRemovedIfSettled(1, 99)) }
+                IOException("x")
+            } else null
+        }
+        engine(store, ledger, toDog).run(emptyList())
+        val e = ledger.get(1)!!
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, e.status)
+        assertEquals(BackupEngine.MOVE_ERROR, e.lastError)
+        assertEquals("$camera\\IMG.jpg", e.remotePath)
+        assertNull(e.movingTo)
+    }
+
+    @Test fun successfulMoveKeepsAConcurrentFreeUpMark() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(100)
+        seed(store, ledger, row(1, "$camera\\IMG.jpg"), data)
+        store.failOn = { op, _ ->
+            if (op == "mkdirs") runBlocking { ledger.markRemovedIfSettled(1, 99) }
+            null
+        }
+        val r = engine(store, ledger, toDog).run(emptyList()) as BackupResult.Done
+        assertEquals(1, r.moved)
+        val e = ledger.get(1)!!
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, e.status)
+        assertEquals("$dog\\IMG.jpg", e.remotePath)
+        assertArrayEquals(data, store.files["$dog\\IMG.jpg"])
+    }
+
+    /** The row was re-pointed (e.g. a re-upload) after reconcile read it: the stale path must not be moved. */
+    @Test fun rowChangedAfterReconcileReadIsNotMoved() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger(); val old = bytes(100, 1); val fresh = bytes(100, 2)
+        seed(store, ledger, row(1, "$camera\\IMG.jpg"), old)
+        store.failOn = { op, _ ->
+            if (op == "mkdirs") runBlocking {
+                store.files["$camera\\IMG (1).jpg"] = fresh
+                ledger.upsert(ledger.get(1)!!.copy(remotePath = "$camera\\IMG (1).jpg"))
+            }
+            null
+        }
+        val r = engine(store, ledger, toDog).run(emptyList()) as BackupResult.Done
+        assertEquals(0, r.moved)
+        assertArrayEquals(old, store.files["$camera\\IMG.jpg"])
+        assertArrayEquals(fresh, store.files["$camera\\IMG (1).jpg"])
+        assertNull(store.files["$dog\\IMG.jpg"])
+        val e = ledger.get(1)!!
+        assertEquals("$camera\\IMG (1).jpg", e.remotePath)
+        assertNull(e.movingTo)
+    }
+
+    // --- Failed moves are reported ---
+
+    @Test fun failedMovesAreCountedInTheResult() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger()
+        seed(store, ledger, row(1, "$camera\\A.jpg", name = "A.jpg"))
+        seed(store, ledger, row(2, "$camera\\B.jpg", name = "B.jpg"))
+        seed(store, ledger, row(3, "$camera\\C.jpg", name = "C.jpg"))
+        store.failOn = { op, path -> if (op == "rename" && !path.endsWith("C.jpg")) IOException("x") else null }
+        val r = engine(store, ledger, toDog).run(emptyList()) as BackupResult.Done
+        assertEquals(1, r.moved)
+        assertEquals(2, r.moveFailed)
+    }
+
+    @Test fun unsettledRecoveriesCountAsCouldNotMove() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger()
+        ledger.upsert(row(1, "$camera\\IMG.jpg", movingTo = "$dog\\IMG.jpg")) // neither path exists
+        val r = engine(store, ledger, toDog).run(emptyList()) as BackupResult.Done
+        assertEquals(0, r.moved)
+        assertEquals(1, r.moveFailed)
     }
 
     @Test fun recoveryNewPathWithOtherSizeLeavesRowAndSetsError() = runBlocking {

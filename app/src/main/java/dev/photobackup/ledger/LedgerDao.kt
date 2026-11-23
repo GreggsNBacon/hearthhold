@@ -36,6 +36,24 @@ interface LedgerDao : LedgerStore {
     override suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long): Boolean =
         markRemovedIfSettledCount(mediaId, nowMs) > 0
 
+    @Query("UPDATE LedgerEntry SET lastError = :error, updatedAtMs = :nowMs WHERE mediaId = :mediaId")
+    override suspend fun setLastError(mediaId: Long, error: String?, nowMs: Long)
+
+    @Query(
+        "UPDATE LedgerEntry SET movingTo = :target, updatedAtMs = :nowMs " +
+            "WHERE mediaId = :mediaId AND movingTo IS NULL AND partPath IS NULL AND remotePath = :from"
+    )
+    suspend fun beginMoveCount(mediaId: Long, from: String, target: String, nowMs: Long): Int
+
+    override suspend fun beginMove(mediaId: Long, from: String, target: String, nowMs: Long): Boolean =
+        beginMoveCount(mediaId, from, target, nowMs) > 0
+
+    @Query(
+        "UPDATE LedgerEntry SET remotePath = :remotePath, movingTo = :movingTo, lastError = :lastError, " +
+            "updatedAtMs = :nowMs WHERE mediaId = :mediaId"
+    )
+    override suspend fun endMove(mediaId: Long, remotePath: String?, movingTo: String?, lastError: String?, nowMs: Long)
+
     @Query("SELECT status AS status, COUNT(*) AS n FROM LedgerEntry GROUP BY status")
     fun observeStatusCounts(): Flow<List<StatusCount>>
 

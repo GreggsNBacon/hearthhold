@@ -16,6 +16,21 @@ interface LedgerStore {
      * null). Returns whether it changed. A read-then-upsert could drop a movingTo marker set in between.
      */
     suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long): Boolean
+
+    /**
+     * The targeted writes below change only the columns they name, so a concurrent write to another column (e.g.
+     * Free up's [markRemovedIfSettled]) is never undone by a whole-row upsert of a row read earlier.
+     */
+    suspend fun setLastError(mediaId: Long, error: String?, nowMs: Long)
+
+    /**
+     * Records a drive move about to happen: sets movingTo to [target] only if no move is recorded and the row still
+     * points at [from]. Returns whether it changed; false means the row changed meanwhile and must not be moved.
+     */
+    suspend fun beginMove(mediaId: Long, from: String, target: String, nowMs: Long): Boolean
+
+    /** Sets remotePath, movingTo and lastError only (the end of a move, or its recovery). */
+    suspend fun endMove(mediaId: Long, remotePath: String?, movingTo: String?, lastError: String?, nowMs: Long)
     fun observeCounts(): Flow<Map<BackupStatus, Int>>
     fun observeAll(): Flow<List<LedgerEntry>>
 }

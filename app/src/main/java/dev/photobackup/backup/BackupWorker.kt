@@ -47,9 +47,11 @@ object BackupMessages {
     /** Shown while drive files are being moved to their folders. */
     fun moving(n: Int): String = if (n == 1) "Moving 1 file" else "Moving $n files"
 
-    /** The "last result" line: uploads and failures, plus moved files when there were any. */
-    fun summary(uploaded: Int, failed: Int, moved: Int): String =
-        "Backed up $uploaded, failed $failed" + if (moved > 0) " · $moved moved" else ""
+    /** The "last result" line: uploads and failures, plus moved files and files that couldn't move, when any. */
+    fun summary(uploaded: Int, failed: Int, moved: Int, moveFailed: Int = 0): String =
+        "Backed up $uploaded, failed $failed" +
+            (if (moved > 0) " · $moved moved" else "") +
+            (if (moveFailed > 0) " · $moveFailed couldn't move" else "")
 
     /** "N files failed": the reason for each is on its ! badge in the Gallery. */
     fun failed(n: Int): String = if (n == 1) "1 file failed — tap its ! for why" else "$n files failed — tap ! for why"
@@ -194,7 +196,7 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 idle(repo) {
                     it.copy(
                         lastRunMs = now,
-                        lastResult = BackupMessages.summary(r.uploaded, r.failed, r.moved),
+                        lastResult = BackupMessages.summary(r.uploaded, r.failed, r.moved, r.moveFailed),
                         lastError = err,
                         driveFreeBytes = r.driveFreeBytes ?: it.driveFreeBytes,
                     )

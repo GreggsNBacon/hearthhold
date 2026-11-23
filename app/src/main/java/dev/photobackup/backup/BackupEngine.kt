@@ -165,7 +165,7 @@ class BackupEngine(
 
         // 2b. Move drive files into their desired folder (every run, even with nothing to upload), after finishing
         // any move a crash interrupted.
-        val moved = try {
+        val moves = try {
             reconcile(recoverMoves(), onMoving)
         } catch (e: RemoteException) {
             return@withContext BackupResult.Stopped(e)
@@ -198,7 +198,8 @@ class BackupEngine(
             // Every reservation has been settled, so free = free at connect minus what this run uploaded.
             BackupResult.Done(
                 state.uploaded, state.skipped, state.failed, state.bytesUploaded,
-                driveFreeBytes = state.free, noRoom = state.noRoom, moved = moved,
+                driveFreeBytes = state.free, noRoom = state.noRoom, moved = moves.moved,
+                moveFailed = moves.failed,
             )
         }
     }
@@ -309,7 +310,7 @@ class BackupEngine(
                 oldExists = from != null && store.stat(from)?.isDirectory == false
             } catch (e: IOException) {
                 if (e is RemoteException) throw e
-                ledger.upsert(row.copy(lastError = MOVE_ERROR, updatedAtMs = clock()))
+                ledger.setLastError(row.mediaId, MOVE_ERROR, clock())
                 unsettled += row.mediaId
                 synchronized(reserved) { reserved += key(to) }
                 continue
@@ -317,7 +318,9 @@ class BackupEngine(
             val priorMoveError = row.lastError == MOVE_ERROR || row.lastError == MOVE_CONFLICT_ERROR
             val keptError = if (priorMoveError) null else row.lastError
             val fixed = when {
-                oldExists && newEntry != null -> row.copy(movingTo = null, lastError = MOVE_CONFLICT_ERROR)
+                // movingTo stays: the conflict is re-checked every run until the owner removes one copy, so no
+                // later move makes a third copy and the name the other copy holds stays reserved.
+                oldExists && newEntry != null -> row.copy(lastError = MOVE_CONFLICT_ERROR)
                 oldExists -> row.copy(movingTo = null, lastError = keptError)
                 newEntry != null && newEntry.sizeBytes == row.sizeBytes ->
                     row.copy(remotePath = to, movingTo = null, lastError = keptError)
@@ -325,7 +328,7 @@ class BackupEngine(
             }
             if (fixed.lastError == MOVE_CONFLICT_ERROR || fixed.lastError == MOVE_ERROR) unsettled += row.mediaId
             fixed.movingTo?.let { synchronized(reserved) { reserved += key(it) } }
-            ledger.upsert(fixed.copy(updatedAtMs = clock()))
+            ledger.endMove(row.mediaId, fixed.remotePath, fixed.movingTo, fixed.lastError, clock())
         }
         return unsettled
     }
@@ -333,9 +336,10 @@ class BackupEngine(
     /**
      * Moves each VERIFIED / REMOVED_FROM_PHONE drive file whose folder segment (right after `<destination>\<device>`)
      * differs, ignoring case, from its desired folder. Year and file name stay as recorded. Rows not under the current
-     * `<destination>\<device>\` are never moved. Returns how many moved. A [RemoteException] stops the run.
+     * `<destination>\<device>\` are never moved. Returns how many moved and how many failed to. A [RemoteException]
+     * stops the run.
      */
-    private suspend fun reconcile(skip: Set<Long>, onMoving: (Int) -> Unit): Int {
+    private suspend fun reconcile(skip: Set<Long>, onMoving: (Int) -> Unit): Moves {
         val root = DrivePaths.deviceRoot(settings.destination, settings.deviceName)
         val rows = (ledger.byStatus(BackupStatus.VERIFIED) + ledger.byStatus(BackupStatus.REMOVED_FROM_PHONE))
             .sortedBy { it.mediaId }
@@ -351,22 +355,34 @@ class BackupEngine(
         }
         if (todo.isNotEmpty()) onMoving(todo.size)
         var moved = 0
+        var failed = skip.size
         var pauseFirst = false
         for ((row, file, desired) in todo) {
             coroutineContext.ensureActive()
             if (pauseFirst && itemPauseMs > 0) pause(itemPauseMs)
             pauseFirst = true
-            if (moveOne(row, row.remotePath!!, "$root\\$desired\\${file.year}", file.name)) moved++
+            when (moveOne(row, row.remotePath!!, "$root\\$desired\\${file.year}", file.name)) {
+                MoveOutcome.MOVED -> moved++
+                MoveOutcome.FAILED -> failed++
+                MoveOutcome.SKIPPED -> {}
+            }
         }
-        return moved
+        return Moves(moved, failed)
     }
+
+    /** [failed] counts this run's failed moves plus interrupted moves recovery could not settle. */
+    private class Moves(val moved: Int, val failed: Int)
+
+    private enum class MoveOutcome { MOVED, FAILED, SKIPPED }
 
     /**
      * mkdirs, reserve a free name (clash scheme, never an existing name), record movingTo, rename, then record the new
      * path. On failure the file stays where it was: movingTo is cleared only once a stat confirms the file is still at
-     * its recorded path (otherwise the next run's recovery settles it), and the row gets [MOVE_ERROR].
+     * its recorded path (otherwise the next run's recovery settles it), and the row gets [MOVE_ERROR]. Every ledger
+     * write is a targeted update, so a concurrent change to another column (Free up's markRemoved) is never undone. A
+     * row whose path or marker changed after reconcile read it is skipped untouched (the next run plans it afresh).
      */
-    private suspend fun moveOne(row: LedgerEntry, from: String, dir: String, name: String): Boolean {
+    private suspend fun moveOne(row: LedgerEntry, from: String, dir: String, name: String): MoveOutcome {
         var target: String? = null
         var renameTried = false
         var keepReserved = false
@@ -374,21 +390,19 @@ class BackupEngine(
             store.mkdirs(dir)
             target = reserveFreeName(dir, name)
             if (target == null) {
-                ledger.upsert(row.copy(lastError = MOVE_ERROR, updatedAtMs = clock()))
-                return false
+                ledger.setLastError(row.mediaId, MOVE_ERROR, clock())
+                return MoveOutcome.FAILED
             }
-            // Re-read so a status change made meanwhile (e.g. Free up's markRemoved) isn't overwritten.
-            ledger.upsert((ledger.get(row.mediaId) ?: row).copy(movingTo = target, updatedAtMs = clock()))
+            if (!ledger.beginMove(row.mediaId, from, target, clock())) return MoveOutcome.SKIPPED
             renameTried = true
             store.rename(from, target)
-            val now = ledger.get(row.mediaId) ?: row // keep any change made meanwhile (e.g. status)
-            ledger.upsert(now.copy(remotePath = target, movingTo = null, lastError = null, updatedAtMs = clock()))
-            return true
+            ledger.endMove(row.mediaId, remotePath = target, movingTo = null, lastError = null, nowMs = clock())
+            return MoveOutcome.MOVED
         } catch (e: IOException) {
             if (e is RemoteException) throw e
             if (!renameTried) {
-                ledger.upsert(row.copy(lastError = MOVE_ERROR, updatedAtMs = clock()))
-                return false
+                ledger.setLastError(row.mediaId, MOVE_ERROR, clock())
+                return MoveOutcome.FAILED
             }
             val stillThere = try {
                 store.stat(from)?.isDirectory == false
@@ -398,16 +412,14 @@ class BackupEngine(
             }
             // Still recorded in movingTo: keep the name reserved for the rest of the run, as recovery does.
             if (!stillThere) keepReserved = true
-            val now = ledger.get(row.mediaId) ?: row
-            ledger.upsert(
-                now.copy(
-                    remotePath = from,
-                    movingTo = if (stillThere) null else target,
-                    lastError = MOVE_ERROR,
-                    updatedAtMs = clock(),
-                )
+            ledger.endMove(
+                row.mediaId,
+                remotePath = from,
+                movingTo = if (stillThere) null else target,
+                lastError = MOVE_ERROR,
+                nowMs = clock(),
             )
-            return false
+            return MoveOutcome.FAILED
         } finally {
             if (!keepReserved) target?.let { release(it) }
         }
