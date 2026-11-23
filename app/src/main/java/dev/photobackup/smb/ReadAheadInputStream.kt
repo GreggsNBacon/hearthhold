@@ -37,11 +37,14 @@ class ReadAheadInputStream(
 ) : InputStream() {
     /**
      * One scheduled read. [started] is decided under [lock] (never from FutureTask state, which is still NEW while the
-     * callable runs); [done] is counted down once the callable has finished or been skipped.
+     * callable runs); [done] is counted down once the callable has finished or been skipped. [dropped] is set, under
+     * [lock], only on a chunk that had not started: it then never starts, so it can be forgotten at once (a task
+     * cancelled before it ran never counts [done] down).
      */
     private class Chunk(val position: Long) {
         val lock = Any()
         var started = false
+        var dropped = false
         val done = CountDownLatch(1)
         lateinit var task: FutureTask<Pair<ByteArray, Int>>
     }
@@ -61,17 +64,17 @@ class ReadAheadInputStream(
 
     private fun fill() {
         if (closed) return
-        tracked.removeAll { it.done.count == 0L }
+        tracked.removeAll { it.done.count == 0L || synchronized(it.lock) { it.dropped } }
         while (!ended && queue.size < depth) {
             val pos = nextFetch
             val chunk = Chunk(pos)
             val task = FutureTask {
                 try {
                     val go = synchronized(chunk.lock) {
-                        if (closed) false else { chunk.started = true; true }
+                        if (closed || chunk.dropped) false else { chunk.started = true; true }
                     }
                     if (!go) {
-                        ByteArray(0) to -1 // closed before this read began: it must never touch the handle
+                        ByteArray(0) to -1 // closed or dropped before this read began: never touch the handle
                     } else {
                         val buf = ByteArray(chunkSize)
                         buf to reader.read(pos, buf, chunkSize)
@@ -118,8 +121,15 @@ class ReadAheadInputStream(
     }
 
     private fun dropQueued() {
-        while (true) queue.pollFirst()?.task?.cancel(false) ?: break
+        while (true) {
+            val c = queue.pollFirst() ?: break
+            synchronized(c.lock) { if (!c.started) c.dropped = true }
+            c.task.cancel(false)
+        }
     }
+
+    /** Chunks still tracked for [close] (tests only). */
+    internal val trackedCount: Int get() = tracked.size
 
     override fun read(): Int {
         val one = ByteArray(1)

@@ -123,6 +123,38 @@ class ReadAheadInputStreamTest {
         assertEquals("never-started chunks must not reach the reader", listOf(0L, 65_536L), invoked.toList())
     }
 
+    /**
+     * Every read comes back short, so each one drops the 3 chunks queued behind it before they ever start. Those
+     * must be forgotten at once (not kept until close), and must never reach the reader if their task runs later.
+     */
+    @Test fun droppedChunksThatNeverStartedAreForgotten() {
+        val depth = 4
+        var submitted = 0
+        val deferred = ArrayList<Runnable>()
+        // The first task of each refill runs at once (it is the one read next); the rest wait and get dropped.
+        val executor = java.util.concurrent.Executor { r -> if (submitted++ % depth == 0) r.run() else deferred += r }
+        val calls = AtomicInteger()
+        val shortReader = ChunkReader { position, buf, _ ->
+            calls.incrementAndGet()
+            if (position >= data.size) return@ChunkReader -1
+            System.arraycopy(data, position.toInt(), buf, 0, 10)
+            10
+        }
+        val s = ReadAheadInputStream(shortReader, start = 0, chunkSize = 100, depth = depth, executor = executor)
+        val buf = ByteArray(10)
+        repeat(50) { i ->
+            assertEquals(10, s.read(buf, 0, 10))
+            assertArrayEquals(data.copyOfRange(i * 10, i * 10 + 10), buf)
+            assertTrue("tracked ${s.trackedCount} after read $i", s.trackedCount <= depth + 1)
+        }
+        val before = calls.get()
+        deferred.dropLast(depth - 1).forEach { it.run() } // dropped tasks that run late skip (the last 3 are live)
+        assertEquals(before, calls.get())
+        s.close() // returns: nothing started is left waiting
+        deferred.takeLast(depth - 1).forEach { it.run() } // queued at close: skip too
+        assertEquals(before, calls.get())
+    }
+
     @Test fun closedStreamThrows() {
         val s = ReadAheadInputStream(reader(), start = 0, chunkSize = 65_536, depth = 2, executor = pool)
         s.close()
