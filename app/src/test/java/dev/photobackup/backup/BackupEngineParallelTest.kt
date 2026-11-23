@@ -63,7 +63,7 @@ class BackupEngineParallelTest {
         val pauses = mutableListOf<Long>()
         val r = engine(store, ledger, data, parallel = 1, pauseMs = 500) { pauses += it }
             .run((1L..2L).map { media(it, 1000) })
-        assertEquals(BackupResult.Done(1, 1, 0, 1000), r)
+        assertEquals(BackupResult.Done(1, 1, 0, 1000), (r as BackupResult.Done).copy(driveFreeBytes = null))
         assertEquals(listOf(500L), pauses)
     }
 
@@ -107,7 +107,7 @@ class BackupEngineParallelTest {
         val r = engine(store, ledger, mapOf(1L to a, 2L to b), parallel = 2)
             .run(listOf(media(1, 4000, "IMG.jpg"), media(2, 4000, "IMG.jpg")))
         assertEquals(listOf(true, true), overlapped.toList()) // both were in flight at the same time
-        assertEquals(BackupResult.Done(2, 0, 0, 8000), r)
+        assertEquals(BackupResult.Done(2, 0, 0, 8000), (r as BackupResult.Done).copy(driveFreeBytes = null))
         val p1 = ledger.get(1)!!.remotePath!!; val p2 = ledger.get(2)!!.remotePath!!
         assertNotEquals(p1, p2)
         assertEquals(setOf("$dir\\IMG.jpg", "$dir\\IMG (1).jpg"), setOf(p1, p2))
@@ -163,7 +163,7 @@ class BackupEngineParallelTest {
         val r = engine(store, ledger, data, parallel = 3)
             .run((1L..4L).map { media(it, data.getValue(it).size.toLong()) }) { d, t, b -> calls += Triple(d, t, b) }
         val total = sizes.sum().toLong()
-        assertEquals(BackupResult.Done(4, 0, 0, total), r)
+        assertEquals(BackupResult.Done(4, 0, 0, total), (r as BackupResult.Done).copy(driveFreeBytes = null))
         assertEquals(Triple(4, 4, total), calls.last())
         assertTrue(calls.all { it.second == 4 })
         assertEquals(calls.map { it.first }.sorted(), calls.map { it.first }) // done never goes backwards

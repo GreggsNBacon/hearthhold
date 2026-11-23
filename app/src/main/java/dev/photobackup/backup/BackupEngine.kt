@@ -5,7 +5,10 @@ import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.ledger.LedgerRules
 import dev.photobackup.ledger.LedgerStore
 import dev.photobackup.media.PhoneMedia
+import dev.photobackup.smb.AccessDeniedException
 import dev.photobackup.smb.DriveInfo
+import dev.photobackup.smb.MSG_ACCESS_DENIED
+import dev.photobackup.smb.MSG_DRIVE_ERROR
 import dev.photobackup.smb.RemoteEntry
 import dev.photobackup.smb.RemoteException
 import dev.photobackup.smb.RemoteStore
@@ -19,6 +22,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
+import java.io.FileNotFoundException
 import java.io.IOException
 import java.io.InputStream
 import java.time.ZoneId
@@ -81,6 +85,23 @@ class BackupEngine(
         const val FAT32_ERROR = "too big for this drive's format (FAT32, 4 GB limit)"
         const val VERIFY_ERROR = "verification failed"
         const val SIZE_ERROR = "size mismatch"
+        const val NO_ROOM_ERROR = "Not enough free space on the drive for this file"
+        const val COPY_ERROR = "Copy to the drive failed — will try again"
+        const val PHONE_READ_ERROR = "Couldn't read the file on the phone — will try again"
+        const val NOT_FOUND_ERROR = "Folder or file not found on the drive — will try again"
+        const val NO_NAME_ERROR = "No free file name in the drive folder"
+        const val LEFTOVER_ERROR = "Couldn't remove an unfinished copy on the drive — will try again"
+
+        /**
+         * The text stored as an item's lastError (shown in the Gallery's failed-item dialog). Never the exception
+         * text: smbj messages carry the server path and NT status codes (the userMessage policy).
+         */
+        fun itemError(e: Throwable): String = when {
+            e is AccessDeniedException -> MSG_ACCESS_DENIED
+            e.message == MSG_DRIVE_ERROR -> MSG_DRIVE_ERROR
+            e is FileNotFoundException -> NOT_FOUND_ERROR
+            else -> COPY_ERROR
+        }
         const val DEFAULT_ITEM_PAUSE_MS = 2000L
         const val MAX_PARALLEL = 4
         private const val MAX_CLASH = 10_000
@@ -104,6 +125,7 @@ class BackupEngine(
         var uploaded = 0
         var skipped = 0
         var failed = 0
+        var noRoom = 0
         var bytesUploaded = 0L
     }
 
@@ -157,7 +179,11 @@ class BackupEngine(
             return@withContext BackupResult.Stopped(s.reason)
         }
         synchronized(state.lock) {
-            BackupResult.Done(state.uploaded, state.skipped, state.failed, state.bytesUploaded)
+            // Every reservation has been settled, so free = free at connect minus what this run uploaded.
+            BackupResult.Done(
+                state.uploaded, state.skipped, state.failed, state.bytesUploaded,
+                driveFreeBytes = state.free, noRoom = state.noRoom,
+            )
         }
     }
 
@@ -186,8 +212,16 @@ class BackupEngine(
                 Outcome.FAILED
             }
 
+            // Bigger than all the free space at connect: only this file can't go; smaller ones still might.
+            m.sizeBytes > state.freeAtConnect -> {
+                ledger.upsert(entry(m, BackupStatus.FAILED, error = NO_ROOM_ERROR))
+                synchronized(state.lock) { state.noRoom++ }
+                Outcome.FAILED
+            }
+
             else -> {
                 // Reserve this item's size before it starts, so parallel items can't jointly overfill the drive.
+                // Not fitting now means this run has used the space up: stop with "drive full".
                 val fits = synchronized(state.lock) {
                     (m.sizeBytes <= state.free).also { if (it) state.free -= m.sizeBytes }
                 }
@@ -227,7 +261,7 @@ class BackupEngine(
                 ledger.upsert(
                     row.copy(
                         status = BackupStatus.FAILED,
-                        lastError = "could not remove leftover $part: ${e.message}",
+                        lastError = LEFTOVER_ERROR,
                         updatedAtMs = clock(),
                     )
                 )
@@ -303,10 +337,10 @@ class BackupEngine(
                     }
                 }
             }
-            return Pick.Done(fail(m, "no free file name in $dir"))
+            return Pick.Done(fail(m, NO_NAME_ERROR))
         } catch (e: IOException) {
             if (e is RemoteException) throw e
-            return Pick.Done(fail(m, e.message))
+            return Pick.Done(fail(m, itemError(e)))
         }
     }
 
@@ -330,8 +364,8 @@ class BackupEngine(
         ledger.upsert(entry(m, BackupStatus.UPLOADING, part = part))
         val input = try {
             opener.open(m)
-        } catch (e: IOException) {
-            return fail(m, e.message)
+        } catch (_: IOException) {
+            return fail(m, PHONE_READ_ERROR)
         } ?: return missingOnPhone(m) // nothing written yet, so no .part to remove
 
         val ctx = coroutineContext
@@ -357,7 +391,7 @@ class BackupEngine(
                     ledger.upsert(entry(m, BackupStatus.PENDING))
                     throw e
                 }
-                return fail(m, e.message)
+                return fail(m, itemError(e))
             }
             // smbj can't report the file system, and FAT32 overflow surfaces as a plain IOException
             // or as DISK_FULL (Samba EFBIG / Windows FAT), so a failure right at the 4 GB mark means FAT32.
@@ -370,20 +404,21 @@ class BackupEngine(
             }
             if (fat32) return failAndRemovePart(m, part, FAT32_ERROR)
             if (e is RemoteException) throw e
-            return failAndRemovePart(m, part, e.message)
+            return failAndRemovePart(m, part, itemError(e))
         }
+
+        // The phone must have delivered exactly the size it reported. Checked before the rename, so a short copy
+        // never appears under the final name.
+        if (offered != m.sizeBytes) return failAndRemovePart(m, part, SIZE_ERROR)
 
         // 6. Rename onto the final name (fails rather than overwrite), then clear partPath.
         try {
             store.rename(part, final)
         } catch (e: IOException) {
             if (e is RemoteException) throw e
-            return failAndRemovePart(m, part, e.message)
+            return failAndRemovePart(m, part, itemError(e))
         }
         ledger.upsert(entry(m, BackupStatus.UPLOADING, sha = sha, remote = final))
-
-        // The phone must have delivered exactly the size it reported.
-        if (offered != m.sizeBytes) return failAndRemoveFinal(m, final, SIZE_ERROR)
 
         // 7. Verify by reading the copy back.
         val remoteSha = try {
@@ -391,7 +426,7 @@ class BackupEngine(
         } catch (e: IOException) {
             if (e is RemoteException) throw e
             // Copy left in place unverified; a later run adopts it if it hashes correctly.
-            return fail(m, e.message, remote = final)
+            return fail(m, itemError(e), remote = final)
         }
         if (remoteSha == sha) {
             ledger.upsert(entry(m, BackupStatus.VERIFIED, sha = sha, remote = final))
@@ -438,13 +473,13 @@ class BackupEngine(
         return Outcome.SKIPPED
     }
 
-    private suspend fun fail(m: PhoneMedia, msg: String?, remote: String? = null): Outcome {
-        ledger.upsert(entry(m, BackupStatus.FAILED, error = msg ?: "unknown error", remote = remote))
+    private suspend fun fail(m: PhoneMedia, msg: String, remote: String? = null): Outcome {
+        ledger.upsert(entry(m, BackupStatus.FAILED, error = msg, remote = remote))
         return Outcome.FAILED
     }
 
     /** Removes this item's own `.part`; if that fails, keeps partPath so the next run cleans it. */
-    private suspend fun failAndRemovePart(m: PhoneMedia, part: String, msg: String?): Outcome {
+    private suspend fun failAndRemovePart(m: PhoneMedia, part: String, msg: String): Outcome {
         val removed = try {
             if (store.stat(part) != null) store.delete(part)
             true
@@ -453,7 +488,7 @@ class BackupEngine(
             false
         }
         ledger.upsert(
-            entry(m, BackupStatus.FAILED, error = msg ?: "unknown error", part = if (removed) null else part)
+            entry(m, BackupStatus.FAILED, error = msg, part = if (removed) null else part)
         )
         return Outcome.FAILED
     }
