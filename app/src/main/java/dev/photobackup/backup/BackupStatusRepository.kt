@@ -23,6 +23,8 @@ data class BackupStatusSnapshot(
     val etaSec: Long?,
     /** Free space on the drive as of the last connect (backup run or drive check); null if never seen. */
     val driveFreeBytes: Long? = null,
+    /** Drive files being moved to their folders right now (0 = not moving). */
+    val moving: Int = 0,
 )
 
 private val Context.statusDataStore: DataStore<Preferences> by preferencesDataStore(name = "backup_status")
@@ -43,6 +45,7 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
             p[TOTAL] = s.total
             p.putOrRemove(ETA, s.etaSec)
             p.putOrRemove(DRIVE_FREE, s.driveFreeBytes)
+            p[MOVING] = s.moving
         }
     }
 
@@ -52,7 +55,7 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
      * inside the edit, so a run that starts meanwhile (and takes its lock before writing) is never overwritten.
      */
     suspend fun clearStaleProgress(isRunning: () -> Boolean) = update { s ->
-        if (s.inProgress && !isRunning()) s.copy(inProgress = false, done = 0, total = 0, etaSec = null) else s
+        if (s.inProgress && !isRunning()) s.copy(inProgress = false, done = 0, total = 0, etaSec = null, moving = 0) else s
     }
 
     suspend fun recordDriveFree(bytes: Long) = update { it.copy(driveFreeBytes = bytes) }
@@ -66,6 +69,7 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
         total = p[TOTAL] ?: 0,
         etaSec = p[ETA],
         driveFreeBytes = p[DRIVE_FREE],
+        moving = p[MOVING] ?: 0,
     )
 
     private fun <T> MutablePreferences.putOrRemove(key: Preferences.Key<T>, value: T?) {
@@ -81,6 +85,7 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
         private val TOTAL = intPreferencesKey("total")
         private val ETA = longPreferencesKey("eta_sec")
         private val DRIVE_FREE = longPreferencesKey("drive_free_bytes")
+        private val MOVING = intPreferencesKey("moving")
 
         val defaultProvider: (Context) -> BackupStatusRepository = { ctx ->
             BackupStatusRepository(ctx.applicationContext.statusDataStore)

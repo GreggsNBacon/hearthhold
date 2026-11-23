@@ -151,6 +151,14 @@ class BackupWorkerTest {
         assertTrue(errorNotifications().isEmpty())
     }
 
+    @Test fun movedFilesAreMentionedInSummary() {
+        runner = BackupRunner { _ -> BackupResult.Done(0, 0, 0, moved = 3) }
+        runWorker()
+        assertEquals("Backed up 0, failed 0 · 3 moved", status().lastResult)
+        assertEquals("Moving 1 file", BackupMessages.moving(1))
+        assertEquals("Moving 4 files", BackupMessages.moving(4))
+    }
+
     @Test fun failedFilesAreReported() {
         runner = BackupRunner { _ -> BackupResult.Done(3, 0, 2) }
         runWorker()

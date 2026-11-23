@@ -44,6 +44,13 @@ object BackupMessages {
     fun noRoom(n: Int): String =
         if (n == 1) "1 file doesn't fit on the drive — free up space" else "$n files don't fit on the drive — free up space"
 
+    /** Shown while drive files are being moved to their folders. */
+    fun moving(n: Int): String = if (n == 1) "Moving 1 file" else "Moving $n files"
+
+    /** The "last result" line: uploads and failures, plus moved files when there were any. */
+    fun summary(uploaded: Int, failed: Int, moved: Int): String =
+        "Backed up $uploaded, failed $failed" + if (moved > 0) " · $moved moved" else ""
+
     /** "N files failed": the reason for each is on its ! badge in the Gallery. */
     fun failed(n: Int): String = if (n == 1) "1 file failed — tap its ! for why" else "$n files failed — tap ! for why"
 }
@@ -67,13 +74,13 @@ object BackupLock {
 
 class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
-    private data class Progress(val done: Int, val total: Int, val bytes: Long, val totalBytes: Long)
+    private data class Progress(val done: Int, val total: Int, val bytes: Long, val totalBytes: Long, val moving: Int = 0)
 
     override suspend fun getForegroundInfo(): ForegroundInfo = foregroundInfo(0, 0, null)
 
-    private fun foregroundInfo(done: Int, total: Int, etaSec: Long?) = ForegroundInfo(
+    private fun foregroundInfo(done: Int, total: Int, etaSec: Long?, moving: Int = 0) = ForegroundInfo(
         BackupNotifications.PROGRESS_ID,
-        BackupNotifications.progress(applicationContext, done, total, etaSec),
+        BackupNotifications.progress(applicationContext, done, total, etaSec, moving),
         ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
     )
 
@@ -113,9 +120,9 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         }
     }
 
-    private suspend fun trySetForeground(done: Int, total: Int, etaSec: Long?) {
+    private suspend fun trySetForeground(done: Int, total: Int, etaSec: Long?, moving: Int = 0) {
         try {
-            setForeground(foregroundInfo(done, total, etaSec))
+            setForeground(foregroundInfo(done, total, etaSec, moving))
         } catch (e: Exception) {
             if (e is CancellationException) throw e // foreground not allowed right now: keep working
         }
@@ -136,17 +143,17 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                         if (now - lastPublish < 1000 && p.done != p.total) continue
                         lastPublish = now
                         val eta = BackupEta.seconds(startMs, now, p.bytes, p.totalBytes)
-                        repo.update { it.copy(inProgress = true, done = p.done, total = p.total, etaSec = eta) }
-                        trySetForeground(p.done, p.total, eta)
+                        repo.update { it.copy(inProgress = true, done = p.done, total = p.total, etaSec = eta, moving = p.moving) }
+                        trySetForeground(p.done, p.total, eta, p.moving)
                     }
                 }
                 // A new run starts: the previous run's error is stale (lastResult stays until this run ends).
-                repo.update { it.copy(inProgress = true, done = 0, total = 0, etaSec = null, lastError = null) }
+                repo.update { it.copy(inProgress = true, done = 0, total = 0, etaSec = null, moving = 0, lastError = null) }
                 trySetForeground(0, 0, null)
                 val r = try {
-                    runner.run { done, total, bytes, totalBytes ->
+                    runner.run({ done, total, bytes, totalBytes ->
                         updates.trySend(Progress(done, total, bytes, totalBytes))
-                    }
+                    }) { moving -> updates.trySend(Progress(0, 0, 0, 0, moving)) }
                 } finally {
                     // Stop the consumer before any final status write so it cannot set inProgress afterwards.
                     updates.close()
@@ -187,7 +194,7 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 idle(repo) {
                     it.copy(
                         lastRunMs = now,
-                        lastResult = "Backed up ${r.uploaded}, failed ${r.failed}",
+                        lastResult = BackupMessages.summary(r.uploaded, r.failed, r.moved),
                         lastError = err,
                         driveFreeBytes = r.driveFreeBytes ?: it.driveFreeBytes,
                     )
@@ -234,6 +241,6 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
     /** Writes a final status with the progress fields cleared; survives cancellation. */
     private suspend fun idle(repo: BackupStatusRepository, change: (BackupStatusSnapshot) -> BackupStatusSnapshot) =
         withContext(NonCancellable) {
-            repo.update { change(it).copy(inProgress = false, done = 0, total = 0, etaSec = null) }
+            repo.update { change(it).copy(inProgress = false, done = 0, total = 0, etaSec = null, moving = 0) }
         }
 }

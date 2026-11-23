@@ -87,6 +87,8 @@ data class GalleryUiState(
  * show and on every [resume] (see [autoCheck]), and always on [refresh] (user-asked).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
+private const val SEND_FAILED = "Couldn't move those just now"
+
 class GalleryViewModel(
     private val queryPhone: suspend () -> List<PhoneMedia>,
     private val ledger: kotlinx.coroutines.flow.Flow<List<LedgerEntry>>,
@@ -275,12 +277,17 @@ class GalleryViewModel(
         val store = assignments
         if (store == null || ids.isEmpty()) return Job().apply { complete() }
         return viewModelScope.launch {
-            for (id in ids) {
-                if (name == null) store.clear(id) else store.set(FolderAssignment(id, name))
+            try {
+                for (id in ids) {
+                    if (name == null) store.clear(id) else store.set(FolderAssignment(id, name))
+                }
+                clearSelection()
+                runNow()
+                _notice.value = if (name == null) "Back to default" else "Moving ${ids.size} to $name"
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                _notice.value = SEND_FAILED
             }
-            clearSelection()
-            runNow()
-            _notice.value = if (name == null) "Back to default" else "Moving ${ids.size} to $name"
         }
     }
 

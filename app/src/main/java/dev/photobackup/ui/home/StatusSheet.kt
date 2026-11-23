@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.photobackup.backup.BackupMessages
 import dev.photobackup.backup.BackupNotifications
 import dev.photobackup.freeup.formatSize
 
@@ -124,7 +125,7 @@ private fun StatusCard(state: HomeUiState, reach: Reachability, reachMessage: St
             status?.lastResult?.let { Text(it) }
             status?.lastError?.let { if (it != status.lastResult) Text(it, color = MaterialTheme.colorScheme.error) }
             if (status?.inProgress == true) {
-                Text("Backing up ${status.done} of ${status.total}")
+                Text(if (status.moving > 0) BackupMessages.moving(status.moving) else "Backing up ${status.done} of ${status.total}")
                 if (status.total > 0) {
                     LinearProgressIndicator(
                         progress = { status.done.toFloat() / status.total },

@@ -76,6 +76,19 @@ class BackupEngineMoveTest {
 
     private val toDog: suspend (Long, String) -> String? = { _, _ -> "Dog" }
 
+    @Test fun reportsHowManyFilesAreAboutToMove() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger()
+        seed(store, ledger, row(1, "$camera\\a.jpg", name = "a.jpg"))
+        seed(store, ledger, row(2, "$camera\\b.jpg", name = "b.jpg"))
+        val seen = mutableListOf<Int>()
+        val r = engine(store, ledger, toDog).run(emptyList(), onMoving = { seen += it }) as BackupResult.Done
+        assertEquals(listOf(2), seen)
+        assertEquals(2, r.moved)
+        val none = mutableListOf<Int>()
+        engine(store, ledger, toDog).run(emptyList(), onMoving = { none += it })
+        assertTrue(none.isEmpty())
+    }
+
     @Test fun movesVerifiedFileIntoDesiredFolder() = runBlocking {
         val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(100)
         seed(store, ledger, row(1, "$camera\\IMG.jpg"), data)

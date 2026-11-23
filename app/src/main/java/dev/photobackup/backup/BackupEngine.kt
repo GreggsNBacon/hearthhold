@@ -146,6 +146,7 @@ class BackupEngine(
 
     suspend fun run(
         items: List<PhoneMedia>,
+        onMoving: (count: Int) -> Unit = {},
         onProgress: (done: Int, total: Int, bytes: Long) -> Unit = { _, _, _ -> },
     ): BackupResult = withContext(Dispatchers.IO) {
         // 1. Connect once.
@@ -165,7 +166,7 @@ class BackupEngine(
         // 2b. Move drive files into their desired folder (every run, even with nothing to upload), after finishing
         // any move a crash interrupted.
         val moved = try {
-            reconcile(recoverMoves())
+            reconcile(recoverMoves(), onMoving)
         } catch (e: RemoteException) {
             return@withContext BackupResult.Stopped(e)
         }
@@ -329,42 +330,33 @@ class BackupEngine(
         return unsettled
     }
 
-    /** `<destination>\<device>`, built exactly as [RemotePathPlanner.targetDir] builds it. */
-    private fun deviceRoot(): String {
-        val dest = settings.destination.replace('/', '\\').trim('\\')
-        return listOf(dest, RemotePathPlanner.sanitise(settings.deviceName)).filter { it.isNotEmpty() }
-            .joinToString("\\")
-    }
-
     /**
      * Moves each VERIFIED / REMOVED_FROM_PHONE drive file whose folder segment (right after `<destination>\<device>`)
      * differs, ignoring case, from its desired folder. Year and file name stay as recorded. Rows not under the current
      * `<destination>\<device>\` are never moved. Returns how many moved. A [RemoteException] stops the run.
      */
-    private suspend fun reconcile(skip: Set<Long>): Int {
-        val prefix = deviceRoot() + "\\"
+    private suspend fun reconcile(skip: Set<Long>, onMoving: (Int) -> Unit): Int {
+        val root = DrivePaths.deviceRoot(settings.destination, settings.deviceName)
         val rows = (ledger.byStatus(BackupStatus.VERIFIED) + ledger.byStatus(BackupStatus.REMOVED_FROM_PHONE))
             .sortedBy { it.mediaId }
-        var moved = 0
-        var pauseFirst = false
+        val todo = mutableListOf<Triple<LedgerEntry, DriveFile, String>>()
         for (row in rows) {
             coroutineContext.ensureActive()
-            if (row.mediaId in skip || row.movingTo != null || row.partPath != null) continue
-            val path = row.remotePath ?: continue
-            if (!path.startsWith(prefix, ignoreCase = true)) continue
-            val parts = path.substring(prefix.length).split('\\')
-            if (parts.size != 3 || parts.any { it.isEmpty() }) continue
-            val (current, year, name) = parts
-            // Only today's `<folder>\<YYYY>\<name>` layout. The earlier planner wrote `<YYYY>\<MM>\<name>`, which also
-            // has 3 parts: its 2-digit month in the year slot fails this, so those files are never moved. A phone
-            // folder that is itself named like a year (`2024\2024\IMG.jpg`) is today's layout and may move.
-            if (year.length != 4 || !year.all { it in '0'..'9' }) continue
+            if (row.mediaId in skip) continue
+            val file = DrivePaths.parse(row, root) ?: continue
             val desired = folderFor(row.mediaId, row.relativePath)?.let { RemotePathPlanner.sanitise(it) }
                 ?: RemotePathPlanner.sourceFolder(row.relativePath)
-            if (desired.equals(current, ignoreCase = true)) continue
+            if (desired.equals(file.folder, ignoreCase = true)) continue
+            todo += Triple(row, file, desired)
+        }
+        if (todo.isNotEmpty()) onMoving(todo.size)
+        var moved = 0
+        var pauseFirst = false
+        for ((row, file, desired) in todo) {
+            coroutineContext.ensureActive()
             if (pauseFirst && itemPauseMs > 0) pause(itemPauseMs)
             pauseFirst = true
-            if (moveOne(row, path, "$prefix$desired\\$year", name)) moved++
+            if (moveOne(row, row.remotePath!!, "$root\\$desired\\${file.year}", file.name)) moved++
         }
         return moved
     }

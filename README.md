@@ -31,6 +31,7 @@
 - **Viewer and player** for photos and videos, from the phone or straight from the drive, with loop and 0.25x–2x speed.
 - **Gentle on your router**: one file at a time by default, adjustable parallel uploads, optional overnight-only window.
 - **Organised drive**: `Device/Source folder/Year/`, with file dates set to when the photo was taken.
+- **Named folders**: send a phone folder, or hand-picked items in the Gallery, to a drive folder you name; files already on the drive move there on the next run (never overwritten).
 
 ## Install
 
@@ -81,6 +82,8 @@ The chip at the top shows overall status, e.g. "Backing up 3 of 40", "5 waiting"
 
 `<dest>/<device>/<source>/YYYY/`
 
+With named folders: `<dest>\<device>\<folder or source>\YYYY\`.
+
 ## Known limits
 
 - FAT32 drives cannot hold files over 4 GB; use exFAT/NTFS/ext4.
@@ -117,3 +120,7 @@ keyPassword=CHANGE_ME
 | 8 | A removed video plays from the drive with loop and 2x speed working | |
 | 9 | Revoking photo permission makes the status show "Photos permission needed" | |
 | 10 | The status sheet shows the drive's free space (not 0) | |
+| 11 | A folder rule answered Yes moves the already-backed-up files into the named folder | |
+| 12 | A folder rule answered No leaves the old files where they are; new ones go to the named folder | |
+| 13 | Hand-picking a drive-only item in the Gallery and choosing a folder moves it | |
+| 14 | A move started with Wi-Fi turned off waits, and the next run on Wi-Fi completes it | |

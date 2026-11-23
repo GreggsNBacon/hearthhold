@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.photobackup.app.BackupControl
 import dev.photobackup.backup.BackupEngine
+import dev.photobackup.backup.DrivePaths
 import dev.photobackup.backup.RemotePathPlanner
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.FolderAssignment
@@ -157,17 +158,8 @@ class SettingsViewModel(
     }
 
     /** The folder segment of a drive path shaped `<destination>\<device>\<folder>\<year>\<name>`, else null. */
-    private fun currentFolder(e: LedgerEntry, s: AppSettings): String? {
-        val dest = (s.destination ?: "").replace('/', SEP).trim(SEP)
-        val prefix = listOf(dest, RemotePathPlanner.sanitise(s.deviceName)).filter { it.isNotEmpty() }.joinToString(SEP.toString()) + SEP
-        val full = e.remotePath ?: return null
-        if (!full.startsWith(prefix, ignoreCase = true)) return null
-        val parts = full.substring(prefix.length).split(SEP)
-        if (parts.size != 3 || parts.any { it.isEmpty() }) return null
-        val year = parts[1]
-        if (year.length != 4 || !year.all { it in '0'..'9' }) return null
-        return parts[0]
-    }
+    private fun currentFolder(e: LedgerEntry, s: AppSettings): String? =
+        DrivePaths.parse(e, DrivePaths.deviceRoot(s.destination, s.deviceName))?.folder
 
     private suspend fun pin(rows: List<LedgerEntry>, s: AppSettings) {
         val a = assignments ?: return
@@ -245,7 +237,6 @@ class SettingsViewModel(
     }
 
     private companion object {
-        const val SEP = '\\'
         const val INVALID_NAME_CHARS = "\\/:*?\"<>|"
     }
 }

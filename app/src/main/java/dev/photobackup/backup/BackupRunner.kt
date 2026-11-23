@@ -20,6 +20,12 @@ class SetupIncompleteException : Exception("Finish setup first")
 fun interface BackupRunner {
     /** [onProgress] gets (itemsDone, itemsTotal, bytesDone, bytesTotal). */
     suspend fun run(onProgress: (done: Int, total: Int, bytes: Long, totalBytes: Long) -> Unit): BackupResult
+
+    /** Like [run]; [onMoving] gets how many drive files are about to be moved to their folders. */
+    suspend fun run(
+        onProgress: (done: Int, total: Int, bytes: Long, totalBytes: Long) -> Unit,
+        onMoving: (count: Int) -> Unit,
+    ): BackupResult = run(onProgress)
 }
 
 /** Process-wide runner factory so tests can swap the engine. No DI framework on purpose. */
@@ -60,6 +66,11 @@ object LedgerDatabase {
 class ProductionBackupRunner(private val context: Context) : BackupRunner {
     override suspend fun run(
         onProgress: (done: Int, total: Int, bytes: Long, totalBytes: Long) -> Unit,
+    ): BackupResult = run(onProgress) { }
+
+    override suspend fun run(
+        onProgress: (done: Int, total: Int, bytes: Long, totalBytes: Long) -> Unit,
+        onMoving: (count: Int) -> Unit,
     ): BackupResult {
         val settings = SettingsStore(context, KeystoreCredentialCipher()).settings.first()
         val smb = settings.smb
@@ -87,7 +98,7 @@ class ProductionBackupRunner(private val context: Context) : BackupRunner {
                 folderFor = { id, rel -> FolderRules.desired(rel, assignments.get(id)?.folder, settings.folderRules) },
                 assignments = assignments,
             )
-            return engine.run(items) { done, total, bytes -> onProgress(done, total, bytes, totalBytes) }
+            return engine.run(items, onMoving) { done, total, bytes -> onProgress(done, total, bytes, totalBytes) }
         } finally {
             runCatching { store.close() }
         }

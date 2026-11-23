@@ -26,6 +26,11 @@ class StatusChipTest {
 
     @Test fun upToDate() = assertEquals(ChipState("Up to date", ChipKind.OK), chip())
 
+    @Test fun movingShowsCount() {
+        val running = idle.copy(inProgress = true, moving = 3)
+        assertEquals(ChipState("Moving 3 files", ChipKind.BUSY), chip(running))
+    }
+
     @Test fun backingUpShowsProgress() {
         val running = idle.copy(inProgress = true, done = 12, total = 40)
         assertEquals(ChipState("Backing up 12 of 40", ChipKind.BUSY), chip(running, waiting = 28))

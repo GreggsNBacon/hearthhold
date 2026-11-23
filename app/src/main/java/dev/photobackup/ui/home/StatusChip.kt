@@ -32,7 +32,14 @@ fun statusChip(
 ): ChipState = when {
     status == null -> ChipState("Checking…", ChipKind.BUSY)
     status.inProgress ->
-        ChipState(if (status.total > 0) "Backing up ${status.done} of ${status.total}" else "Backing up…", ChipKind.BUSY)
+        ChipState(
+            when {
+                status.moving > 0 -> BackupMessages.moving(status.moving)
+                status.total > 0 -> "Backing up ${status.done} of ${status.total}"
+                else -> "Backing up…"
+            },
+            ChipKind.BUSY,
+        )
     reach == Reachability.NO -> ChipState("Drive not reachable", ChipKind.PROBLEM)
     needsPassword -> ChipState("Re-enter drive password", ChipKind.PROBLEM)
     photoAccess == MediaAccess.NONE -> ChipState(BackupMessages.PERMISSION, ChipKind.PROBLEM)

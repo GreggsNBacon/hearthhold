@@ -54,6 +54,7 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
     var addingRule by remember { mutableStateOf(false) }
     var rulePath by remember { mutableStateOf<String?>(null) }
     var confirm by remember { mutableStateOf<RuleConfirm?>(null) }
+    var ruleBusy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val s = state.settings
 
@@ -112,7 +113,8 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
                     actionLabel = "Choose",
                 )
             } else {
-                RuleNameEntry(path, s.folderRules.values.distinct().sortedBy { it.lowercase() }, viewModel) { name ->
+                RuleNameEntry(path, s.folderRules.values.distinct().sortedBy { it.lowercase() }, viewModel, ruleBusy) { name ->
+                    ruleBusy = true
                     scope.launch {
                         val n = viewModel.countOnDrive(path, name)
                         if (n == 0) {
@@ -122,8 +124,9 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
                     }
                 }
             }
-            RuleDialog(confirm, { confirm = null }) { c, yes ->
+            RuleDialog(confirm, { confirm = null; ruleBusy = false }) { c, yes ->
                 confirm = null
+                ruleBusy = false
                 if (c is RuleConfirm.Add) {
                     viewModel.addRule(c.path, c.name, yes)
                     rulePath = null; addingRule = false
@@ -311,10 +314,9 @@ private fun FolderRulesSection(s: AppSettings, onAdd: () -> Unit, onRemove: (Str
 
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun RuleNameEntry(path: String, existing: List<String>, vm: SettingsViewModel, onSave: (String) -> Unit) {
+private fun RuleNameEntry(path: String, existing: List<String>, vm: SettingsViewModel, busy: Boolean, onSave: (String) -> Unit) {
     var name by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
-    var busy by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(path.removeSuffix("/"), style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(
@@ -329,7 +331,7 @@ private fun RuleNameEntry(path: String, existing: List<String>, vm: SettingsView
         }
         Button(enabled = !busy, onClick = {
             val err = vm.nameError(name)
-            if (err != null) error = err else { busy = true; onSave(name) }
+            if (err != null) error = err else onSave(name)
         }) { Text("Save rule") }
     }
 }

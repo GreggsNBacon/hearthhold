@@ -40,12 +40,12 @@ object BackupNotifications {
         )
     }
 
-    fun progress(context: Context, done: Int, total: Int, etaSec: Long?): Notification {
+    fun progress(context: Context, done: Int, total: Int, etaSec: Long?, moving: Int = 0): Notification {
         ensureChannels(context)
         return NotificationCompat.Builder(context, CHANNEL_PROGRESS)
             .setSmallIcon(R.drawable.ic_stat_hearthhold)
-            .setContentTitle("Backing up $done of $total")
-            .setContentText(etaSec?.let { "About ${formatEta(it)} left" })
+            .setContentTitle(if (moving > 0) BackupMessages.moving(moving) else "Backing up $done of $total")
+            .setContentText(if (moving > 0) null else etaSec?.let { "About ${formatEta(it)} left" })
             .setProgress(total, done, total == 0)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

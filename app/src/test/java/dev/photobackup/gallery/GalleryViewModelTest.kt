@@ -17,6 +17,8 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -283,6 +285,16 @@ class GalleryViewModelTest {
         vm.sendTo(listOf("media:1", "media:2"), null)
         assertEquals(mapOf(3L to "Cat"), store.map)
         assertEquals(1, runs)
+    }
+
+    @Test fun sendToFailureShowsNoticeWithoutExceptionText() {
+        val store = FakeAssignments()
+        val vm = foldersVm(store) { throw IllegalStateException("secret-detail") }
+        vm.sendTo(listOf("media:1"), "Dog")
+        val n = vm.notice.value
+        assertNotNull(n)
+        assertFalse(n!!.contains("secret-detail"))
+        assertNotEquals("Moving 1 to Dog", n)
     }
 
     @Test fun selectionTogglesAndClearsAfterSending() {
