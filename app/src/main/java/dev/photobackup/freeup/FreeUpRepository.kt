@@ -113,17 +113,13 @@ class FreeUpRepository(
     fun deleteRequest(context: Context, items: List<LedgerEntry>): IntentSender =
         MediaStore.createDeleteRequest(context.contentResolver, items.map { Uri.parse(it.localUri) }).intentSender
 
-    /** Re-reads each entry and only marks those still VERIFIED. Returns how many were marked. */
+    /**
+     * Marks each entry REMOVED_FROM_PHONE only if it is still VERIFIED with no drive move in flight, as one
+     * conditional write (so it can never drop a movingTo marker a backup run sets meanwhile). Returns how many.
+     */
     suspend fun markRemoved(items: List<LedgerEntry>): Int {
         val now = clock()
-        var n = 0
-        for (item in items) {
-            val e = ledger.get(item.mediaId) ?: continue
-            if (e.status != BackupStatus.VERIFIED || e.movingTo != null) continue
-            ledger.upsert(e.copy(status = BackupStatus.REMOVED_FROM_PHONE, updatedAtMs = now))
-            n++
-        }
-        return n
+        return items.count { ledger.markRemovedIfSettled(it.mediaId, now) }
     }
 
     companion object {

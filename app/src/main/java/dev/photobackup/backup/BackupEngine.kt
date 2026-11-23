@@ -170,7 +170,7 @@ class BackupEngine(
             return@withContext BackupResult.Stopped(e)
         }
 
-        val work =items.filter { LedgerRules.needsUpload(ledger.get(it.mediaId), it) }
+        val work = items.filter { LedgerRules.needsUpload(ledger.get(it.mediaId), it) }
         val state = RunState(drive.freeBytes, work.size)
         val next = AtomicInteger(0)
 
@@ -355,6 +355,10 @@ class BackupEngine(
             val parts = path.substring(prefix.length).split('\\')
             if (parts.size != 3 || parts.any { it.isEmpty() }) continue
             val (current, year, name) = parts
+            // Only today's `<folder>\<YYYY>\<name>` layout. The earlier planner wrote `<YYYY>\<MM>\<name>`, which also
+            // has 3 parts: its 2-digit month in the year slot fails this, so those files are never moved. A phone
+            // folder that is itself named like a year (`2024\2024\IMG.jpg`) is today's layout and may move.
+            if (year.length != 4 || !year.all { it in '0'..'9' }) continue
             val desired = folderFor(row.mediaId, row.relativePath)?.let { RemotePathPlanner.sanitise(it) }
                 ?: RemotePathPlanner.sourceFolder(row.relativePath)
             if (desired.equals(current, ignoreCase = true)) continue
@@ -381,7 +385,8 @@ class BackupEngine(
                 ledger.upsert(row.copy(lastError = MOVE_ERROR, updatedAtMs = clock()))
                 return false
             }
-            ledger.upsert(row.copy(movingTo = target, updatedAtMs = clock()))
+            // Re-read so a status change made meanwhile (e.g. Free up's markRemoved) isn't overwritten.
+            ledger.upsert((ledger.get(row.mediaId) ?: row).copy(movingTo = target, updatedAtMs = clock()))
             renameTried = true
             store.rename(from, target)
             val now = ledger.get(row.mediaId) ?: row // keep any change made meanwhile (e.g. status)

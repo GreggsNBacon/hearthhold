@@ -27,6 +27,15 @@ interface LedgerDao : LedgerStore {
     @Query("DELETE FROM LedgerEntry WHERE mediaId = :mediaId")
     override suspend fun delete(mediaId: Long)
 
+    @Query(
+        "UPDATE LedgerEntry SET status = 'REMOVED_FROM_PHONE', updatedAtMs = :nowMs " +
+            "WHERE mediaId = :mediaId AND status = 'VERIFIED' AND movingTo IS NULL"
+    )
+    suspend fun markRemovedIfSettledCount(mediaId: Long, nowMs: Long): Int
+
+    override suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long): Boolean =
+        markRemovedIfSettledCount(mediaId, nowMs) > 0
+
     @Query("SELECT status AS status, COUNT(*) AS n FROM LedgerEntry GROUP BY status")
     fun observeStatusCounts(): Flow<List<StatusCount>>
 

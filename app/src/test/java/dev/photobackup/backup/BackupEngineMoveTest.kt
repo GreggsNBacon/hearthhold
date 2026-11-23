@@ -101,6 +101,23 @@ class BackupEngineMoveTest {
         assertEquals("$dog\\IMG (1).jpg", ledger.get(1)!!.remotePath)
     }
 
+    /** The earlier planner wrote `<dest>\<device>\YYYY\MM\name`; those files must never be moved. */
+    @Test fun oldYearMonthLayoutIsNeverMoved() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(100)
+        val engine = BackupEngine(
+            store, ledger, LocalOpener { null }, BackupSettings("Hearthhold", "Pixel 9", ZoneOffset.UTC), { 1234L },
+            itemPauseMs = 0, folderFor = toDog,
+        )
+        val old = "Hearthhold\\Pixel 9\\2024\\07\\IMG.jpg"
+        seed(store, ledger, row(1, old), data)
+        val r = engine.run(emptyList())
+        assertEquals(0, (r as BackupResult.Done).moved)
+        assertEquals(old, ledger.get(1)!!.remotePath)
+        assertNull(ledger.get(1)!!.lastError)
+        assertArrayEquals(data, store.files[old])
+        assertEquals(setOf(old), store.files.keys)
+    }
+
     @Test fun rowsUnderAnotherDestinationOrDeviceAreNotMoved() = runBlocking {
         val store = FakeRemoteStore(); val ledger = MemoryLedger()
         seed(store, ledger, row(1, "Old\\Dev\\Camera\\2026\\IMG.jpg"))
@@ -260,6 +277,18 @@ class BackupEngineMoveTest {
         assertNull(e.movingTo)
         assertEquals(BackupEngine.MOVE_CONFLICT_ERROR, e.lastError)
         assertArrayEquals(mine, store.files["$camera\\IMG.jpg"])
+        assertArrayEquals(other, store.files["$dog\\IMG.jpg"])
+    }
+
+    @Test fun recoveryNewPathWithOtherSizeLeavesRowAndSetsError() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger(); val other = bytes(55)
+        ledger.upsert(row(1, "$camera\\IMG.jpg", movingTo = "$dog\\IMG.jpg"))
+        store.mkdirs(dog); store.files["$dog\\IMG.jpg"] = other
+        engine(store, ledger, toDog).run(emptyList())
+        val e = ledger.get(1)!!
+        assertEquals("$camera\\IMG.jpg", e.remotePath)
+        assertEquals("$dog\\IMG.jpg", e.movingTo)
+        assertEquals(BackupEngine.MOVE_ERROR, e.lastError)
         assertArrayEquals(other, store.files["$dog\\IMG.jpg"])
     }
 

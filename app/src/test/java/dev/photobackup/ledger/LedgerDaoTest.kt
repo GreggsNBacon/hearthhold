@@ -63,4 +63,19 @@ class LedgerDaoTest {
         dao.delete(1)
         assertNull(dao.get(1))
     }
+
+    @Test fun markRemovedIfSettledOnlyTouchesVerifiedRowsWithoutAMove() = runBlocking {
+        dao.upsert(entry(1, BackupStatus.VERIFIED))
+        dao.upsert(entry(2, BackupStatus.VERIFIED).copy(movingTo = "x\\y.jpg"))
+        dao.upsert(entry(3, BackupStatus.FAILED))
+        assertEquals(true, dao.markRemovedIfSettled(1, 99))
+        assertEquals(false, dao.markRemovedIfSettled(2, 99))
+        assertEquals(false, dao.markRemovedIfSettled(3, 99))
+        assertEquals(false, dao.markRemovedIfSettled(4, 99))
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, dao.get(1)!!.status)
+        assertEquals(99L, dao.get(1)!!.updatedAtMs)
+        assertEquals(BackupStatus.VERIFIED, dao.get(2)!!.status)
+        assertEquals("x\\y.jpg", dao.get(2)!!.movingTo)
+        assertEquals(BackupStatus.FAILED, dao.get(3)!!.status)
+    }
 }

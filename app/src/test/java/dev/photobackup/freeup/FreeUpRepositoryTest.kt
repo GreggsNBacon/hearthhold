@@ -5,6 +5,7 @@ import dev.photobackup.backup.LocalOpener
 import dev.photobackup.backup.MemoryLedger
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerEntry
+import dev.photobackup.ledger.LedgerStore
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.smb.FakeRemoteStore
 import dev.photobackup.smb.RemoteException
@@ -211,5 +212,37 @@ class FreeUpRepositoryTest {
         val (ledger, _) = setup(moving)
         assertEquals(0, FreeUpRepository(ledger).markRemoved(listOf(moving)))
         assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+    }
+
+    /** A backup run sets movingTo right after Free up read the row: the write must not drop the marker. */
+    @Test fun markRemovedNeverDropsAMoveStartedAfterItsRead() = runBlocking {
+        val e = entry(1)
+        val (inner, _) = setup(e)
+        // The engine's movingTo write lands right after Free up's first ledger access, before Free up writes.
+        val racing = object : LedgerStore by inner {
+            var raced = false
+            suspend fun race() {
+                if (raced) return
+                raced = true
+                inner.upsert(inner.get(1)!!.copy(movingTo = "elsewhere-f1.jpg"))
+            }
+            override suspend fun get(mediaId: Long): LedgerEntry? = inner.get(mediaId).also { race() }
+            override suspend fun markRemovedIfSettled(mediaId: Long, nowMs: Long): Boolean {
+                race()
+                return inner.markRemovedIfSettled(mediaId, nowMs)
+            }
+        }
+        assertEquals(0, FreeUpRepository(racing).markRemoved(listOf(e)))
+        val now = inner.get(1)!!
+        assertEquals("elsewhere-f1.jpg", now.movingTo)
+        assertEquals(BackupStatus.VERIFIED, now.status)
+    }
+
+    @Test fun markRemovedMarksSettledVerifiedRows() = runBlocking {
+        val e = entry(1)
+        val (ledger, _) = setup(e)
+        assertEquals(1, FreeUpRepository(ledger, clock = { 7L }).markRemoved(listOf(e)))
+        assertEquals(BackupStatus.REMOVED_FROM_PHONE, ledger.get(1)!!.status)
+        assertEquals(7L, ledger.get(1)!!.updatedAtMs)
     }
 }
