@@ -127,4 +127,29 @@ class OpenElsewhereTest {
         }
         assertEquals(0, dir.listFiles()!!.size)
     }
+
+    /** Unknown size: the copy stops when the phone runs low instead of filling it. */
+    @Test fun copyToCacheStopsWhenPhoneRunsLow() = runTest {
+        val store = FakeRemoteStore().apply { files["v\\a.wmv"] = ByteArray(600_000) }
+        val dir = tmp.newFolder("cache")
+        var free = OpenElsewhere.SPACE_RESERVE + 300_000L
+        try {
+            OpenElsewhere.copyToCache(store, "v\\a.wmv", -1, dir, freeBytes = { free }) { n -> free = OpenElsewhere.SPACE_RESERVE + 300_000L - n }
+            fail("expected NoSpaceException")
+        } catch (_: NoSpaceException) {
+        }
+        assertEquals(0, dir.listFiles()!!.size)
+    }
+
+    /** A failure writing the phone copy is told apart from a drive read failure (different message). */
+    @Test fun copyToCacheWriteFailureIsLocal() = runTest {
+        val store = FakeRemoteStore().apply { files["v\\a.wmv"] = ByteArray(10) }
+        val dir = tmp.newFolder("cache")
+        File(dir, OpenElsewhere.cacheName("v\\a.wmv") + ".part").mkdirs() // a directory where the part goes: can't write
+        try {
+            OpenElsewhere.copyToCache(store, "v\\a.wmv", 10, dir) {}
+            fail("expected LocalWriteException")
+        } catch (_: LocalWriteException) {
+        }
+    }
 }

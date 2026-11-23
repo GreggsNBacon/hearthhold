@@ -17,6 +17,8 @@ android {
         targetSdk = 35
         versionCode = 5
         versionName = "1.3.0"
+        // Phones only: drops the x86/x86_64 copies of native libraries (FFmpeg decoder, ~3 MB), used by emulators.
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     // Optional release signing (owner-managed, gitignored). Only key NAMES are ever reported, never values.

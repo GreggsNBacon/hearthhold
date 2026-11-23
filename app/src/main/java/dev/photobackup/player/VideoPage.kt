@@ -306,9 +306,14 @@ private fun OpenElsewherePanel(item: GalleryItem, store: PageStore, message: Str
                         ?.let { OpenState.Failed(it) } ?: OpenState.Idle
                 }
             } catch (e: CancellationException) {
-                OpenState.Idle
+                state = OpenState.Idle
+                throw e
             } catch (_: TooBigException) {
                 OpenState.Failed(MSG_TOO_BIG)
+            } catch (_: NoSpaceException) {
+                OpenState.Failed(MSG_NO_SPACE)
+            } catch (_: LocalWriteException) {
+                OpenState.Failed(MSG_SAVE_FAILED)
             } catch (e: Exception) {
                 val why = viewerErrorMessage(e, fromDrive = true, isVideo = true) // never the exception text
                 OpenState.Failed(if (why == MSG_CANT_PLAY) MSG_COPY_FAILED else why)

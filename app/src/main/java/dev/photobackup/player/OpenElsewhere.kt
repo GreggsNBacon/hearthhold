@@ -24,9 +24,16 @@ const val MSG_NO_APP = "No app on this phone can open this video"
 const val MSG_TOO_BIG = "This video is over 2 GB: too big to copy for another app"
 const val MSG_NO_SPACE = "Not enough space on the phone to copy this video"
 const val MSG_COPY_FAILED = "Couldn't copy the video from the drive"
+const val MSG_SAVE_FAILED = "Couldn't save the copy on the phone"
 
 /** A drive video grew past [OpenElsewhere.MAX_COPY_BYTES] while copying (its size was not known up front). */
 class TooBigException : IOException("Too big to copy")
+
+/** The phone ran low on space while copying a drive video of unknown size. */
+class NoSpaceException : IOException("Not enough space")
+
+/** Writing the copy on the phone failed (not a drive problem). */
+class LocalWriteException(cause: Throwable? = null) : IOException("Couldn't write the copy", cause)
 
 /** What the player's tracks say once known. */
 enum class TrackVerdict { OK, NO_VIDEO, NO_AUDIO }
@@ -58,7 +65,10 @@ object PlaybackFallback {
         val groups = tracks.groups
         val video = groups.filter { it.type == C.TRACK_TYPE_VIDEO }
         val audio = groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-        return verdict(video.isNotEmpty(), video.any { it.isSupported }, audio.isNotEmpty(), audio.any { it.isSupported })
+        // "Exceeds capabilities" counts as playable: ExoPlayer still selects such a track and it often plays (the
+        // phone's reported limits are conservative). A real decoder failure arrives as a player error instead.
+        fun List<Tracks.Group>.playable() = any { it.isSupported(/* allowExceedsCapabilities = */ true) }
+        return verdict(video.isNotEmpty(), video.playable(), audio.isNotEmpty(), audio.playable())
     }
 }
 
@@ -102,7 +112,8 @@ object OpenElsewhere {
     /**
      * Copies [remotePath] into [dir] (reusing a finished copy of the same size), reporting bytes copied to
      * [onProgress]. Writes a `.part` file and renames it when done; any failure or cancel deletes the part. A copy
-     * passing [maxBytes] stops with [TooBigException].
+     * passing [maxBytes] stops with [TooBigException]; one of unknown size stops with [NoSpaceException] when
+     * [freeBytes] drops under [SPACE_RESERVE]. Write-side failures are [LocalWriteException].
      */
     suspend fun copyToCache(
         store: RemoteStore,
@@ -110,6 +121,7 @@ object OpenElsewhere {
         sizeBytes: Long,
         dir: File,
         maxBytes: Long = MAX_COPY_BYTES,
+        freeBytes: () -> Long = { dir.usableSpace },
         onProgress: (Long) -> Unit,
     ): File = withContext(Dispatchers.IO) {
         dir.mkdirs()
@@ -122,7 +134,12 @@ object OpenElsewhere {
         val part = File(dir, target.name + PART)
         try {
             store.openRead(remotePath).use { input ->
-                part.outputStream().use { out ->
+                val output = try {
+                    part.outputStream()
+                } catch (e: IOException) {
+                    throw LocalWriteException(e)
+                }
+                output.use { out ->
                     val buf = ByteArray(256 * 1024)
                     var total = 0L
                     while (true) {
@@ -131,13 +148,18 @@ object OpenElsewhere {
                         if (n < 0) break
                         total += n
                         if (total > maxBytes) throw TooBigException()
-                        out.write(buf, 0, n)
+                        if (sizeBytes < 0 && freeBytes() < SPACE_RESERVE) throw NoSpaceException()
+                        try {
+                            out.write(buf, 0, n)
+                        } catch (e: IOException) {
+                            throw LocalWriteException(e)
+                        }
                         onProgress(total)
                     }
                 }
             }
             target.delete()
-            if (!part.renameTo(target)) throw IOException("Couldn't finish the copy")
+            if (!part.renameTo(target)) throw LocalWriteException()
             target
         } catch (t: Throwable) {
             part.delete()
