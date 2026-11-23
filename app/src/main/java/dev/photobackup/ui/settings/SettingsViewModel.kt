@@ -4,6 +4,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.photobackup.app.BackupControl
 import dev.photobackup.backup.BackupEngine
+import dev.photobackup.backup.RemotePathPlanner
+import dev.photobackup.ledger.BackupStatus
+import dev.photobackup.ledger.FolderAssignment
+import dev.photobackup.ledger.FolderAssignmentStore
+import dev.photobackup.ledger.LedgerEntry
+import dev.photobackup.ledger.LedgerStore
+import dev.photobackup.media.FolderRules
 import dev.photobackup.media.PartialMediaAccessException
 import dev.photobackup.media.PhoneFolders
 import dev.photobackup.settings.AppSettings
@@ -42,6 +49,8 @@ class SettingsViewModel(
     private val backup: BackupControl,
     /** Item counts per phone folder from MediaStore. */
     private val phoneFolderCounts: suspend () -> Map<String, Int> = { emptyMap() },
+    private val ledger: LedgerStore? = null,
+    private val assignments: FolderAssignmentStore? = null,
 ) : ViewModel() {
     private val _state = MutableStateFlow(SettingsUiState())
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
@@ -112,6 +121,74 @@ class SettingsViewModel(
     fun removeFolder(path: String): Job =
         edit { it.copy(folders = it.folders.copy(extraRelativePaths = it.folders.extraRelativePaths - path)) }
 
+    /** Null when [name] is usable as a drive folder name, else a message to show next to the field. */
+    fun nameError(name: String): String? {
+        val c = FolderRules.canonical(name) ?: return "Enter a folder name"
+        if (c.all { it == '_' }) return "That name can't be used"
+        return null
+    }
+
+    /** Existing drive files a rule on [path] would (or does) govern: no hand-picked folder, longest-prefix match. */
+    private suspend fun affectedRows(path: String, rules: Map<String, String>): List<LedgerEntry> {
+        val l = ledger ?: return emptyList()
+        val key = PhoneFolders.normalise(path)
+        val marked = rules.keys.map { PhoneFolders.normalise(it) }.filter { !it.equals(key, ignoreCase = true) }
+            .associateWith { "other" } + (key to "this")
+        val pinned = assignments?.all()?.mapTo(HashSet()) { it.mediaId }.orEmpty()
+        return (l.byStatus(BackupStatus.VERIFIED) + l.byStatus(BackupStatus.REMOVED_FROM_PHONE))
+            .filter { it.remotePath != null && it.mediaId !in pinned && FolderRules.ruleFor(it.relativePath, marked) == "this" }
+    }
+
+    /** How many already-backed-up items a rule on [path] covers (for the "also move them?" question). */
+    suspend fun countOnDrive(path: String): Int = affectedRows(path, store.settings.first().folderRules).size
+
+    /** The first drive folder segment under "destination\device\", or null if the path is not under it. */
+    private fun currentFolder(e: LedgerEntry, s: AppSettings): String? {
+        val dest = (s.destination ?: "").replace('/', SEP).trim(SEP)
+        val prefix = listOf(dest, RemotePathPlanner.sanitise(s.deviceName)).filter { it.isNotEmpty() }.joinToString(SEP.toString()) + SEP
+        val full = e.remotePath?.replace('/', SEP)?.trimStart(SEP) ?: return null
+        if (!full.startsWith(prefix, ignoreCase = true)) return null
+        val rest = full.substring(prefix.length)
+        if (!rest.contains(SEP)) return null
+        return rest.substringBefore(SEP).ifEmpty { null }
+    }
+
+    private suspend fun pin(rows: List<LedgerEntry>, s: AppSettings) {
+        val a = assignments ?: return
+        for (r in rows) currentFolder(r, s)?.let { a.set(FolderAssignment(r.mediaId, it)) }
+    }
+
+    private suspend fun runNowFromSettings() = backup.runNow(store.settings.first().chargingOnly)
+
+    /**
+     * Adds (or replaces) a rule sending [path] to drive folder [name]. [moveExisting] false keeps the files already on
+     * the drive where they are by pinning them; true leaves them to be moved by the next run, which starts now.
+     */
+    fun addRule(path: String, name: String, moveExisting: Boolean): Job {
+        val key = PhoneFolders.normalise(path).takeIf { it.isNotEmpty() }
+        val folder = FolderRules.canonical(name)
+        if (key == null || folder == null || nameError(name) != null) return Job().apply { complete() }
+        return viewModelScope.launch {
+            val s = store.settings.first()
+            if (!moveExisting) pin(affectedRows(key, s.folderRules), s)
+            store.update { cur ->
+                cur.copy(folderRules = cur.folderRules.filterKeys { !it.equals(key, ignoreCase = true) } + (key to folder))
+            }
+            if (moveExisting) runNowFromSettings()
+        }
+    }
+
+    /** Removes the rule on [path]. [moveBack] false pins the covered files where they are; true runs a backup now. */
+    fun removeRule(path: String, moveBack: Boolean): Job = viewModelScope.launch {
+        val s = store.settings.first()
+        val target = PhoneFolders.normalise(path)
+        val keys = s.folderRules.keys.filter { PhoneFolders.normalise(it).equals(target, ignoreCase = true) }
+        if (keys.isEmpty()) return@launch
+        if (!moveBack) pin(affectedRows(path, s.folderRules), s)
+        store.update { cur -> cur.copy(folderRules = cur.folderRules - keys.toSet()) }
+        if (moveBack) runNowFromSettings()
+    }
+
     /** Only updates settings; the ledger is never touched. */
     fun setDestination(path: String): Job = edit { it.copy(destination = path) }
 
@@ -152,6 +229,7 @@ class SettingsViewModel(
     }
 
     private companion object {
+        const val SEP = '\\'
         const val INVALID_NAME_CHARS = "\\/:*?\"<>|"
     }
 }

@@ -254,7 +254,12 @@ class AppContainer(context: Context) {
     }
 
     val settingsFactory: ViewModelProvider.Factory = viewModelFactory {
-        initializer { SettingsViewModel(settingsStore, storeFactory, backup, media::folderCounts) }
+        initializer {
+            SettingsViewModel(
+                settingsStore, storeFactory, backup, media::folderCounts,
+                ledger = ledger, assignments = LedgerDatabase.get(app).folderAssignmentDao(),
+            )
+        }
     }
 
     val galleryFactory: ViewModelProvider.Factory = viewModelFactory {

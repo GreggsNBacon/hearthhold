@@ -38,6 +38,9 @@ fun PhoneFolderBrowser(
     folders: SourceFolders,
     onAdd: (String) -> Unit,
     onRetry: () -> Unit,
+    /** True when any folder may be picked, even one already backed up (used for folder rules). */
+    pickIncluded: Boolean = false,
+    actionLabel: String = "Add",
 ) {
     var typed by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -46,7 +49,7 @@ fun PhoneFolderBrowser(
                 typed, { typed = it }, singleLine = true, modifier = Modifier.weight(1f),
                 label = { Text("Or type a path, e.g. Pictures/WhatsApp") },
             )
-            TextButton(onClick = { onAdd(typed); typed = "" }, enabled = typed.isNotBlank()) { Text("Add") }
+            TextButton(onClick = { onAdd(typed); typed = "" }, enabled = typed.isNotBlank()) { Text(actionLabel) }
         }
         HorizontalDivider()
         when (list) {
@@ -62,7 +65,7 @@ fun PhoneFolderBrowser(
                     Text("No photos or videos found on this phone.")
                 } else {
                     LazyColumn(Modifier.fillMaxWidth()) {
-                        items(rows, key = { it.path }) { FolderRow(it, onAdd) }
+                        items(rows, key = { it.path }) { FolderRow(it, onAdd, pickIncluded, actionLabel) }
                     }
                 }
             }
@@ -71,7 +74,7 @@ fun PhoneFolderBrowser(
 }
 
 @Composable
-private fun FolderRow(f: PhoneFolder, onAdd: (String) -> Unit) {
+private fun FolderRow(f: PhoneFolder, onAdd: (String) -> Unit, pickIncluded: Boolean, actionLabel: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(f.path.removeSuffix("/"))
@@ -80,10 +83,10 @@ private fun FolderRow(f: PhoneFolder, onAdd: (String) -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        if (f.included) {
+        if (f.included && !pickIncluded) {
             Text("Included", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 12.dp))
         } else {
-            TextButton(onClick = { onAdd(f.path) }) { Text("Add") }
+            TextButton(onClick = { onAdd(f.path) }) { Text(actionLabel) }
         }
     }
 }

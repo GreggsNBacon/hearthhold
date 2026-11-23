@@ -2,6 +2,11 @@ package dev.photobackup.ui.settings
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.test.core.app.ApplicationProvider
+import dev.photobackup.backup.MemoryAssignments
+import dev.photobackup.backup.MemoryLedger
+import dev.photobackup.ledger.BackupStatus
+import dev.photobackup.ledger.FolderAssignment
+import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.media.PartialMediaAccessException
 import dev.photobackup.settings.CredentialCipher
 import dev.photobackup.settings.SettingsStore
@@ -18,6 +23,8 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -159,5 +166,98 @@ class SettingsViewModelTest {
         vm.saveDrive("nas", "usb", guest = false, username = "greg", password = "bad").join()
         assertEquals("Wrong username or password", vm.state.value.driveMessage)
         assertEquals("pw", settings.settings.first().smb?.password)
+    }
+
+    // ---- folder rules ----
+
+    private val ledger = MemoryLedger()
+    private val assigns = MemoryAssignments()
+
+    private fun row(id: Long, rel: String, remote: String?, status: BackupStatus = BackupStatus.VERIFIED) = LedgerEntry(
+        id, "content://media/$id", "$id.jpg", rel, 100, 1000, 10, false, "sha", remote, null, status, null, 0,
+    )
+
+    private fun ruleVm(): SettingsViewModel {
+        runBlocking { settings.update { it.copy(deviceName = "Dev") } }
+        return SettingsViewModel(settings, { opened += it; store }, backup, ledger = ledger, assignments = assigns)
+    }
+
+    private fun seedRows() = runBlocking {
+        ledger.upsert(row(1, "Pictures/WhatsApp/", "Photos\\Dev\\WhatsApp\\2026\\1.jpg"))
+        ledger.upsert(row(2, "Pictures/WhatsApp/Sent/", "Photos\\Dev\\Sent\\2026\\2.jpg", BackupStatus.REMOVED_FROM_PHONE))
+        ledger.upsert(row(3, "DCIM/Camera/", "Photos\\Dev\\Camera\\2026\\3.jpg"))
+        ledger.upsert(row(4, "Pictures/WhatsApp/", null, BackupStatus.PENDING))
+    }
+
+    @Test fun addRuleWithoutMovingPinsExistingRows() = runBlocking {
+        seedRows()
+        val vm = ruleVm()
+        assertEquals(2, vm.countOnDrive("Pictures/WhatsApp"))
+        vm.addRule("Pictures/WhatsApp", "Family", moveExisting = false).join()
+        assertEquals(mapOf("Pictures/WhatsApp/" to "Family"), settings.settings.first().folderRules)
+        assertEquals(mapOf(1L to "WhatsApp", 2L to "Sent"), assigns.rows.value.mapValues { it.value.folder })
+        assertEquals(emptyList<String>(), backup.calls)
+    }
+
+    @Test fun addRuleMovingPinsNothingAndRunsNow() = runBlocking {
+        seedRows()
+        val vm = ruleVm()
+        vm.addRule("Pictures/WhatsApp/", "Family", moveExisting = true).join()
+        assertEquals(emptyMap<Long, FolderAssignment>(), assigns.rows.value)
+        assertEquals(listOf("runNow(false)"), backup.calls)
+        assertEquals("Family", settings.settings.first().folderRules["Pictures/WhatsApp/"])
+    }
+
+    @Test fun removeRuleWithoutMovingBackPins() = runBlocking {
+        seedRows()
+        val vm = ruleVm()
+        vm.addRule("Pictures/WhatsApp/", "Family", moveExisting = true).join()
+        ledger.upsert(row(1, "Pictures/WhatsApp/", "Photos\\Dev\\Family\\2026\\1.jpg"))
+        backup.calls.clear()
+        vm.removeRule("Pictures/WhatsApp/", moveBack = false).join()
+        assertEquals(emptyMap<String, String>(), settings.settings.first().folderRules)
+        assertEquals("Family", assigns.rows.value[1L]?.folder)
+        assertEquals(emptyList<String>(), backup.calls)
+    }
+
+    @Test fun removeRuleMovingBackRunsNow() = runBlocking {
+        seedRows()
+        val vm = ruleVm()
+        vm.addRule("Pictures/WhatsApp/", "Family", moveExisting = false).join()
+        assigns.rows.value = emptyMap()
+        vm.removeRule("Pictures/WhatsApp/", moveBack = true).join()
+        assertEquals(emptyMap<String, String>(), settings.settings.first().folderRules)
+        assertEquals(emptyMap<Long, FolderAssignment>(), assigns.rows.value)
+        assertEquals(listOf("runNow(false)"), backup.calls)
+    }
+
+    @Test fun addRuleReplacesRuleDifferingOnlyByCase() = runBlocking {
+        val vm = ruleVm()
+        vm.addRule("pictures/whatsapp/", "Old", moveExisting = false).join()
+        vm.addRule("Pictures/WhatsApp/", "New", moveExisting = false).join()
+        assertEquals(mapOf("Pictures/WhatsApp/" to "New"), settings.settings.first().folderRules)
+    }
+
+    @Test fun longestPrefixRuleKeepsItsOwnRows() = runBlocking {
+        seedRows()
+        val vm = ruleVm()
+        vm.addRule("Pictures/WhatsApp/Sent/", "Out", moveExisting = true).join()
+        assertEquals(1, vm.countOnDrive("Pictures/WhatsApp/")) // row 2 belongs to the deeper rule
+    }
+
+    @Test fun rowsWithAHandPickedFolderAreNotCounted() = runBlocking {
+        seedRows()
+        assigns.set(FolderAssignment(1, "Mine"))
+        assertEquals(1, ruleVm().countOnDrive("Pictures/WhatsApp/"))
+    }
+
+    @Test fun badNamesAreRejected() = runBlocking {
+        val vm = ruleVm()
+        for (n in listOf("", "   ", "???", "/\\:")) {
+            assertNotNull(n, vm.nameError(n))
+            vm.addRule("Pictures/WhatsApp/", n, moveExisting = true).join()
+        }
+        assertEquals(emptyMap<String, String>(), settings.settings.first().folderRules)
+        assertNull(vm.nameError("Family"))
     }
 }

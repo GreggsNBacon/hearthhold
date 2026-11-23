@@ -11,6 +11,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -27,6 +30,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -35,6 +40,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.photobackup.backup.BackupEngine
+import dev.photobackup.media.PhoneFolders
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.smb.RemoteStore
 import dev.photobackup.ui.Screen
@@ -45,16 +51,30 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
     val state by viewModel.state.collectAsState()
     var picking by remember { mutableStateOf(false) }
     var addingFolder by remember { mutableStateOf(false) }
+    var addingRule by remember { mutableStateOf(false) }
+    var rulePath by remember { mutableStateOf<String?>(null) }
+    var confirm by remember { mutableStateOf<RuleConfirm?>(null) }
+    val scope = rememberCoroutineScope()
     val s = state.settings
 
-    BackHandler(enabled = picking || addingFolder) { picking = false; addingFolder = false }
+    BackHandler(enabled = picking || addingFolder || addingRule) {
+        if (rulePath != null) rulePath = null else { picking = false; addingFolder = false; addingRule = false }
+    }
     Screen(
         when {
             picking -> "Backup folder"
             addingFolder -> "Add phone folder"
+            rulePath != null -> "Name the folder"
+            addingRule -> "Folder for a phone folder"
             else -> "Settings"
         },
-        onBack = { if (picking || addingFolder) { picking = false; addingFolder = false } else onBack() },
+        onBack = {
+            when {
+                rulePath != null -> rulePath = null
+                picking || addingFolder || addingRule -> { picking = false; addingFolder = false; addingRule = false }
+                else -> onBack()
+            }
+        },
     ) {
         if (s == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
@@ -78,6 +98,37 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
                 onAdd = { viewModel.addFolder(it); addingFolder = false },
                 onRetry = { viewModel.loadPhoneFolders() },
             )
+            return@Screen
+        }
+        if (addingRule) {
+            val path = rulePath
+            if (path == null) {
+                PhoneFolderBrowser(
+                    list = state.phoneFolders,
+                    folders = s.folders,
+                    onAdd = { rulePath = PhoneFolders.normalise(it) },
+                    onRetry = { viewModel.loadPhoneFolders() },
+                    pickIncluded = true,
+                    actionLabel = "Choose",
+                )
+            } else {
+                RuleNameEntry(path, s.folderRules.values.distinct().sortedBy { it.lowercase() }, viewModel) { name ->
+                    scope.launch {
+                        val n = viewModel.countOnDrive(path)
+                        if (n == 0) {
+                            viewModel.addRule(path, name, moveExisting = false)
+                            rulePath = null; addingRule = false
+                        } else confirm = RuleConfirm.Add(path, name, n)
+                    }
+                }
+            }
+            RuleDialog(confirm, { confirm = null }) { c, yes ->
+                confirm = null
+                if (c is RuleConfirm.Add) {
+                    viewModel.addRule(c.path, c.name, yes)
+                    rulePath = null; addingRule = false
+                }
+            }
             return@Screen
         }
         Column(
@@ -106,6 +157,17 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
             FreeUpAge(s, viewModel)
             HorizontalDivider()
             Folders(s, viewModel) { viewModel.loadPhoneFolders(); addingFolder = true }
+            HorizontalDivider()
+            FolderRulesSection(s, onAdd = { viewModel.loadPhoneFolders(); addingRule = true }) { path ->
+                scope.launch {
+                    val n = viewModel.countOnDrive(path)
+                    if (n == 0) viewModel.removeRule(path, false) else confirm = RuleConfirm.Remove(path, n)
+                }
+            }
+            RuleDialog(confirm, { confirm = null }) { c, yes ->
+                confirm = null
+                if (c is RuleConfirm.Remove) viewModel.removeRule(c.path, yes)
+            }
         }
     }
 }
@@ -208,4 +270,65 @@ private fun Folders(s: AppSettings, vm: SettingsViewModel, onAddFolder: () -> Un
         }
     }
     OutlinedButton(onClick = onAddFolder) { Text("Add folder") }
+}
+
+private sealed interface RuleConfirm {
+    val n: Int
+    data class Add(val path: String, val name: String, override val n: Int) : RuleConfirm
+    data class Remove(val path: String, override val n: Int) : RuleConfirm
+}
+
+@Composable
+private fun RuleDialog(c: RuleConfirm?, onDismiss: () -> Unit, onAnswer: (RuleConfirm, Boolean) -> Unit) {
+    if (c == null) return
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        text = {
+            Text(
+                when (c) {
+                    is RuleConfirm.Add -> "Also move the ${c.n} already on the drive?"
+                    is RuleConfirm.Remove -> "Move the ${c.n} back to the default?"
+                }
+            )
+        },
+        confirmButton = { TextButton(onClick = { onAnswer(c, true) }) { Text("Yes") } },
+        dismissButton = { TextButton(onClick = { onAnswer(c, false) }) { Text("No") } },
+    )
+}
+
+@Composable
+private fun FolderRulesSection(s: AppSettings, onAdd: () -> Unit, onRemove: (String) -> Unit) {
+    Section("Folder rules")
+    Text("Send a phone folder's backups to a drive folder with a name you choose.", style = MaterialTheme.typography.bodySmall)
+    for ((path, name) in s.folderRules.entries.sortedBy { it.key.lowercase() }) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("${path.removeSuffix("/")} \u2192 $name", Modifier.weight(1f))
+            TextButton(onClick = { onRemove(path) }) { Text("Remove") }
+        }
+    }
+    OutlinedButton(onClick = onAdd) { Text("Add rule") }
+}
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun RuleNameEntry(path: String, existing: List<String>, vm: SettingsViewModel, onSave: (String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(path.removeSuffix("/"), style = MaterialTheme.typography.titleMedium)
+        OutlinedTextField(
+            name, { name = it; error = null }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+            label = { Text("Drive folder name") }, isError = error != null,
+            supportingText = error?.let { { Text(it) } },
+        )
+        if (existing.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (e in existing) AssistChip(onClick = { name = e; error = null }, label = { Text(e) })
+            }
+        }
+        Button(onClick = {
+            val err = vm.nameError(name)
+            if (err != null) error = err else onSave(name)
+        }) { Text("Save rule") }
+    }
 }
