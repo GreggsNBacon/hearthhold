@@ -10,6 +10,7 @@ import dev.photobackup.smb.RemoteStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import java.io.IOException
 import java.io.InputStream
 import java.time.ZoneId
@@ -43,22 +44,27 @@ class BackupEngine(
     private val settings: BackupSettings,
     private val clock: () -> Long,
     private val fat32MaxBytes: Long = RemotePathPlanner.FAT32_MAX_BYTES,
+    /** A write failure counts as the FAT32 limit only within this many bytes past it (stream buffering). */
+    private val fat32SlackBytes: Long = 8L * 1024 * 1024,
 ) {
     companion object {
         const val FAT32_ERROR = "too big for this drive's format (FAT32, 4 GB limit)"
         const val VERIFY_ERROR = "verification failed"
+        const val SIZE_ERROR = "size mismatch"
         private const val MAX_CLASH = 10_000
     }
 
     private enum class Outcome { UPLOADED, SKIPPED, FAILED }
 
-    private var bytesDone = 0L
+    /** Per-run state shared with [processItem]. */
+    private class RunState(val freeAtConnect: Long, val total: Int) {
+        var bytesDone = 0L
+    }
 
     suspend fun run(
         items: List<PhoneMedia>,
         onProgress: (done: Int, total: Int, bytes: Long) -> Unit = { _, _, _ -> },
     ): BackupResult = withContext(Dispatchers.IO) {
-        bytesDone = 0L
         // 1. Connect once.
         val drive = try {
             store.connect()
@@ -78,6 +84,7 @@ class BackupEngine(
         var skipped = 0
         var failed = 0
         var free = drive.freeBytes
+        val state = RunState(drive.freeBytes, work.size)
 
         for ((i, m) in work.withIndex()) {
             ensureActive()
@@ -100,7 +107,7 @@ class BackupEngine(
                 m.sizeBytes > free -> return@withContext BackupResult.Stopped(RemoteException.DriveFull())
 
                 else -> try {
-                    processItem(m, i, work.size, onProgress)
+                    processItem(m, i, state, onProgress)
                 } catch (e: RemoteException) {
                     return@withContext BackupResult.Stopped(e)
                 }
@@ -110,7 +117,7 @@ class BackupEngine(
                 Outcome.SKIPPED -> skipped++
                 Outcome.FAILED -> failed++
             }
-            onProgress(i + 1, work.size, bytesDone)
+            onProgress(i + 1, work.size, state.bytesDone)
         }
         BackupResult.Done(uploaded, skipped, failed)
     }
@@ -142,7 +149,7 @@ class BackupEngine(
     private suspend fun processItem(
         m: PhoneMedia,
         index: Int,
-        total: Int,
+        state: RunState,
         onProgress: (Int, Int, Long) -> Unit,
     ): Outcome {
         val dir = RemotePathPlanner.targetDir(settings.destination, settings.deviceName, m, settings.zone)
@@ -185,25 +192,41 @@ class BackupEngine(
             return fail(m, e.message)
         } ?: return missingOnPhone(m) // nothing written yet, so no .part to remove
 
+        val ctx = coroutineContext
         var offered = 0L
         var partCreated = false
         val sha: String = try {
             input.use { inp ->
                 store.openWrite(part).also { partCreated = true }.use { out ->
                     Hashing.copyWithSha256(inp, out) { n ->
+                        ctx.ensureActive() // cancellable per chunk; row stays UPLOADING for cleanup
                         offered += n
-                        bytesDone += n
-                        onProgress(index, total, bytesDone)
+                        state.bytesDone += n
+                        onProgress(index, state.total, state.bytesDone)
                     }
                 }
             }
         } catch (e: IOException) {
+            if (!partCreated) {
+                // openWrite itself failed: the .part (if any) is not ours, so stop tracking it.
+                if (e is RemoteException) {
+                    ledger.upsert(entry(m, BackupStatus.PENDING))
+                    throw e
+                }
+                return fail(m, e.message)
+            }
+            // smbj can't report the file system, and FAT32 overflow surfaces as a plain IOException
+            // or as DISK_FULL (Samba EFBIG / Windows FAT), so a failure right at the 4 GB mark means FAT32.
+            val nearLimit = m.sizeBytes > fat32MaxBytes &&
+                offered >= fat32MaxBytes && offered < fat32MaxBytes + fat32SlackBytes
+            val fat32 = nearLimit && when (e) {
+                is RemoteException.DriveFull -> state.freeAtConnect >= m.sizeBytes
+                is RemoteException -> false
+                else -> true
+            }
+            if (fat32) return failAndRemovePart(m, part, FAT32_ERROR)
             if (e is RemoteException) throw e
-            // smbj can't report the file system, so a write failing at the 4 GB mark means FAT32.
-            val fat32 = m.sizeBytes > fat32MaxBytes && offered >= fat32MaxBytes
-            val msg = if (fat32) FAT32_ERROR else e.message
-            // If openWrite itself failed, the .part is not ours: never touch it.
-            return if (partCreated) failAndRemovePart(m, part, msg) else fail(m, msg)
+            return failAndRemovePart(m, part, e.message)
         }
 
         // 6. Rename onto the final name (fails rather than overwrite), then clear partPath.
@@ -214,6 +237,9 @@ class BackupEngine(
             return failAndRemovePart(m, part, e.message)
         }
         ledger.upsert(entry(m, BackupStatus.UPLOADING, sha = sha, remote = final))
+
+        // The phone must have delivered exactly the size it reported.
+        if (offered != m.sizeBytes) return failAndRemoveFinal(m, final, SIZE_ERROR)
 
         // 7. Verify by reading the copy back.
         val remoteSha = try {
@@ -227,14 +253,19 @@ class BackupEngine(
             ledger.upsert(entry(m, BackupStatus.VERIFIED, sha = sha, remote = final))
             return Outcome.UPLOADED
         }
+        return failAndRemoveFinal(m, final, VERIFY_ERROR)
+    }
+
+    /** Deletes the copy this item just renamed into place (it failed a check), then marks FAILED. */
+    private suspend fun failAndRemoveFinal(m: PhoneMedia, final: String, msg: String): Outcome {
         val removed = try {
-            store.delete(final) // the just-renamed copy that failed verification
+            store.delete(final)
             true
         } catch (e: IOException) {
             if (e is RemoteException) throw e
             false
         }
-        ledger.upsert(entry(m, BackupStatus.FAILED, error = VERIFY_ERROR, remote = if (removed) null else final))
+        ledger.upsert(entry(m, BackupStatus.FAILED, error = msg, remote = if (removed) null else final))
         return Outcome.FAILED
     }
 
