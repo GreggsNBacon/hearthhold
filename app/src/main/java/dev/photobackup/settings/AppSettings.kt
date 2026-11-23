@@ -20,6 +20,8 @@ data class AppSettings(
     val overnightOnly: Boolean = false,
     val overnightStartHour: Int = 1,
     val overnightEndHour: Int = 6,
+    /** Folder rules: normalised phone relative path (e.g. "Pictures/WhatsApp/") to drive folder name. */
+    val folderRules: Map<String, String> = emptyMap(),
 ) {
     /** The active window, or null when "Only back up overnight" is off. */
     fun overnightWindow(): OvernightWindow? =

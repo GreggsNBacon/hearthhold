@@ -1,0 +1,39 @@
+package dev.photobackup.media
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class FolderRulesTest {
+    private val rules = mapOf("Pictures/WhatsApp/" to "Memes", "Pictures/" to "Pics")
+
+    @Test fun longestPrefixWins() {
+        assertEquals("Memes", FolderRules.ruleFor("Pictures/WhatsApp/Media/", rules))
+        assertEquals("Pics", FolderRules.ruleFor("Pictures/Other/", rules))
+        assertNull(FolderRules.ruleFor("DCIM/Camera/", rules))
+    }
+
+    @Test fun matchIsCaseInsensitiveAndNormalised() {
+        assertEquals("Memes", FolderRules.ruleFor("pictures/whatsapp/", rules))
+        assertEquals("Memes", FolderRules.ruleFor("/Pictures/WhatsApp", rules))
+        assertEquals("Memes", FolderRules.ruleFor("Pictures/WhatsApp/", mapOf("pictures/whatsapp" to "Memes")))
+    }
+
+    @Test fun assignmentBeatsRuleBeatsDefault() {
+        assertEquals("Dog", FolderRules.desired("Pictures/WhatsApp/", "Dog", rules))
+        assertEquals("Memes", FolderRules.desired("Pictures/WhatsApp/", null, rules))
+        assertNull(FolderRules.desired("DCIM/Camera/", null, rules))
+    }
+
+    @Test fun canonicalSanitisesAndRejectsBlank() {
+        assertEquals("a_b", FolderRules.canonical("  a/b. "))
+        assertNull(FolderRules.canonical("   "))
+        assertNull(FolderRules.canonical(""))
+    }
+
+    @Test fun sameIgnoresCase() {
+        assertTrue(FolderRules.same("Dog", "dOG"))
+        assertTrue(!FolderRules.same("Dog", "Cat"))
+    }
+}

@@ -21,6 +21,9 @@ interface LedgerDao : LedgerStore {
     @Query("SELECT * FROM LedgerEntry WHERE partPath IS NOT NULL")
     override suspend fun withPartPath(): List<LedgerEntry>
 
+    @Query("SELECT * FROM LedgerEntry WHERE movingTo IS NOT NULL")
+    override suspend fun withMovingTo(): List<LedgerEntry>
+
     @Query("DELETE FROM LedgerEntry WHERE mediaId = :mediaId")
     override suspend fun delete(mediaId: Long)
 

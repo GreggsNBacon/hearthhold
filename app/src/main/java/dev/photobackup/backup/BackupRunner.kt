@@ -3,6 +3,7 @@ package dev.photobackup.backup
 import android.content.Context
 import androidx.room.Room
 import dev.photobackup.ledger.AppDatabase
+import dev.photobackup.ledger.MIGRATION_1_2
 import dev.photobackup.ledger.LedgerRules
 import dev.photobackup.media.LocalMediaSource
 import dev.photobackup.settings.KeystoreCredentialCipher
@@ -50,6 +51,7 @@ object LedgerDatabase {
 
     fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
         instance ?: Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "ledger.db")
+            .addMigrations(MIGRATION_1_2)
             .build().also { instance = it }
     }
 }

@@ -108,6 +108,18 @@ class SettingsStoreTest {
         assertEquals(setOf("Movies/"), s.folders.extraRelativePaths)
     }
 
+    @Test fun roundTripsFolderRules() = runBlocking {
+        val (store, _) = newStore()
+        assertEquals(emptyMap<String, String>(), store.settings.first().folderRules)
+        store.update { it.copy(folderRules = mapOf("Pictures/WhatsApp/" to "Memes", "DCIM/Dog/" to "Dog")) }
+        assertEquals(
+            mapOf("Pictures/WhatsApp/" to "Memes", "DCIM/Dog/" to "Dog"),
+            store.settings.first().folderRules,
+        )
+        store.update { it.copy(folderRules = emptyMap()) }
+        assertEquals(emptyMap<String, String>(), store.settings.first().folderRules)
+    }
+
     private class ThrowingCipher : CredentialCipher {
         override fun encrypt(plain: String) = "enc:$plain"
         override fun decrypt(cipher: String): String = throw java.security.GeneralSecurityException("bad tag")

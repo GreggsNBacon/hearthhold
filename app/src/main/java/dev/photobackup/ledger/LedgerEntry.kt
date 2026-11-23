@@ -19,4 +19,6 @@ data class LedgerEntry(
     val status: BackupStatus,
     val lastError: String?,
     val updatedAtMs: Long,
+    /** New drive path while a move is in flight (set before the rename, cleared after remotePath is updated). */
+    val movingTo: String? = null,
 )

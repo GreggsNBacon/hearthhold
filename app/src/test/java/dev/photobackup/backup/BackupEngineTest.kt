@@ -31,6 +31,7 @@ class MemoryLedger : LedgerStore {
     override suspend fun get(mediaId: Long) = rows.value[mediaId]
     override suspend fun byStatus(s: BackupStatus) = rows.value.values.filter { it.status == s }
     override suspend fun withPartPath() = rows.value.values.filter { it.partPath != null }
+    override suspend fun withMovingTo() = rows.value.values.filter { it.movingTo != null }
     override suspend fun delete(mediaId: Long) { rows.update { it - mediaId } }
     override fun observeCounts(): Flow<Map<BackupStatus, Int>> =
         rows.map { m -> m.values.groupingBy { it.status }.eachCount() }
