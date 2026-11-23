@@ -53,8 +53,8 @@ sealed interface SecondResult {
  * - Deletes only its own tracked `.part` and a copy of its own that failed its read-back. Bin, empty, auto-empty and
  *   restore are never mirrored; a second copy moves only by this step's own folder reconcile.
  *
- * Run order: connect, own `.part` cleanup, move recovery (same four-case rule as the main engine), folder reconcile,
- * then the missing copies one at a time, waiting [itemPauseMs] between items. Cancellable between chunks; a cancelled
+ * Run order: connect, re-copy check (device folder gone → VERIFIED rows demoted), own `.part` cleanup, move recovery
+ * (same four-case rule as the main engine), folder reconcile, then the missing copies one at a time, waiting [itemPauseMs] between items. Cancellable between chunks; a cancelled
  * or dropped copy keeps its `.part` recorded for the next run's cleanup. A [RemoteException] from the second store
  * stops the run (Unreachable, or AuthFailed); a row is VERIFIED only after its file was read back in full.
  *
@@ -116,6 +116,7 @@ class SecondBackupEngine(
             return@withContext stopped(e)
         }
         try {
+            demoteIfRootGone()
             cleanLeftovers()
             val unsettled = recoverMoves()
             reconcile(unsettled)
@@ -127,6 +128,28 @@ class SecondBackupEngine(
 
     private fun stopped(e: IOException): SecondResult =
         if (e is RemoteException.AuthFailed) SecondResult.AuthFailed else SecondResult.Unreachable
+
+    /**
+     * `<dest2>\<device>` gone (new drive, wiped PC folder) while VERIFIED copies are recorded: those copies are lost,
+     * so each is demoted (conditional: only while still that same settled VERIFIED copy) and copied again this run;
+     * an identical file that is still there is adopted by hash as usual. A non-network stat error demotes nothing.
+     */
+    private suspend fun demoteIfRootGone() {
+        val verified = copies.byStatus(SecondStatus.VERIFIED)
+        if (verified.isEmpty()) return
+        val st = try {
+            store.stat(root)
+        } catch (e: IOException) {
+            if (e is RemoteException) throw e
+            return
+        }
+        if (st != null && st.isDirectory) return
+        for (c in verified) {
+            val path = c.remotePath ?: continue
+            val sha = c.sha256 ?: continue
+            copies.demoteIfVerified(c.mediaId, path, sha, clock())
+        }
+    }
 
     /** Deletes each row's own tracked `.part`; the row then waits for a fresh copy. */
     private suspend fun cleanLeftovers() {
@@ -326,7 +349,6 @@ class SecondBackupEngine(
      * is not in today's layout), so the second location keeps the main drive's layout and names, clash names included.
      */
     private suspend fun target(row: LedgerEntry): Pair<String, String> {
-        val folder = folderFor(row.mediaId, row.relativePath)
         val segs = row.remotePath?.split('\\').orEmpty()
         if (segs.size >= 2) {
             val year = segs[segs.size - 2]
@@ -335,6 +357,7 @@ class SecondBackupEngine(
                 return "$root\\${desiredFolder(row)}\\$year" to name
             }
         }
+        val folder = folderFor(row.mediaId, row.relativePath)
         val dir = RemotePathPlanner.targetDir(settings.destination, settings.deviceName, media(row), settings.zone, folder)
         return dir to RemotePathPlanner.sanitise(row.displayName)
     }

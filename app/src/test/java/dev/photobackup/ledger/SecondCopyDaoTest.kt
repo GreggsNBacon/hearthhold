@@ -80,6 +80,28 @@ class SecondCopyDaoTest {
         assertFalse(dao.endMoveIf(1, "B/Dog/a.jpg", "B/x.jpg", null, null, 12)) // no move recorded any more
     }
 
+    @Test fun demoteIfVerifiedOnlyDemotesTheSameSettledVerifiedCopy() = runBlocking {
+        dao.upsert(row(1)) // VERIFIED at B/a.jpg, sha abc
+        assertFalse(dao.demoteIfVerified(1, "B/other.jpg", "abc", 9)) // other path
+        assertFalse(dao.demoteIfVerified(1, "B/a.jpg", "older", 9)) // other hash
+        assertEquals(SecondStatus.VERIFIED, dao.get(1)!!.status)
+        dao.upsert(row(2).copy(movingTo = "B/Dog/a.jpg"))
+        assertFalse(dao.demoteIfVerified(2, "B/a.jpg", "abc", 9)) // move in flight
+        dao.upsert(row(3, SecondStatus.UPLOADING))
+        assertFalse(dao.demoteIfVerified(3, "B/a.jpg", "abc", 9)) // not VERIFIED
+        dao.upsert(row(4, part = "x.part"))
+        assertFalse(dao.demoteIfVerified(4, "B/a.jpg", "abc", 9)) // .part in flight
+        assertTrue(dao.demoteIfVerified(1, "B/a.jpg", "abc", 9))
+        val d = dao.get(1)!!
+        assertEquals(SecondStatus.FAILED, d.status)
+        assertEquals(SECOND_MISSING_ERROR, d.lastError)
+        assertEquals("B/a.jpg", d.remotePath)
+        assertEquals(9L, d.updatedAtMs)
+        assertEquals(SecondStatus.VERIFIED, dao.get(2)!!.status)
+        assertEquals(SecondStatus.UPLOADING, dao.get(3)!!.status)
+        assertEquals(SecondStatus.VERIFIED, dao.get(4)!!.status)
+    }
+
     @Test fun withPartPathAllAndSetLastError() = runBlocking {
         dao.upsert(row(1)); dao.upsert(row(2, SecondStatus.FAILED, null, "x.part"))
         assertEquals(listOf(2L), dao.withPartPath().map { it.mediaId })

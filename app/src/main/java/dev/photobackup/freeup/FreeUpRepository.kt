@@ -137,16 +137,21 @@ class FreeUpRepository(
     /**
      * Null if [e] has a usable second copy: VERIFIED, same hash as the ledger (Task 3's "done" rule), settled (no
      * move in flight) and its file on the second store with the right size. Else [WAITING_SECOND].
-     * IOException from the second store propagates.
+     * A VERIFIED copy whose file is missing, a folder or of the wrong size is demoted (conditional write, only while
+     * the row is still that same settled copy) so the next backup run copies it again; nothing is deleted and the
+     * ledger row is never touched. IOException from the second store propagates.
      */
     private suspend fun secondMiss(e: LedgerEntry, gate: SecondGate): String? {
         val c = gate.copies.get(e.mediaId) ?: return WAITING_SECOND
-        if (c.status != SecondStatus.VERIFIED || c.sha256 == null || c.sha256 != e.localSha256 ||
+        val sha = c.sha256
+        if (c.status != SecondStatus.VERIFIED || sha == null || sha != e.localSha256 ||
             c.movingTo != null || c.sizeBytes != e.sizeBytes
         ) return WAITING_SECOND
         val path = c.remotePath ?: return WAITING_SECOND
         val remote = gate.store.stat(path)
-        return if (remote == null || remote.isDirectory || remote.sizeBytes != e.sizeBytes) WAITING_SECOND else null
+        if (remote != null && !remote.isDirectory && remote.sizeBytes == e.sizeBytes) return null
+        gate.copies.demoteIfVerified(c.mediaId, path, sha, clock())
+        return WAITING_SECOND
     }
 
     fun deleteRequest(context: Context, items: List<LedgerEntry>): IntentSender =

@@ -1,6 +1,10 @@
 package dev.photobackup.backup
 
+import dev.photobackup.freeup.FreeUpRepository
+import dev.photobackup.freeup.SecondGate
 import dev.photobackup.ledger.BackupStatus
+import dev.photobackup.ledger.SECOND_MISSING_ERROR
+import dev.photobackup.media.PhoneMedia
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.ledger.SecondCopy
 import dev.photobackup.ledger.SecondCopyDao
@@ -68,6 +72,20 @@ class MemorySecondCopies : SecondCopyDao {
             if (e != null && e.movingTo == expected) {
                 n = 1
                 m + (mediaId to e.copy(remotePath = remotePath, movingTo = movingTo, lastError = lastError, updatedAtMs = nowMs))
+            } else { n = 0; m }
+        }
+        return n
+    }
+    override suspend fun demoteCount(
+        mediaId: Long, remotePath: String, sha: String, from: SecondStatus, to: SecondStatus, error: String, nowMs: Long,
+    ): Int {
+        var n = 0
+        rows.update { m ->
+            val e = m[mediaId]
+            if (e != null && e.status == from && e.remotePath == remotePath && e.sha256 == sha &&
+                e.movingTo == null && e.partPath == null
+            ) {
+                n = 1; m + (mediaId to e.copy(status = to, lastError = error, updatedAtMs = nowMs))
             } else { n = 0; m }
         }
         return n
@@ -642,5 +660,96 @@ class SecondBackupEngineTest {
         engine(s2, ledger, copies, phone).run()
         assertEquals(10_000L, s2.times["$dir2\\IMG.jpg"])
         assertEquals(dev.photobackup.smb.MSG_DRIVE_ERROR, SecondBackupEngine.itemError(IOException(dev.photobackup.smb.MSG_DRIVE_ERROR)))
+    }
+
+    // ---- Lost second copies are made again ----
+
+    private fun verifiedCopy(e: LedgerEntry, path: String) =
+        SecondCopy(e.mediaId, path, null, null, SecondStatus.VERIFIED, e.sizeBytes, e.localSha256, null, 0)
+
+    @Test fun aSecondCopyTheGateFoundMissingIsCopiedAgainNextRun() = runBlocking {
+        val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
+        val data = bytes(700); val other = bytes(50, 3)
+        val e = row(1, data); ledger.upsert(e)
+        val keep = row(2, other, name = "keep.jpg"); ledger.upsert(keep)
+        copies.upsert(verifiedCopy(e, "$dir2\\IMG.jpg")) // deleted by hand on the second drive
+        copies.upsert(verifiedCopy(keep, "$dir2\\keep.jpg")); s2.put("$dir2\\keep.jpg", other)
+        val mainStore = FakeRemoteStore(); mainStore.put("$mainDir\\IMG.jpg", data)
+        val phone = Phone(); phone.files["content://media/1"] = data
+        val pm = PhoneMedia(1, e.localUri, e.displayName, e.relativePath, e.sizeBytes, e.dateTakenMs,
+            e.dateModifiedSec, e.dateModifiedSec, false, "")
+        val reasons = mutableMapOf<Long, String>()
+        val kept = FreeUpRepository(ledger).recheck(
+            listOf(e), mainStore, mapOf(1L to pm), phone.opener,
+            onFailed = { id, r -> reasons[id] = r }, second = SecondGate(s2, copies),
+        )
+        assertTrue(kept.isEmpty())
+        assertEquals(FreeUpRepository.WAITING_SECOND, reasons[1L])
+        assertEquals(SecondStatus.FAILED, copies.get(1)!!.status)
+        assertEquals(1, SecondWaiting.count(ledger, copies)) // status shows it waiting, not up to date
+
+        val r = engine(s2, ledger, copies, phone).run()
+        assertEquals(SecondResult.Done(copied = 1, adopted = 0, failed = 0, waiting = 0), r)
+        assertArrayEquals(data, s2.files["$dir2\\IMG.jpg"])
+        val c = copies.get(1)!!
+        assertEquals(SecondStatus.VERIFIED, c.status)
+        assertEquals("$dir2\\IMG.jpg", c.remotePath)
+        assertNull(c.lastError)
+        assertEquals(0, SecondWaiting.count(ledger, copies))
+        assertTrue(s2.deletes.isEmpty())
+        assertEquals(e, ledger.get(1)) // main row untouched
+    }
+
+    @Test fun aWipedDeviceFolderRecopiesEveryVerifiedCopy() = runBlocking {
+        val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
+        val a = bytes(100, 1); val b = bytes(120, 2)
+        val ea = row(1, a, name = "a.jpg"); val eb = row(2, b, name = "b.jpg")
+        ledger.upsert(ea); ledger.upsert(eb)
+        copies.upsert(verifiedCopy(ea, "$dir2\\a.jpg")); copies.upsert(verifiedCopy(eb, "$dir2\\b.jpg"))
+        s2.mkdirs("S") // the share is there, the device folder is not (new drive, wiped PC folder)
+        val phone = Phone(); phone.files["content://media/1"] = a; phone.files["content://media/2"] = b
+        val r = engine(s2, ledger, copies, phone).run()
+        assertEquals(SecondResult.Done(copied = 2, adopted = 0, failed = 0, waiting = 0), r)
+        assertArrayEquals(a, s2.files["$dir2\\a.jpg"])
+        assertArrayEquals(b, s2.files["$dir2\\b.jpg"])
+        assertTrue(copies.all().all { it.status == SecondStatus.VERIFIED && it.lastError == null })
+        assertTrue(s2.deletes.isEmpty())
+    }
+
+    @Test fun aWipedDeviceFolderWithNoSourceShowsWaitingNotUpToDate() = runBlocking {
+        val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
+        val a = bytes(100, 1)
+        val ea = row(1, a, name = "a.jpg", status = BackupStatus.REMOVED_FROM_PHONE); ledger.upsert(ea)
+        copies.upsert(verifiedCopy(ea, "$dir2\\a.jpg"))
+        val r = engine(s2, ledger, copies, main = Main(null)).run() // phone gone, main drive away
+        assertEquals(SecondResult.Done(copied = 0, adopted = 0, failed = 0, waiting = 1), r)
+        val c = copies.get(1)!!
+        assertEquals(SecondStatus.FAILED, c.status)
+        assertEquals(SECOND_MISSING_ERROR, c.lastError)
+        val waiting = SecondWaiting.count(ledger, copies)
+        assertEquals(SecondStatusText.waiting(1), SecondStatusText.of(r, waiting))
+        assertEquals(ea, ledger.get(1))
+    }
+
+    @Test fun aWipedDeviceFolderLeavesARowWithAMoveInFlight() = runBlocking {
+        val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
+        val a = bytes(100, 1)
+        val ea = row(1, a, name = "a.jpg"); ledger.upsert(ea)
+        copies.upsert(verifiedCopy(ea, "$dir2\\a.jpg").copy(movingTo = "$dog2\\a.jpg"))
+        val phone = Phone(); phone.files["content://media/1"] = a
+        engine(s2, ledger, copies, phone).run()
+        val c = copies.get(1)!!
+        assertEquals(SecondStatus.VERIFIED, c.status) // conditional: a row with a move in flight is not demoted
+        assertEquals("$dog2\\a.jpg", c.movingTo)
+    }
+
+    @Test fun aPresentDeviceFolderDemotesNothing() = runBlocking {
+        val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
+        val a = bytes(100, 1)
+        val ea = row(1, a, name = "a.jpg"); ledger.upsert(ea)
+        copies.upsert(verifiedCopy(ea, "$dir2\\a.jpg")); s2.put("$dir2\\a.jpg", a)
+        val r = engine(s2, ledger, copies, Phone()).run()
+        assertEquals(SecondResult.Done(0, 0, 0, 0), r)
+        assertEquals(verifiedCopy(ea, "$dir2\\a.jpg"), copies.get(1))
     }
 }

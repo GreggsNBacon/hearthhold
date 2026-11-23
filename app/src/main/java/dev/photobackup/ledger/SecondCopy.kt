@@ -10,6 +10,9 @@ import kotlinx.coroutines.flow.Flow
 
 enum class SecondStatus { UPLOADING, VERIFIED, FAILED }
 
+/** Stored on a VERIFIED second copy whose file was found missing or of the wrong size; the next run copies it again. */
+const val SECOND_MISSING_ERROR = "Second copy missing — will copy again"
+
 /** One row per item copied to the optional second backup location. Absent entirely while that feature is off. */
 @Entity
 data class SecondCopy(
@@ -79,6 +82,23 @@ interface SecondCopyDao {
     suspend fun endMoveIf(
         mediaId: Long, expected: String, remotePath: String?, movingTo: String?, lastError: String?, nowMs: Long,
     ): Boolean = endMoveIfCount(mediaId, expected, remotePath, movingTo, lastError, nowMs) > 0
+
+    @Query(
+        "UPDATE SecondCopy SET status = :to, lastError = :error, updatedAtMs = :nowMs " +
+            "WHERE mediaId = :mediaId AND status = :from AND remotePath = :remotePath AND sha256 = :sha " +
+            "AND movingTo IS NULL AND partPath IS NULL"
+    )
+    suspend fun demoteCount(
+        mediaId: Long, remotePath: String, sha: String, from: SecondStatus, to: SecondStatus, error: String, nowMs: Long,
+    ): Int
+
+    /**
+     * Marks a VERIFIED copy FAILED with [SECOND_MISSING_ERROR] (its file is gone or of the wrong size), so the next
+     * run copies it again. Only while the row is still that same settled copy: VERIFIED at [remotePath] with [sha],
+     * no move or `.part` in flight. False = it changed meanwhile, left alone. Never touches a drive file.
+     */
+    suspend fun demoteIfVerified(mediaId: Long, remotePath: String, sha: String, nowMs: Long): Boolean =
+        demoteCount(mediaId, remotePath, sha, SecondStatus.VERIFIED, SecondStatus.FAILED, SECOND_MISSING_ERROR, nowMs) > 0
 
     /** Drops one row (a pending row of an item left waiting). Never touches a drive file. */
     @Query("DELETE FROM SecondCopy WHERE mediaId = :mediaId")

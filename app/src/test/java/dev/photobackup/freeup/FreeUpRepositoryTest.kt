@@ -4,7 +4,9 @@ import dev.photobackup.backup.Hashing
 import dev.photobackup.backup.LocalOpener
 import dev.photobackup.backup.MemoryLedger
 import dev.photobackup.backup.MemorySecondCopies
+import dev.photobackup.ledger.SECOND_MISSING_ERROR
 import dev.photobackup.ledger.SecondCopy
+import dev.photobackup.ledger.SecondCopyDao
 import dev.photobackup.ledger.SecondStatus
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerEntry
@@ -356,5 +358,49 @@ class FreeUpRepositoryTest {
         )
         assertEquals("Second location not reachable", FreeUpRepository.SECOND_UNREACHABLE)
         listOf(1L, 2L, 3L).forEach { assertEquals(BackupStatus.VERIFIED, ledger.get(it)!!.status) }
+    }
+
+    @Test fun gateDemotesAMissingOrWrongSizeSecondCopySoItIsCopiedAgain() = runBlocking {
+        val wrong = entry(1); val gone = entry(2); val fine = entry(3)
+        val (ledger, store, reasons) = gated(wrong, gone, fine)
+        secondCopy(wrong); second.files["s\\f1.jpg"] = ByteArray(9)
+        secondCopy(gone, file = false)
+        secondCopy(fine)
+        val kept = recheckGated(ledger, store, reasons, wrong, gone, fine)
+        assertEquals(listOf(3L), kept.map { it.mediaId })
+        assertEquals(FreeUpRepository.WAITING_SECOND, reasons[1L])
+        assertEquals(FreeUpRepository.WAITING_SECOND, reasons[2L])
+        for (id in listOf(1L, 2L)) {
+            val c = copies.get(id)!!
+            assertEquals(SecondStatus.FAILED, c.status)
+            assertEquals(SECOND_MISSING_ERROR, c.lastError)
+            assertEquals("s\\f$id.jpg", c.remotePath)
+            assertEquals(BackupStatus.VERIFIED, ledger.get(id)!!.status) // ledger row never touched
+        }
+        assertEquals(SecondStatus.VERIFIED, copies.get(3)!!.status)
+        assertTrue(second.deletes.isEmpty() && store.deletes.isEmpty()) // nothing deleted on either drive
+        assertEquals(9, second.files["s\\f1.jpg"]!!.size)
+    }
+
+    @Test fun gateLeavesASecondCopyThatChangedMeanwhile() = runBlocking {
+        val e = entry(1)
+        val (ledger, store, reasons) = gated(e)
+        secondCopy(e, file = false)
+        // A backup run starts a folder move on the row right after the gate read it.
+        val racing = object : SecondCopyDao by copies {
+            override suspend fun get(mediaId: Long): SecondCopy? = copies.get(mediaId).also {
+                it?.let { r -> copies.upsert(r.copy(movingTo = "s\\Dog\\f1.jpg")) }
+            }
+        }
+        val kept = FreeUpRepository(ledger).recheck(
+            listOf(e), store, mapOf(1L to phone(e)), opener(),
+            onFailed = { id, r -> reasons[id] = r }, second = SecondGate(second, racing),
+        )
+        assertTrue(kept.isEmpty())
+        assertEquals(FreeUpRepository.WAITING_SECOND, reasons[1L])
+        val c = copies.get(1)!!
+        assertEquals(SecondStatus.VERIFIED, c.status)
+        assertEquals("s\\Dog\\f1.jpg", c.movingTo)
+        assertNull(c.lastError)
     }
 }
