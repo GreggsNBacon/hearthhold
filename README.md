@@ -33,6 +33,7 @@
 - **Gentle on your router**: one file at a time by default, adjustable parallel uploads, optional overnight-only window.
 - **Organised drive**: `Device/Source folder/Year/`, with file dates set to when the photo was taken.
 - **Named folders**: send a phone folder, or hand-picked items in the Gallery, to a drive folder you name; files already on the drive move there on the next run (never overwritten).
+- **Optional second backup location**: a backup of the backup on another share, e.g. a PC; never deletes.
 
 ## Install
 
@@ -63,8 +64,19 @@
 - Overnight window: optionally restrict backups to set hours.
 - Notifications show progress and problems.
 - Interrupted copies restart from the beginning on the next run; the app cleans up its own `.part` files.
-- **Free up space**: removes only items you choose, after a full hash re-check against the drive copy and Android's own confirmation prompt.
+- **Free up space**: removes only items you choose, after a full hash re-check against the drive copy and Android's own confirmation prompt. With a second location, items must be verified there too, unless "Allow freeing up with only the main drive" is on.
 - Removed videos play from the drive, with loop and 0.25x–2x speed.
+
+## Second backup location
+
+- Off by default. In Settings → **Second backup location**: **Set up** (same steps as the drive setup), **Change**, or **Remove**.
+- Remove stops copying; nothing on either drive is deleted.
+- It refuses the main share or folder, or a folder inside or containing it.
+- After each backup run, everything already verified on the main drive is copied to the second location: from the phone file, or from the main drive if the phone no longer has it.
+- Each copy is verified by SHA-256. Layout is the same: `<dest>\<device>\<folder>\<year>\`.
+- Folder moves are mirrored. Nothing is ever deleted there: the Bin and emptying it leave the second copy alone, and junk is not copied.
+- If the second location is offline, it catches up on a later run.
+- Free up, swipe "Drive only" and Junk wait until the second copy is verified. Turn on **Allow freeing up with only the main drive** to skip that wait.
 
 ## Swipe review and the Bin
 
@@ -86,10 +98,12 @@ Each thumbnail can carry a small round badge in its corner:
 |---|---|
 | Green ✓ (checkmark) | **Backed up**: on the phone *and* on the drive, verified by hash. Safe to free up. |
 | Blue ☁ (cloud) | **On the drive only**: no longer on the phone (freed up, or never on this phone). Plays from the drive. |
+| Outlined ✓ | **On phone and main drive; second copy pending**. |
+| Outlined ☁ | **Drive only; second copy pending**. |
 | Red ! | **Backup failed**: tap it to see why. It retries on the next run. |
 | No badge | **Not backed up yet**: on the phone, waiting or uploading. |
 
-The chip at the top shows overall status, e.g. "Backing up 3 of 40", "5 waiting", "2 failed", "Drive not reachable", "Re-enter drive password", "Waiting for overnight window" or "Up to date". Tap it for details and drive free space.
+The chip at the top shows overall status, e.g. "Backing up 3 of 40", "5 waiting", "2 failed", "Drive not reachable", "Re-enter drive password", "Waiting for overnight window" or "Up to date". Tap it for details and drive free space. With a second location, the sheet also shows its line: Up to date, N waiting, Not reachable, Re-enter second location password or N failed.
 
 ## Drive layout
 
@@ -146,3 +160,9 @@ keyPassword=CHANGE_ME
 | 19 | Restoring from the Bin puts the file back in its folder on the drive | |
 | 20 | Emptying the Bin deletes only files inside `.Bin` | |
 | 21 | Items binned over 30 days ago are removed automatically on the next run | |
+| 22 | With the second location offline, the main backup still works; the second catches up on a later run | |
+| 23 | An item freed up from the phone is still copied to the second location, from the main drive | |
+| 24 | Free up is refused while the second location is unreachable (unless "Allow freeing up with only the main drive" is on) | |
+| 25 | A folder rule move on the main drive is mirrored on the second location | |
+| 26 | Binning or emptying the Bin on the main drive leaves the second copy in place | |
+| 27 | Remove (second location) leaves the files on both drives | |
