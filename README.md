@@ -34,6 +34,10 @@
 - **Organised drive**: `Device/Source folder/Year/`, with file dates set to when the photo was taken.
 - **Named folders**: send a phone folder, or hand-picked items in the Gallery, to a drive folder you name; files already on the drive move there on the next run (never overwritten).
 - **Optional second backup location**: a backup of the backup on another share, e.g. a PC; never deletes.
+- **Restore to phone**: copy photos and videos from the drive back onto the phone (new phone, or after a wipe), verified by hash.
+- **Drive health check**: now and then re-reads a sample of drive files; if one is damaged, repairs it from the phone or the second copy. Nothing is ever deleted for being bad.
+- **Stale warning**: a notification if backups have stopped for a few days while items are waiting.
+- **Wide video support**: more video formats play and get thumbnails (e.g. FLV).
 
 ## Install
 
@@ -72,7 +76,7 @@
 - Off by default. In Settings → **Second backup location**: **Set up** (same steps as the drive setup), **Change**, or **Remove**.
 - Remove stops copying; nothing on either drive is deleted.
 - It refuses the main share or folder, or a folder inside or containing it.
-- Enter the drive the same way in both setups (both by name or both by IP address): the check compares the text, so a name and an IP for the same drive are not caught.
+- The setup also compares the PC name with its IP address, so the same drive entered both ways is caught.
 - After each backup run, everything already verified on the main drive is copied to the second location: from the phone file, or from the main drive if the phone no longer has it.
 - Each copy is verified by SHA-256. Layout is the same: `<dest>\<device>\<folder>\<year>\`.
 - Folder moves are mirrored. Nothing is ever deleted there: the Bin and emptying it leave the second copy alone, and items already waiting for the Bin are not copied.
@@ -80,10 +84,37 @@
 - If the second drive is replaced or its device folder wiped, everything is copied again on the next run. A single missing second copy is noticed when you try to free that item up, and is copied again on the next run.
 - Free up, swipe "Drive only" and Junk wait until the second copy is verified. Turn on **Allow freeing up with only the main drive** to skip that wait.
 
+## Restore to phone
+
+- Gallery menu → **Restore to phone**. Pick folders and years, or **Everything**.
+- It checks the phone has enough free space first, and refuses if not.
+- Runs on Wi-Fi only. **Cancel** keeps the items already finished.
+- Files go back to their original phone folders. If Android won't allow that folder, they go to `DCIM/Restored` (photos) or `Movies/Restored` (videos).
+- Each file is read back and hash-checked on the phone before it counts as restored.
+- Restored items are not uploaded again by the next backup, so there are no duplicates.
+
+## Health check
+
+- Runs about once a day at most (roughly every 20 hours), on Wi-Fi, checking up to 200 files per drive per run, within a 2 GB read cap.
+- A damaged drive file is repaired from the phone copy, or from the second copy if the phone no longer has it.
+- A bad file is never deleted; it stays put until repaired.
+- The status sheet shows a line such as "Health check: all good (last checked 3 hours ago)".
+
+## Stale warning
+
+- Settings → **Warn if no backup for (days)**: 1 to 30, default 3.
+- If no backup has succeeded for that long while items are waiting, you get one notification a day.
+
+## Video formats
+
+- Videos play with Android's player, with a fallback decoder for formats it can't handle (e.g. FLV).
+- If no frame can be read for a thumbnail, a placeholder is shown instead.
+
 ## Swipe review and the Bin
 
 - Nothing changes until you tap **Finish**; until then every swipe can be undone.
-- Finish re-checks both copies (phone and drive) by hash, then Android asks once to confirm the phone delete.
+- Swiping has a fading label, an edge hint, icons and a small vibration. Videos are muted and play when you tap the card.
+- Finish shows "Checking N of M…" while it re-checks both copies (phone and drive) by hash, then Android asks once to confirm the phone delete.
 - Junk drive copies move to `<dest>\<device>\.Bin\<folder>\<year>\` on the next backup run.
 - Each gesture can also be set to "No action".
 - Restore renames the file back to its original place; if that name is taken it becomes `name (n).ext`.
@@ -168,3 +199,9 @@ keyPassword=CHANGE_ME
 | 25 | A folder rule move on the main drive is mirrored on the second location | |
 | 26 | Binning or emptying the Bin on the main drive leaves the second copy in place | |
 | 27 | Remove (second location) leaves the files on both drives | |
+| 28 | Restore a single folder to the phone: files appear in their original folder | |
+| 29 | Restore, then run a backup: nothing is uploaded again (no duplicates) | |
+| 30 | Cancel a restore partway: finished items stay on the phone | |
+| 31 | Set the stale warning to 1 day with a failing drive and items waiting: the notification appears | |
+| 32 | The health check status line shows after a check | |
+| 33 | When settings can't be read, "Couldn't read settings" with Retry shows, and Retry recovers | |
