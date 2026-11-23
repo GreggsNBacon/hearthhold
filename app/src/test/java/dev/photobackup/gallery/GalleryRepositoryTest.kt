@@ -35,7 +35,7 @@ class GalleryRepositoryTest {
         relativePath = "DCIM/Camera/",
         sizeBytes = 100L * id,
         dateTakenMs = takenMs,
-        dateModifiedSec = 5,
+        dateModifiedSec = 0, // same as phone(): the phone file is unchanged since the backup
         isVideo = false,
         localSha256 = "abc",
         remotePath = remote,
@@ -138,5 +138,38 @@ class GalleryRepositoryTest {
         val drive = GalleryMerge.merge(emptyList(), listOf(ledger(2, BackupStatus.REMOVED_FROM_PHONE))).single()
         assertEquals(BackupStatus.VERIFIED, both.status)
         assertEquals(BackupStatus.REMOVED_FROM_PHONE, drive.status)
+    }
+
+
+    @Test fun verifiedButEditedOnPhoneIsNotBackedUp() {
+        val edited = phone(1).copy(dateModifiedSec = 99)
+        val item = GalleryMerge.merge(listOf(edited), listOf(ledger(1, BackupStatus.VERIFIED))).single()
+        assertEquals(Location.PHONE, item.location) // no tick: the version on the phone now is not on the drive
+        assertNull(item.remotePath)
+        assertEquals(Badge.NONE, badgeFor(item))
+    }
+
+    @Test fun waitingCountsPhoneItemsWithoutLedgerRows() {
+        val phoneItems = (1L..5L).map { phone(it) }
+        val rows = listOf(
+            ledger(1, BackupStatus.VERIFIED),
+            ledger(2, BackupStatus.PENDING),
+            ledger(3, BackupStatus.FAILED, error = "x"),
+        )
+        // 2 (pending) + 4, 5 (never seen by the engine); 1 is backed up, 3 counts as failed.
+        assertEquals(BackupCounts(waiting = 3, tooBig = 0), GalleryMerge.counts(phoneItems, rows))
+    }
+
+    @Test fun editedVerifiedItemIsWaitingAgain() {
+        val counts = GalleryMerge.counts(listOf(phone(1).copy(sizeBytes = 999)), listOf(ledger(1, BackupStatus.VERIFIED)))
+        assertEquals(1, counts.waiting)
+    }
+
+    @Test fun tooBigCountsFat32FlaggedRows() {
+        val rows = listOf(
+            ledger(1, BackupStatus.FAILED, error = dev.photobackup.backup.BackupEngine.FAT32_ERROR),
+            ledger(2, BackupStatus.FAILED, error = "other"),
+        )
+        assertEquals(1, GalleryMerge.counts(emptyList(), rows).tooBig)
     }
 }

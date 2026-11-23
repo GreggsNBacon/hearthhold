@@ -3,6 +3,7 @@ package dev.photobackup.gallery
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.photobackup.ledger.LedgerEntry
+import dev.photobackup.media.PartialMediaAccessException
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.ui.auth.DriveNotConfiguredException
 import dev.photobackup.ui.userMessage
@@ -60,6 +61,12 @@ data class GalleryUiState(
     val drive: DriveState = DriveState.CHECKING,
     /** No photo access: only drive items can be listed. */
     val phoneDenied: Boolean = false,
+    /** Only "Select photos" access: the phone side (and backups) can't see everything. */
+    val phonePartial: Boolean = false,
+    /** Phone items still to back up; null until the phone list is known (or without photo access). */
+    val waiting: Int? = null,
+    /** Items flagged too big for this drive's format (FAT32). */
+    val tooBig: Int = 0,
     val root: SmbRoot? = null,
     /** Why the drive is not reachable (friendly text), when [drive] is [DriveState.UNREACHABLE]. */
     val driveMessage: String? = null,
@@ -85,17 +92,36 @@ class GalleryViewModel(
     private val needsPassword: suspend () -> Boolean = { false },
     private val clock: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {
-    private class Phone(val items: List<PhoneMedia>, val denied: Boolean)
+    private class Phone(
+        val items: List<PhoneMedia>,
+        val denied: Boolean = false,
+        val partial: Boolean = false,
+        val unreadable: Boolean = false,
+    ) {
+        /** The list is the whole phone library (so a "waiting" count from it is real). */
+        val known: Boolean get() = !denied && !partial && !unreadable
+    }
+
+    private class Merged(val items: List<GalleryItem>, val counts: BackupCounts)
 
     private val phone = MutableStateFlow<Phone?>(null)
     private val extra = MutableStateFlow(GalleryUiState())
 
     private val merged = combine(phone, ledger) { p, l -> p to l }
-        .mapLatest { (p, l) -> if (p == null) null else GalleryMerge.merge(p.items, l) }
+        .mapLatest { (p, l) ->
+            if (p == null) null else Merged(GalleryMerge.merge(p.items, l), GalleryMerge.counts(p.items, l))
+        }
         .flowOn(compute)
 
-    val state: StateFlow<GalleryUiState> = combine(merged, phone, extra) { items, p, x ->
-        x.copy(items = items ?: emptyList(), loading = items == null, phoneDenied = p?.denied ?: false)
+    val state: StateFlow<GalleryUiState> = combine(merged, phone, extra) { m, p, x ->
+        x.copy(
+            items = m?.items ?: emptyList(),
+            loading = m == null,
+            phoneDenied = p?.denied ?: false,
+            phonePartial = p?.partial ?: false,
+            waiting = if (m != null && p?.known == true) m.counts.waiting else null,
+            tooBig = m?.counts?.tooBig ?: 0,
+        )
     }.stateIn(viewModelScope, SharingStarted.Eagerly, GalleryUiState())
 
     private var driveJob: Job? = null
@@ -110,9 +136,15 @@ class GalleryViewModel(
         autoCheckDrive()
     }
 
-    /** Screen resumed (also on first show): re-check the drive, e.g. after fixing Wi-Fi or Settings. */
+    /**
+     * Screen resumed (also on first show): re-check the drive, e.g. after fixing Wi-Fi or Settings, and reload the
+     * phone list if it could not be read in full (no or partial photo access).
+     */
     fun resume() {
-        if (!started) start() else autoCheckDrive()
+        if (!started) return start()
+        // Back from the system settings after allowing photo access: reload the phone side too.
+        if (phone.value?.known == false) loadPhone()
+        autoCheckDrive()
     }
 
     /** User-asked: reload the phone list and check the drive now (may show the password dialog). */
@@ -125,13 +157,16 @@ class GalleryViewModel(
     private fun loadPhone() {
         viewModelScope.launch {
             phone.value = try {
-                Phone(queryPhone(), denied = false)
+                Phone(queryPhone())
+            } catch (_: PartialMediaAccessException) {
+                Phone(emptyList(), partial = true)
             } catch (_: SecurityException) {
                 Phone(emptyList(), denied = true)
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                Phone(emptyList(), denied = false) // MediaStore hiccup: show the drive side, retry on next refresh
+                // MediaStore hiccup: show the drive side, retry on next refresh. The phone side is unknown.
+                Phone(emptyList(), unreadable = true)
             }
         }
     }

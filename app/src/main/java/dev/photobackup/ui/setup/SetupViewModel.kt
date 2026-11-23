@@ -47,7 +47,11 @@ data class SetupUiState(
 
 /** Media read + notifications, as the platform names them for [sdk]. */
 fun setupPermissions(sdk: Int): List<String> =
-    if (sdk >= 33) {
+    if (sdk >= 34) {
+        // USER_SELECTED is requested too, so "Select photos" shows up as partial access (see MediaAccess).
+        listOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO,
+            Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED, Manifest.permission.POST_NOTIFICATIONS)
+    } else if (sdk >= 33) {
         listOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO,
             Manifest.permission.POST_NOTIFICATIONS)
     } else {

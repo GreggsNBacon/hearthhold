@@ -40,6 +40,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import dev.photobackup.smb.RemoteStore
+import dev.photobackup.media.MediaAccess
 import dev.photobackup.ui.Screen
 
 @Composable
@@ -170,16 +171,25 @@ private fun PermissionsStep(vm: SetupViewModel) {
     val granted = remember(tick) {
         perms.associateWith { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED }
     }
-    val mediaOk = granted.filterKeys { !it.endsWith("POST_NOTIFICATIONS") }.values.all { it }
+    val access = remember(tick) { MediaAccess.current(context) }
+    val mediaOk = access == MediaAccess.FULL
     Text("Hearthhold needs to read your photos and videos to back them up, and to show notifications about problems.")
-    Text(if (mediaOk) "Photos and videos: allowed" else "Photos and videos: not allowed yet")
+    Text(
+        when (access) {
+            MediaAccess.FULL -> "Photos and videos: allowed"
+            MediaAccess.PARTIAL -> "Photos and videos: only some allowed — choose \"Allow all\""
+            MediaAccess.NONE -> "Photos and videos: not allowed yet"
+        }
+    )
     if (perms.any { it.endsWith("POST_NOTIFICATIONS") }) {
         val n = granted.entries.first { it.key.endsWith("POST_NOTIFICATIONS") }.value
         Text(if (n) "Notifications: allowed" else "Notifications: not allowed yet")
     }
-    if (granted.values.any { !it }) {
+    if (!mediaOk || granted.entries.any { it.key.endsWith("POST_NOTIFICATIONS") && !it.value }) {
         Button(onClick = { launcher.launch(perms.toTypedArray()) }, modifier = Modifier.fillMaxWidth()) { Text("Allow") }
     }
-    if (!mediaOk) Text("Without photo access nothing can be backed up.", color = MaterialTheme.colorScheme.error)
+    if (!mediaOk) {
+        Text("Without access to all photos, only some (or none) can be backed up.", color = MaterialTheme.colorScheme.error)
+    }
     OutlinedButton(onClick = { vm.onPermissionsDone() }, modifier = Modifier.fillMaxWidth()) { Text("Continue") }
 }

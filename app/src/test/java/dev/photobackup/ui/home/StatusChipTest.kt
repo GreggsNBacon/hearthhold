@@ -2,6 +2,7 @@ package dev.photobackup.ui.home
 
 import dev.photobackup.backup.BackupStatusSnapshot
 import dev.photobackup.backup.OvernightWindow
+import dev.photobackup.media.MediaAccess
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -20,7 +21,8 @@ class StatusChipTest {
         needsPassword: Boolean = false,
         window: OvernightWindow? = null,
         now: LocalTime = noon,
-    ) = statusChip(status, reach, waiting, failed, needsPassword, window, now)
+        photoAccess: MediaAccess? = MediaAccess.FULL,
+    ) = statusChip(status, reach, waiting, failed, needsPassword, window, now, photoAccess)
 
     @Test fun upToDate() = assertEquals(ChipState("Up to date", ChipKind.OK), chip())
 
@@ -84,4 +86,28 @@ class StatusChipTest {
     @Test fun reachUnknownDoesNotBlockUpToDate() = assertEquals("Up to date", chip(reach = Reachability.UNKNOWN).text)
 
     @Test fun statusNotLoadedYet() = assertEquals(ChipState("Checking…", ChipKind.BUSY), chip(status = null))
+
+    @Test fun neverBackedUpIsNotUpToDate() =
+        assertEquals(ChipState("Not backed up yet", ChipKind.WAITING), chip(status = idle.copy(lastRunMs = null)))
+
+    @Test fun waitingBeatsNeverBackedUp() =
+        assertEquals("5 waiting", chip(status = idle.copy(lastRunMs = null), waiting = 5).text)
+
+    @Test fun missingPhotoAccessIsAProblem() =
+        assertEquals(ChipState("Photos permission needed", ChipKind.PROBLEM), chip(photoAccess = MediaAccess.NONE))
+
+    @Test fun partialPhotoAccessAsksForAll() =
+        assertEquals(ChipState("Allow access to all photos", ChipKind.PROBLEM), chip(photoAccess = MediaAccess.PARTIAL))
+
+    @Test fun unknownPhotoAccessDoesNotBlock() = assertEquals("Up to date", chip(photoAccess = null).text)
+
+
+    @Test fun driveLimitsShowFreeSpaceAndFat32Count() {
+        assertEquals(listOf("1.5 GB free on the drive"), driveLimitLines(1536L * 1024 * 1024, 0))
+        assertEquals(
+            listOf("2 files are too big for this drive's format (FAT32, 4 GB limit)"),
+            driveLimitLines(null, 2),
+        )
+        assertEquals(emptyList<String>(), driveLimitLines(null, 0))
+    }
 }

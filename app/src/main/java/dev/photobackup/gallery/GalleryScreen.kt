@@ -1,5 +1,8 @@
 package dev.photobackup.gallery
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -63,6 +66,7 @@ import coil.compose.AsyncImage
 import coil.request.CachePolicy
 import coil.request.ImageRequest
 import dev.photobackup.smb.SmbUri
+import dev.photobackup.media.MediaAccess
 import dev.photobackup.ui.home.HomeViewModel
 import dev.photobackup.ui.home.Reachability
 import dev.photobackup.ui.home.StatusChip
@@ -102,15 +106,30 @@ fun GalleryScreen(
         DriveState.UNREACHABLE -> Reachability.NO
         DriveState.NOT_CONFIGURED, DriveState.NEEDS_PASSWORD -> Reachability.UNKNOWN
     }
+    // Waiting counts phone items the engine has not reached yet too (the ledger alone would say "Up to date").
+    val homeView = home.copy(waiting = state.waiting ?: home.waiting)
+    val photoAccess = when {
+        state.phoneDenied -> MediaAccess.NONE
+        state.phonePartial -> MediaAccess.PARTIAL
+        else -> MediaAccess.FULL
+    }
     val chip = statusChip(
         status = home.status,
         reach = reach,
-        waiting = home.waiting,
+        waiting = homeView.waiting,
         failed = home.failed,
         needsPassword = home.needsPassword,
         window = home.settings?.overnightWindow(),
         now = LocalTime.now(),
+        photoAccess = photoAccess,
     )
+    val context = LocalContext.current
+    val openAppSettings = {
+        context.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
     var showSheet by rememberSaveable { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var errorItem by remember { mutableStateOf<GalleryItem?>(null) }
@@ -154,7 +173,12 @@ fun GalleryScreen(
                     Banner("The saved drive password can't be read — tap to re-enter it") { showSheet = true }
                 else -> {}
             }
-            if (state.phoneDenied) Banner("Allow photo access to see what's on the phone")
+            if (state.phoneDenied) {
+                Banner("No photo access: nothing on the phone can be backed up — tap to allow it", openAppSettings)
+            }
+            if (state.phonePartial) {
+                Banner("Only some photos are allowed: tap and choose \"Allow all\" so all can be backed up", openAppSettings)
+            }
             when {
                 state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
@@ -189,7 +213,7 @@ fun GalleryScreen(
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(onDismissRequest = { showSheet = false }, sheetState = sheetState) {
             StatusSheetContent(
-                state = home,
+                state = homeView,
                 reach = reach,
                 reachMessage = state.driveMessage,
                 onBackUpNow = { status.backUpNow() },
@@ -198,6 +222,7 @@ fun GalleryScreen(
                     onFreeUp()
                 },
                 onReenter = { status.reenter(onDone = refreshAll) },
+                tooBig = state.tooBig,
             )
         }
     }

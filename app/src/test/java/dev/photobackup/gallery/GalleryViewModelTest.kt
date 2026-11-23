@@ -15,6 +15,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -188,5 +189,43 @@ class GalleryViewModelTest {
         vm.resume()
         vm.refresh()
         assertEquals(1, checks)
+    }
+
+
+    @Test fun waitingComesFromThePhoneList() {
+        phone = listOf(phone(1, 10), phone(2, 20), phone(3, 30))
+        ledger.value = listOf(entry(1, BackupStatus.VERIFIED, 10))
+        val vm = vm()
+        vm.refresh()
+        assertEquals(2, vm.state.value.waiting) // 2 and 3 have no ledger row yet
+    }
+
+    @Test fun partialPhotoAccessIsFlaggedAndWaitingUnknown() {
+        phoneError = dev.photobackup.media.PartialMediaAccessException()
+        val vm = vm()
+        vm.refresh()
+        val s = vm.state.value
+        assertTrue(s.phonePartial)
+        assertFalse(s.phoneDenied)
+        assertNull(s.waiting)
+    }
+
+    @Test fun noPhotoAccessLeavesWaitingUnknown() {
+        phoneError = SecurityException("no")
+        val vm = vm()
+        vm.refresh()
+        assertNull(vm.state.value.waiting)
+    }
+
+    @Test fun resumeReloadsPhoneAfterAccessIsGranted() {
+        phoneError = SecurityException("no")
+        val vm = vm()
+        vm.start()
+        assertTrue(vm.state.value.phoneDenied)
+        phoneError = null // allowed in system settings meanwhile
+        phone = listOf(phone(1, 10))
+        vm.resume()
+        assertFalse(vm.state.value.phoneDenied)
+        assertEquals(1, vm.state.value.waiting)
     }
 }

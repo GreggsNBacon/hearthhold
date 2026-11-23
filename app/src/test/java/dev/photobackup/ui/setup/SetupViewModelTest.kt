@@ -180,8 +180,13 @@ class SetupViewModelTest {
     @Test fun permissionsDependOnSdk() {
         assertEquals(
             listOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO,
-                Manifest.permission.POST_NOTIFICATIONS),
+                Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED, Manifest.permission.POST_NOTIFICATIONS),
             setupPermissions(34),
+        )
+        assertEquals(
+            listOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.POST_NOTIFICATIONS),
+            setupPermissions(33),
         )
         assertEquals(listOf(Manifest.permission.READ_EXTERNAL_STORAGE), setupPermissions(32))
     }

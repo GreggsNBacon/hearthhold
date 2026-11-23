@@ -58,6 +58,8 @@ fun StatusSheetContent(
     onBackUpNow: () -> Unit,
     onFreeUp: () -> Unit,
     onReenter: () -> Unit,
+    /** Files flagged too big for this drive's format (FAT32). */
+    tooBig: Int = 0,
 ) {
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -72,6 +74,14 @@ fun StatusSheetContent(
             }
         }
         StatusCard(state, reach, reachMessage)
+        val limits = driveLimitLines(state.status?.driveFreeBytes, tooBig)
+        if (limits.isNotEmpty()) {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    limits.forEach { Text(it) }
+                }
+            }
+        }
         Card(Modifier.fillMaxWidth()) {
             Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                 Count("Waiting", state.waiting, Modifier.weight(1f))

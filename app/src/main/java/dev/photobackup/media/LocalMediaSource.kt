@@ -23,9 +23,22 @@ data class SourceFolders(
     private fun String.withTrailingSlash() = if (isEmpty() || endsWith("/")) this else "$this/"
 }
 
-class LocalMediaSource(private val context: Context) {
+class LocalMediaSource(
+    private val context: Context,
+    private val access: () -> MediaAccess = { MediaAccess.current(context) },
+) {
 
+    /**
+     * Phone photos and videos in [folders]. Without full photo access MediaStore does not fail, it just returns
+     * fewer (or no) items, which would look like "nothing to back up". So this checks first and throws
+     * [SecurityException] (no access) or [PartialMediaAccessException] ("Select photos" only).
+     */
     suspend fun query(folders: SourceFolders): List<PhoneMedia> = withContext(Dispatchers.IO) {
+        when (access()) {
+            MediaAccess.FULL -> Unit
+            MediaAccess.PARTIAL -> throw PartialMediaAccessException()
+            MediaAccess.NONE -> throw SecurityException("No photo access")
+        }
         queryCollection(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL), false, folders) +
             queryCollection(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL), true, folders)
     }
