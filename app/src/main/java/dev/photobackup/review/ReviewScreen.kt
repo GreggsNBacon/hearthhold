@@ -315,6 +315,14 @@ private fun SwipeCard(
     var playing by remember { mutableStateOf(false) }
     var videoStarted by remember { mutableStateOf(false) }
 
+    // Finish started (or the deck is otherwise disabled): stop the video and release its player.
+    LaunchedEffect(enabled) {
+        if (!enabled) {
+            playing = false
+            videoStarted = false
+        }
+    }
+
     fun updateArmed() {
         val hd = heading(offset, w, h)
         val now = hd != null && hd.second >= 1f && currentGestures[hd.first] != null
@@ -393,7 +401,7 @@ private fun SwipeCard(
             // Fades in from the start of the drag; full strength at the threshold.
             stamp = headAction,
             stampAlpha = head?.second?.coerceIn(0f, 1f) ?: 0f,
-            video = if (card.phone.isVideo && videoStarted) VideoState(playing) { playing = false } else null,
+            video = if (enabled && card.phone.isVideo && videoStarted) VideoState(playing) { playing = false } else null,
         )
         // Direction hints: what each swipe does (tap one to apply it). Hidden for No action. The one being
         // approached grows and brightens with the drag.
@@ -542,27 +550,34 @@ private fun ResultDialog(title: String, lines: List<String>, leftAlone: List<Lef
 private fun CardVideo(card: ReviewCard, video: VideoState) {
     val context = LocalContext.current
     val currentVideo by rememberUpdatedState(video)
-    val player = remember(card.phone.uri) {
-        ExoPlayer.Builder(context).build().apply {
+    // Made in an effect, not during composition, so an abandoned composition can't leak a player.
+    var player by remember { mutableStateOf<ExoPlayer?>(null) }
+    DisposableEffect(card.phone.uri) {
+        val p = ExoPlayer.Builder(context).build().apply {
             volume = 0f
             repeatMode = Player.REPEAT_MODE_ONE
             setMediaItem(MediaItem.fromUri(card.phone.uri))
             prepare()
         }
-    }
-    DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) = currentVideo.onStopped() // never shown or logged
         }
-        player.addListener(listener)
+        p.addListener(listener)
+        player = p
         onDispose {
-            player.removeListener(listener)
-            player.release()
+            player = null
+            p.removeListener(listener)
+            p.release()
         }
     }
-    LaunchedEffect(player, video.playing) { player.playWhenReady = video.playing }
+    val p = player ?: return
+    LaunchedEffect(p, video.playing) {
+        // After an error the player is idle: prepare again so the next tap retries.
+        if (video.playing && p.playbackState == Player.STATE_IDLE) p.prepare()
+        p.playWhenReady = video.playing
+    }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    DisposableEffect(player, lifecycle) {
+    DisposableEffect(p, lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE) currentVideo.onStopped()
         }
@@ -573,10 +588,10 @@ private fun CardVideo(card: ReviewCard, video: VideoState) {
         factory = { ctx ->
             (LayoutInflater.from(ctx).inflate(R.layout.video_player_view, null) as PlayerView).apply {
                 useController = false
-                this.player = player
+                this.player = p
             }
         },
-        update = { it.player = player },
+        update = { it.player = p },
         onRelease = { it.player = null },
         modifier = Modifier.fillMaxSize(),
     )

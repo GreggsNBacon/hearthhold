@@ -198,7 +198,8 @@ class SetupViewModel(
         return viewModelScope.launch {
             val same = try {
                 settingsStore.settings.first().let { s ->
-                    s.smb != null && overlapsMain(s.smb, s.destination, cfg, path, sameAddress(s.smb.host, cfg.host))
+                    s.smb != null &&
+                        overlapsMain(s.smb, s.destination, cfg, path, needsLookup(s.smb, cfg) && sameAddress(s.smb.host, cfg.host))
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -249,8 +250,9 @@ class SetupViewModel(
             try {
                 // Name lookups can't run inside the settings write: resolve against the main host read now, and use
                 // that answer only if the main host is still the same when the write runs.
-                val mainHost = settingsStore.settings.first().smb?.host
-                val ipSame = mainHost != null && sameAddress(mainHost, cfg.host)
+                val mainSmb = settingsStore.settings.first().smb
+                val mainHost = mainSmb?.host
+                val ipSame = mainSmb != null && needsLookup(mainSmb, cfg) && sameAddress(mainSmb.host, cfg.host)
                 var same = false
                 settingsStore.update { cur ->
                     same = cur.smb != null &&
@@ -285,6 +287,10 @@ class SetupViewModel(
             }
         }
     }
+
+    /** A name lookup can only change the answer when the share matches and the host text differs. */
+    private fun needsLookup(main: SmbConfig, cfg: SmbConfig): Boolean =
+        !sameHostText(main, cfg) && segments(main.share) == segments(cfg.share)
 
     /** True when both hosts resolve to the same address. False when either can't be resolved (text compare decides). */
     private suspend fun sameAddress(a: String, b: String): Boolean {
@@ -338,7 +344,7 @@ fun overlapsMain(
     folder: String,
     sameAddress: Boolean = false,
 ): Boolean {
-    if (!sameAddress && !main.host.trim().equals(cfg.host.trim(), ignoreCase = true)) return false
+    if (!sameAddress && !sameHostText(main, cfg)) return false
     if (!segments(main.share).equals(segments(cfg.share))) return false
     val a = segments(mainFolder.orEmpty())
     val b = segments(folder)
@@ -361,6 +367,8 @@ suspend fun resolveHost(host: String): String? = try {
 }
 
 private const val RESOLVE_TIMEOUT_MS = 2_000L
+
+private fun sameHostText(a: SmbConfig, b: SmbConfig) = a.host.trim().equals(b.host.trim(), ignoreCase = true)
 
 /** Lower-cased path segments: `/` and `\` alike, blank segments (leading, trailing, doubled slashes) dropped. */
 private fun segments(p: String): List<String> =

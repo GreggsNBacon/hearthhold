@@ -61,6 +61,7 @@ class SecondSetupTest {
     private var addresses: Map<String, String> = mapOf("nas.local" to "192.168.50.1", "192.168.50.1" to "192.168.50.1",
         "pc.local" to "192.168.50.7")
     private var resolveFails = false
+    private val looked = mutableListOf<String>()
 
     private fun vm() = SetupViewModel(
         settingsStore = settings,
@@ -70,7 +71,7 @@ class SecondSetupTest {
         backup = backup,
         mode = SetupMode.SECOND,
         clearSecondStatus = { statusCleared++ },
-        resolve = { name -> if (resolveFails) throw java.io.IOException("dns") else addresses[name.trim().lowercase()] },
+        resolve = { name -> looked += name; if (resolveFails) throw java.io.IOException("dns") else addresses[name.trim().lowercase()] },
     )
 
     private suspend fun SetupViewModel.loggedIn(host: String, share: String): SetupViewModel = apply {
@@ -176,6 +177,12 @@ class SecondSetupTest {
         val sameText = vm().loggedIn("192.168.50.1", "usb")
         sameText.onFolderPicked("Phone backup").join()
         assertEquals(SetupViewModel.OVERLAPS_MAIN, sameText.state.value.message)
+    }
+
+    @Test fun noLookupWhenTheHostTextMatchesOrTheShareDiffers() = runBlocking {
+        vm().loggedIn("192.168.50.1", "usb").onFolderPicked("Phone backup").join()
+        vm().loggedIn("nas.local", "pcshare").onFolderPicked("Phone backup").join()
+        assertTrue(looked.isEmpty())
     }
 
     @Test fun refusesAFolderInsideTheMainOne() = runBlocking {

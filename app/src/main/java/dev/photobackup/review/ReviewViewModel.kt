@@ -439,11 +439,11 @@ fun finishSummaryText(s: FinishSummary): String {
     else "Free ${formatSize(s.bytesToFree)}: $deletes" + (kept?.let { "; $it" } ?: "")
 }
 
-/** The lines of the Finish result. */
 /** The Finish progress line: "Checking 12 of 40…" once the count is known. */
 fun checkingText(c: FinishState.Checking): String =
     if (c.total > 0) "Checking ${c.checked} of ${c.total}…" else "Checking the drive copies…"
 
+/** The lines of the Finish result. */
 fun doneLines(d: FinishState.Done): List<String> {
     val lines = listOfNotNull(
         if (d.freedBytes > 0) "Freed ${formatSize(d.freedBytes)} on the phone" else null,
