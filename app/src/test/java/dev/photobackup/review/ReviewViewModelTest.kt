@@ -307,6 +307,21 @@ class ReviewViewModelTest {
         assertEquals(2, v.state.value.remaining) // card 1 is back in the deck
     }
 
+    /** NEW-3: rows applied at prepare (phone copy already gone) leave the summary even if the dialog is cancelled. */
+    @Test fun finish_cancelled_reloads_rows_applied_at_prepare() = runTest {
+        add(1); add(2)
+        val v = vm()
+        v.swipe(Swipe.LEFT); v.swipe(Swipe.LEFT)
+        assertEquals(2, v.state.value.summary.junk)
+        val all = decisions.all()
+        finisher.prepareResult = PrepareResult.Ready("req", all.drop(1), emptyList(), alreadyGone = all.take(1))
+        v.startFinish()
+        decisions.rows.remove(1L) // the real finisher applied row 1 and cleared its decision during prepare
+        v.onDeleteCancelled()
+        assertEquals(FinishState.Idle, v.state.value.finish)
+        assertEquals(1, v.state.value.summary.junk)
+    }
+
     @Test fun finish_cancelled_returns_to_idle_without_applying() = runTest {
         add(1)
         val v = vm()

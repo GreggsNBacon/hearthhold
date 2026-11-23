@@ -334,6 +334,7 @@ class AppContainer(context: Context) {
                 repo = repo,
                 openStore = { driveStoreOrNull() },
                 queryPhone = { media.query(settings().folders).associateBy { it.mediaId } },
+                phoneExists = { ids -> media.existingIds(ids) },
                 opener = media.opener(),
                 makeDeleteRequest = { items -> repo.deleteRequest(app, items) },
                 runNow = {

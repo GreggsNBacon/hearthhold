@@ -27,7 +27,8 @@ import java.io.IOException
 const val CONNECT_TO_FINISH_MESSAGE = "Connect to home Wi-Fi to finish"
 const val KEEP_HIDE_DAYS = 180L
 const val CHANGED_WHILE_FINISHING = "Changed by a backup while finishing — decision kept, try again"
-const val DROPPED_WHILE_FINISHING = "Changed by a backup while finishing — left as it is"
+const val DROPPED_WHILE_FINISHING =
+    "Changed by a backup while finishing — deleted from the phone only, drive copy kept"
 
 /** An item Finish left as it was, with a short user-safe reason. [name] is the file name (or a count). */
 data class LeftAlone(val name: String, val reason: String)
@@ -382,9 +383,12 @@ class ReviewViewModel(
     /** The user dismissed the system delete dialog. Nothing changed; decisions stay. */
     fun onDeleteCancelled() {
         if (_state.value.finish !is FinishState.NeedsConfirm) return
+        val appliedAtPrepare = prepared?.alreadyGone.orEmpty().isNotEmpty()
         prepared = null
         setFinish(FinishState.Idle)
         _state.update { it.copy(leftAlone = emptyList()) }
+        // Rows whose phone copy was already gone were applied by prepare: drop them from the summary.
+        if (appliedAtPrepare) viewModelScope.launch { reload() }
     }
 
     /** Clears a Done or Error result so the deck is usable again. */

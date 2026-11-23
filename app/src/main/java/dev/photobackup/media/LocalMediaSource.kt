@@ -44,6 +44,33 @@ class LocalMediaSource(
     }
 
     /**
+     * Which of [ids] still exist as phone photos or videos, in any folder (no backup-folder filter). Needs full access
+     * like [query]: with "Select photos" an existing item could look gone, so that throws instead.
+     */
+    suspend fun existingIds(ids: Collection<Long>): Set<Long> = withContext(Dispatchers.IO) {
+        when (access()) {
+            MediaAccess.FULL -> Unit
+            MediaAccess.PARTIAL -> throw PartialMediaAccessException()
+            MediaAccess.NONE -> throw SecurityException("No photo access")
+        }
+        val found = HashSet<Long>()
+        for (chunk in ids.distinct().chunked(500)) {
+            for (collection in listOf(
+                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL),
+                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL),
+            )) {
+                val where = "${MediaStore.MediaColumns._ID} IN (${chunk.joinToString(",") { "?" }})"
+                val args = chunk.map { it.toString() }.toTypedArray()
+                val projection = arrayOf(MediaStore.MediaColumns._ID)
+                val c = context.contentResolver.query(collection, projection, where, args, null)
+                    ?: throw IllegalStateException("MediaStore query failed")
+                c.use { while (it.moveToNext()) found += it.getLong(0) }
+            }
+        }
+        found
+    }
+
+    /**
      * Item counts per phone folder (MediaStore relative path, e.g. "Pictures/WhatsApp/") across photos and videos.
      * Needs full access like [query]: with "Select photos" the list would be incomplete.
      */

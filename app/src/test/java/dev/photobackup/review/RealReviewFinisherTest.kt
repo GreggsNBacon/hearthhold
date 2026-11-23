@@ -52,6 +52,16 @@ class RealReviewFinisherTest {
     private var storeAvailable = true
     private val requests = mutableListOf<List<Long>>()
     private var runs = 0
+    /** On the phone but outside the configured backup folders: absent from [phone], present for [phoneExists]. */
+    private val elsewhere = mutableSetOf<Long>()
+    private var existsFails = false
+    private val existsAsked = mutableListOf<Set<Long>>()
+
+    private val phoneExists: suspend (Collection<Long>) -> Set<Long> = { ids ->
+        existsAsked += ids.toSet()
+        if (existsFails) throw SecurityException("No photo access")
+        ids.filter { it in phone || it in elsewhere }.toSet()
+    }
 
     private fun data(id: Long, size: Int = 5) = ByteArray(size) { (id + it).toByte() }
 
@@ -66,6 +76,7 @@ class RealReviewFinisherTest {
         makeDeleteRequest = { items -> requests += items.map { it.mediaId }; "request" },
         runNow = { runs++ },
         clock = { now },
+        phoneExists = phoneExists,
     )
 
     /** A VERIFIED, backed-up photo present on the phone and on the drive, with a decision. */
@@ -235,6 +246,55 @@ class RealReviewFinisherTest {
         assertTrue(requests.isEmpty())
     }
 
+    /** NEW-1: still on the phone but outside the backup folders (unticked / moved): never marked, decision kept. */
+    @Test fun rowOutsideTheBackupFoldersButStillOnThePhoneIsNotMarked() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        photo(2, ReviewAction.DRIVE_ONLY)
+        photo(3, ReviewAction.JUNK)
+        phone.remove(1L); elsewhere += 1L // folder unticked
+        phone.remove(2L); elsewhere += 2L // file moved to another folder
+        phone.remove(3L) // really gone
+        val before1 = ledger.get(1); val before2 = ledger.get(2)
+        val r = finisher().prepare(decisions.all())
+        assertEquals(
+            PrepareResult.NothingToDelete(
+                false, 0,
+                listOf(
+                    FailedRow(1, RealReviewFinisher.NOT_IN_FOLDERS),
+                    FailedRow(2, RealReviewFinisher.NOT_IN_FOLDERS),
+                ),
+                alreadyGone = listOf(ReviewDecision(3, ReviewAction.JUNK, 3)),
+            ),
+            r,
+        )
+        assertEquals(before1, ledger.get(1))
+        assertEquals(before2, ledger.get(2))
+        assertEquals(now, ledger.get(3)!!.binRequestedAt)
+        assertEquals(setOf(1L, 2L), decisions.rows.keys)
+        assertEquals(listOf(setOf(1L, 2L, 3L)), existsAsked) // one check, only for rows missing from the query
+    }
+
+    /** NEW-1: if the unfiltered check fails, nothing is treated as gone: no marks, decisions kept. */
+    @Test fun existenceCheckFailureMarksNothing() = runBlocking {
+        val e = photo(1, ReviewAction.JUNK)
+        photo(2, ReviewAction.KEEP)
+        phone.remove(1L)
+        existsFails = true
+        val r = finisher().prepare(decisions.all())
+        assertEquals(
+            PrepareResult.NothingToDelete(true, 1, listOf(FailedRow(1, RealReviewFinisher.NOT_READY))), r,
+        )
+        assertEquals(e, ledger.get(1))
+        assertEquals(setOf(1L), decisions.rows.keys)
+    }
+
+    /** No row missing from the phone query: the existence check is not needed. */
+    @Test fun existenceCheckSkippedWhenNothingIsMissing() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        finisher().prepare(decisions.all())
+        assertTrue(existsAsked.isEmpty())
+    }
+
     /** A gone row that is no longer VERIFIED can't be applied: listed as gone, decision cleared, row untouched. */
     @Test fun rowGoneFromThePhoneAndNotVerifiedIsListedAndCleared() = runBlocking {
         val e = photo(1, ReviewAction.JUNK)
@@ -314,7 +374,7 @@ class RealReviewFinisherTest {
             object : ReviewKeepDao by keeps { override suspend fun upsert(k: ReviewKeep) = throw IllegalStateException() },
             FreeUpRepository(ledger, clock = { now }), { store }, { phone.toMap() },
             LocalOpener { m -> phoneBytes[m.mediaId]?.let { ByteArrayInputStream(it) } },
-            { "request" }, { runs++ }, { now },
+            { "request" }, { runs++ }, { now }, phoneExists,
         )
         val r = f.prepare(decisions.all()) as PrepareResult.Ready
         try { f.apply(r); throw AssertionError("expected failure") } catch (_: IllegalStateException) {}

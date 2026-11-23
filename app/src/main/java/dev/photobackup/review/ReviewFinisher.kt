@@ -12,6 +12,7 @@ import dev.photobackup.ledger.ReviewKeep
 import dev.photobackup.ledger.ReviewKeepDao
 import dev.photobackup.media.PhoneMedia
 import dev.photobackup.smb.RemoteStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -75,7 +76,8 @@ interface ReviewFinisher {
  * same conditional write), records Keeps and clears the applied decisions. Cancelling the dialog changes nothing.
  * The drive is used by [prepare] only.
  *
- * A Drive only / Junk row whose phone copy is already gone while its row is still VERIFIED (Android deleted it but the
+ * A Drive only / Junk row whose phone copy is already gone (checked by [phoneExists], in any folder) while its row is
+ * still VERIFIED (Android deleted it but the
  * ledger write never landed: a backup's move in between, the app killed or left during apply) is applied by [prepare]
  * itself with the same conditional write, so Junk still reaches the drive bin.
  */
@@ -92,6 +94,11 @@ class RealReviewFinisher(
     private val makeDeleteRequest: (List<LedgerEntry>) -> Any?,
     private val runNow: () -> Unit,
     private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * Which of the given MediaStore ids still exist on the phone, in ANY folder (no backup-folder filter): [queryPhone]
+     * leaves out items in unticked folders, which are not gone. Throws if it can't tell.
+     */
+    private val phoneExists: suspend (Collection<Long>) -> Set<Long>,
 ) : ReviewFinisher {
 
     override suspend fun prepare(decisions: List<ReviewDecision>): PrepareResult {
@@ -116,12 +123,23 @@ class RealReviewFinisher(
         }
 
         val passedIds = passed.map { it.mediaId }.toSet()
-        val alreadyGone = applyAlreadyGone(
-            toDelete.filter { it.mediaId !in passedIds && it.mediaId !in failedIds && phone[it.mediaId] == null },
-        )
+        val missing = toDelete.filter {
+            it.mediaId !in passedIds && it.mediaId !in failedIds && phone[it.mediaId] == null
+        }
+        // Missing from the folder-filtered query is not gone: ask MediaStore without the filter. If that fails,
+        // nothing counts as gone (the rows wait as not ready).
+        val stillOnPhone = if (missing.isEmpty()) emptySet() else stillOnPhone(missing.map { it.mediaId })
+        val alreadyGone = if (stillOnPhone == null) emptyList() else {
+            applyAlreadyGone(missing.filter { it.mediaId !in stillOnPhone })
+        }
         val goneIds = alreadyGone.map { it.mediaId }.toSet()
         val failed = toDelete.filter { it.mediaId !in passedIds && it.mediaId !in goneIds }.map { d ->
-            FailedRow(d.mediaId, failedIds[d.mediaId] ?: skipReason(ledger.get(d.mediaId), phone[d.mediaId]))
+            val e = ledger.get(d.mediaId)
+            val reason = failedIds[d.mediaId] ?: when {
+                e != null && stillOnPhone != null && d.mediaId in stillOnPhone -> NOT_IN_FOLDERS
+                else -> skipReason(e, phone[d.mediaId])
+            }
+            FailedRow(d.mediaId, reason)
         }
         if (passed.isEmpty()) {
             applyKeeps(keepList)
@@ -135,6 +153,15 @@ class RealReviewFinisher(
             keeps = keepList,
             alreadyGone = alreadyGone,
         )
+    }
+
+    /** Which of [ids] still exist on the phone in any folder, or null if that can't be told (never shown or logged). */
+    private suspend fun stillOnPhone(ids: List<Long>): Set<Long>? = try {
+        phoneExists(ids)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
     }
 
     /**
@@ -206,6 +233,7 @@ class RealReviewFinisher(
     companion object {
         const val GONE_FROM_PHONE = "No longer on the phone"
         const val EDITED = "Phone file changed since review"
+        const val NOT_IN_FOLDERS = "Not in a backed-up folder any more"
         const val NOT_READY = "Not ready yet — try again later"
     }
 }
