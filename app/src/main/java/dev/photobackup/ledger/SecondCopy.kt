@@ -100,6 +100,22 @@ interface SecondCopyDao {
     suspend fun demoteIfVerified(mediaId: Long, remotePath: String, sha: String, nowMs: Long): Boolean =
         demoteCount(mediaId, remotePath, sha, SecondStatus.VERIFIED, SecondStatus.FAILED, SECOND_MISSING_ERROR, nowMs) > 0
 
+    @Query(
+        "UPDATE SecondCopy SET movingTo = NULL, status = :to, lastError = :error, updatedAtMs = :nowMs " +
+            "WHERE mediaId = :mediaId AND movingTo = :expected AND remotePath IS :from"
+    )
+    suspend fun dropLostMoveCount(
+        mediaId: Long, expected: String, from: String?, to: SecondStatus, error: String, nowMs: Long,
+    ): Int
+
+    /**
+     * A move whose file is at neither path: the copy is lost. Clears movingTo and marks the row FAILED with
+     * [SECOND_MISSING_ERROR] so the next copy pass makes it again, only while the row still records that move from
+     * [from]. False = it changed meanwhile, left alone. Never touches a drive file.
+     */
+    suspend fun dropLostMove(mediaId: Long, expected: String, from: String?, nowMs: Long): Boolean =
+        dropLostMoveCount(mediaId, expected, from, SecondStatus.FAILED, SECOND_MISSING_ERROR, nowMs) > 0
+
     /** Drops one row (a pending row of an item left waiting). Never touches a drive file. */
     @Query("DELETE FROM SecondCopy WHERE mediaId = :mediaId")
     suspend fun delete(mediaId: Long)

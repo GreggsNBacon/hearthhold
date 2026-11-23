@@ -90,6 +90,18 @@ class MemorySecondCopies : SecondCopyDao {
         }
         return n
     }
+    override suspend fun dropLostMoveCount(
+        mediaId: Long, expected: String, from: String?, to: SecondStatus, error: String, nowMs: Long,
+    ): Int {
+        var n = 0
+        rows.update { m ->
+            val e = m[mediaId]
+            if (e != null && e.movingTo == expected && e.remotePath == from) {
+                n = 1; m + (mediaId to e.copy(movingTo = null, status = to, lastError = error, updatedAtMs = nowMs))
+            } else { n = 0; m }
+        }
+        return n
+    }
     override suspend fun delete(mediaId: Long) { rows.update { it - mediaId } }
     override suspend fun clear() { rows.value = emptyMap() }
 }
@@ -369,7 +381,7 @@ class SecondBackupEngineTest {
             id, "$dir2\\f$id.jpg", null, "$dog2\\f$id.jpg", SecondStatus.VERIFIED, 100, sha(d), null, 1,
         )
         // 1: only the new path holds it -> point at it. 2: only the old -> forget the move.
-        // 3: both -> keep the old, flag a conflict. 4: neither -> leave it, flag an error.
+        // 3: both -> keep the old, flag a conflict. 4: neither -> the copy is lost: move cleared, demoted, re-copied.
         s2.put("$dog2\\f1.jpg", d); s2.put("$dir2\\f2.jpg", d); s2.put("$dir2\\f3.jpg", d); s2.put("$dog2\\f3.jpg", d)
         for (id in 1L..4L) copies.upsert(c(id))
         engine(s2, ledger, copies, folderFor = { _, _ -> "Dog" }).run()
@@ -379,8 +391,11 @@ class SecondBackupEngineTest {
         assertEquals("$dir2\\f3.jpg", copies.get(3)!!.remotePath)
         assertEquals("$dog2\\f3.jpg", copies.get(3)!!.movingTo)
         assertEquals(BackupEngine.MOVE_CONFLICT_ERROR, copies.get(3)!!.lastError)
+        // No source this run (phone and main drive away): demoted and waiting, never parked as a move.
         assertEquals("$dir2\\f4.jpg", copies.get(4)!!.remotePath)
-        assertEquals(BackupEngine.MOVE_ERROR, copies.get(4)!!.lastError)
+        assertNull(copies.get(4)!!.movingTo)
+        assertEquals(SecondStatus.FAILED, copies.get(4)!!.status)
+        assertEquals(SECOND_MISSING_ERROR, copies.get(4)!!.lastError)
         assertTrue(s2.files.containsKey("$dir2\\f3.jpg") && s2.files.containsKey("$dog2\\f3.jpg"))
         assertTrue(s2.deletes.isEmpty())
     }
@@ -731,16 +746,68 @@ class SecondBackupEngineTest {
         assertEquals(ea, ledger.get(1))
     }
 
-    @Test fun aWipedDeviceFolderLeavesARowWithAMoveInFlight() = runBlocking {
+    @Test fun aWipedDeviceFolderAlsoRecopiesARowWhoseMoveWasLost() = runBlocking {
         val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
         val a = bytes(100, 1)
         val ea = row(1, a, name = "a.jpg"); ledger.upsert(ea)
         copies.upsert(verifiedCopy(ea, "$dir2\\a.jpg").copy(movingTo = "$dog2\\a.jpg"))
         val phone = Phone(); phone.files["content://media/1"] = a
-        engine(s2, ledger, copies, phone).run()
+        val r = engine(s2, ledger, copies, phone).run()
+        assertEquals(SecondResult.Done(copied = 1, adopted = 0, failed = 0, waiting = 0), r)
         val c = copies.get(1)!!
-        assertEquals(SecondStatus.VERIFIED, c.status) // conditional: a row with a move in flight is not demoted
-        assertEquals("$dog2\\a.jpg", c.movingTo)
+        assertEquals(SecondStatus.VERIFIED, c.status)
+        assertNull(c.movingTo)
+        assertArrayEquals(a, s2.files[c.remotePath])
+    }
+
+    @Test fun aLostCopyWithAFailedFolderMoveIsCopiedAgain() = runBlocking {
+        val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
+        val a = bytes(100, 1); val keep = bytes(90, 2)
+        val ea = row(1, a, name = "a.jpg", status = BackupStatus.REMOVED_FROM_PHONE); ledger.upsert(ea)
+        val ek = row(2, keep, name = "k.jpg"); ledger.upsert(ek)
+        // The device folder is there; a.jpg was deleted by hand, and a folder rule change then failed its move.
+        copies.upsert(verifiedCopy(ea, "$dir2\\a.jpg").copy(movingTo = "$dog2\\a.jpg", lastError = BackupEngine.MOVE_ERROR))
+        copies.upsert(verifiedCopy(ek, "$dog2\\k.jpg")); s2.put("$dog2\\k.jpg", keep)
+        val dog: suspend (Long, String) -> String? = { _, _ -> "Dog" }
+        // Run 1: main drive away, so there is no source. Demoted, not parked; status shows waiting.
+        val r1 = engine(s2, ledger, copies, folderFor = dog).run()
+        val c1 = copies.get(1)!!
+        assertNull(c1.movingTo)
+        assertEquals(SecondStatus.FAILED, c1.status)
+        assertEquals(SECOND_MISSING_ERROR, c1.lastError)
+        assertEquals("$dir2\\a.jpg", c1.remotePath)
+        assertEquals(SecondStatusText.waiting(1), SecondStatusText.of(r1, SecondWaiting.count(ledger, copies)))
+        // Run 2: main drive back, so it is copied again into its desired folder.
+        val mainStore = FakeRemoteStore(); mainStore.put("$mainDir\\a.jpg", a)
+        val r2 = engine(s2, ledger, copies, main = Main(mainStore), folderFor = dog).run()
+        assertEquals(SecondResult.Done(copied = 1, adopted = 0, failed = 0, waiting = 0), r2)
+        val c2 = copies.get(1)!!
+        assertEquals(SecondStatus.VERIFIED, c2.status)
+        assertEquals("$dog2\\a.jpg", c2.remotePath)
+        assertNull(c2.movingTo); assertNull(c2.lastError)
+        assertArrayEquals(a, s2.files["$dog2\\a.jpg"])
+        assertEquals(SecondStatusText.UP_TO_DATE, SecondStatusText.of(r2, SecondWaiting.count(ledger, copies)))
+        assertTrue(s2.deletes.isEmpty() && mainStore.deletes.isEmpty())
+        assertEquals(ea, ledger.get(1))
+    }
+
+    @Test fun aWipedDeviceFolderDemotesOnlyRowsUnderTheCurrentDeviceFolder() = runBlocking {
+        val s2 = FakeRemoteStore(); val ledger = MemoryLedger(); val copies = MemorySecondCopies()
+        val ids = listOf(1L, 2L, 3L, 4L)
+        val data = ids.associateWith { bytes(60, it.toInt()) }
+        for (id in ids) ledger.upsert(row(id, data[id]!!, name = "f$id.jpg", status = BackupStatus.REMOVED_FROM_PHONE))
+        // Current root S\Dev is gone. 1: under it. 2: same, other case. 3: old device name. 4: Dev2, not under Dev.
+        val paths = mapOf(
+            1L to "$dir2\\f1.jpg", 2L to "s\\dev\\Camera\\2026\\f2.jpg",
+            3L to "S\\OldPhone\\Camera\\2026\\f3.jpg", 4L to "S\\Dev2\\Camera\\2026\\f4.jpg",
+        )
+        for (id in ids) copies.upsert(verifiedCopy(ledger.get(id)!!, paths[id]!!))
+        s2.put(paths[3]!!, data[3]!!); s2.put(paths[4]!!, data[4]!!)
+        engine(s2, ledger, copies, main = Main(null)).run()
+        assertEquals(SecondStatus.FAILED, copies.get(1)!!.status)
+        assertEquals(SecondStatus.FAILED, copies.get(2)!!.status)
+        assertEquals(verifiedCopy(ledger.get(3)!!, paths[3]!!), copies.get(3))
+        assertEquals(verifiedCopy(ledger.get(4)!!, paths[4]!!), copies.get(4))
     }
 
     @Test fun aPresentDeviceFolderDemotesNothing() = runBlocking {

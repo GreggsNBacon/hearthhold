@@ -102,6 +102,22 @@ class SecondCopyDaoTest {
         assertEquals(SecondStatus.VERIFIED, dao.get(4)!!.status)
     }
 
+    @Test fun dropLostMoveOnlyClearsTheSameRecordedMove() = runBlocking {
+        dao.upsert(row(1).copy(movingTo = "B/Dog/a.jpg", lastError = "Move failed"))
+        assertFalse(dao.dropLostMove(1, "B/Cat/a.jpg", "B/a.jpg", 9)) // other move
+        assertFalse(dao.dropLostMove(1, "B/Dog/a.jpg", "B/other.jpg", 9)) // other path
+        assertEquals("B/Dog/a.jpg", dao.get(1)!!.movingTo)
+        dao.upsert(row(2, remote = null).copy(movingTo = "B/Dog/b.jpg"))
+        assertTrue(dao.dropLostMove(2, "B/Dog/b.jpg", null, 9)) // null path matches null (IS)
+        assertTrue(dao.dropLostMove(1, "B/Dog/a.jpg", "B/a.jpg", 9))
+        val d = dao.get(1)!!
+        assertNull(d.movingTo)
+        assertEquals(SecondStatus.FAILED, d.status)
+        assertEquals(SECOND_MISSING_ERROR, d.lastError)
+        assertEquals("B/a.jpg", d.remotePath)
+        assertEquals(9L, d.updatedAtMs)
+    }
+
     @Test fun withPartPathAllAndSetLastError() = runBlocking {
         dao.upsert(row(1)); dao.upsert(row(2, SecondStatus.FAILED, null, "x.part"))
         assertEquals(listOf(2L), dao.withPartPath().map { it.mediaId })

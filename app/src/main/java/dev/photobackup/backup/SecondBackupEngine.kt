@@ -131,7 +131,8 @@ class SecondBackupEngine(
 
     /**
      * `<dest2>\<device>` gone (new drive, wiped PC folder) while VERIFIED copies are recorded: those copies are lost,
-     * so each is demoted (conditional: only while still that same settled VERIFIED copy) and copied again this run;
+     * so each one under today's `<dest2>\<device>\` (ignoring case; rows under an old device name are left alone)
+     * is demoted (conditional: only while still that same settled VERIFIED copy) and copied again this run;
      * an identical file that is still there is adopted by hash as usual. A non-network stat error demotes nothing.
      */
     private suspend fun demoteIfRootGone() {
@@ -144,8 +145,11 @@ class SecondBackupEngine(
             return
         }
         if (st != null && st.isDirectory) return
+        val prefix = "$root\\"
         for (c in verified) {
             val path = c.remotePath ?: continue
+            // Only copies under today's device folder: rows under an old device name are not lost.
+            if (!path.startsWith(prefix, ignoreCase = true)) continue
             val sha = c.sha256 ?: continue
             copies.demoteIfVerified(c.mediaId, path, sha, clock())
         }
@@ -169,7 +173,9 @@ class SecondBackupEngine(
     /**
      * Settles second-location moves a crash interrupted, by which path holds the file (as the main engine does):
      * only the new path (recorded size) → point at it; only the old → forget the move; both → keep the old, flag a
-     * conflict (movingTo kept); neither → leave it, flag an error. Writes only while the row still records that move.
+     * conflict (movingTo kept); new path of the wrong size → leave it, flag an error; neither → the copy is lost: move
+     * cleared and the row demoted ([SecondCopyDao.dropLostMove]) so it is copied again. Writes only while the row still
+     * records that move.
      * Returns the rows not settled cleanly; their recorded target stays reserved for the run.
      */
     private suspend fun recoverMoves(): Set<Long> {
@@ -187,6 +193,12 @@ class SecondBackupEngine(
                 copies.setLastError(row.mediaId, BackupEngine.MOVE_ERROR, clock())
                 unsettled += row.mediaId
                 mover.reserveExact(to)
+                continue
+            }
+            if (!oldExists && newEntry == null) {
+                // The file is at neither path: the copy is lost. Clear the move and demote the row so the copy pass
+                // makes it again (this run if a source is there). Nothing on the drive is touched.
+                copies.dropLostMove(row.mediaId, to, from, clock())
                 continue
             }
             val priorMoveError =

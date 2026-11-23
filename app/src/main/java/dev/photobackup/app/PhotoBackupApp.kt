@@ -26,6 +26,7 @@ import dev.photobackup.freeup.SuggestionRule
 import dev.photobackup.gallery.BrowseViewModel
 import dev.photobackup.gallery.CopyToPhone
 import dev.photobackup.gallery.GalleryViewModel
+import dev.photobackup.gallery.secondCopiesFlow
 import dev.photobackup.gallery.SmbCoilFetcher
 import dev.photobackup.gallery.SmbRoot
 import dev.photobackup.gallery.ViewerListHolder
@@ -56,12 +57,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -378,19 +375,9 @@ class AppContainer(context: Context) {
         }
     }
 
-    /**
-     * The second location's copies by mediaId for the Gallery badge, or null while no second location is set (then
-     * the table is not even observed). A read error falls back to null (badges as without the feature) for that
-     * observation only; a later settings change still starts a new one.
-     */
-    @OptIn(ExperimentalCoroutinesApi::class)
+    /** The Gallery badge's second copies ([secondCopiesFlow]: never fails, null while no second location is set). */
     private fun secondCopies(): Flow<Map<Long, SecondCopy>?> =
-        settingsStore.settings.map { it.second != null }.distinctUntilChanged().flatMapLatest { on ->
-            if (!on) flowOf(null)
-            else LedgerDatabase.get(app).secondCopyDao().observeAll().map<List<SecondCopy>, Map<Long, SecondCopy>?> { rows ->
-                rows.associateBy { it.mediaId }
-            }.catch { e -> if (e is CancellationException) throw e else emit(null) }
-        }
+        secondCopiesFlow(settingsStore.settings) { LedgerDatabase.get(app).secondCopyDao().observeAll() }
 
     /** Browse one folder; each `browse?path=` back-stack entry gets its own ViewModel and connection. */
     fun browseFactory(path: String): ViewModelProvider.Factory = viewModelFactory {
