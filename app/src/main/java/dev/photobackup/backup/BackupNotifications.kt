@@ -23,6 +23,7 @@ object BackupNotifications {
     const val DONE_ID = 1003
     const val SECOND_ERROR_ID = 1004
     const val STALE_ID = 1005
+    const val RESTORE_ID = 1006
     private const val REQ_REAUTH = 2001
     private const val REQ_OPEN = 2002
     private const val REQ_REAUTH_SECOND = 2003
@@ -54,6 +55,20 @@ object BackupNotifications {
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .build()
+    }
+
+    /** "Restoring 12 of 812" with a Cancel action ([cancel]: WorkManager's cancel intent for the restore job). */
+    fun restoreProgress(context: Context, done: Int, total: Int, cancel: PendingIntent?): Notification {
+        ensureChannels(context)
+        val b = NotificationCompat.Builder(context, CHANNEL_PROGRESS)
+            .setSmallIcon(R.drawable.ic_stat_hearthhold)
+            .setContentTitle(if (total > 0) "Restoring $done of $total" else "Restoring to phone")
+            .setProgress(total, done, total == 0)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+        if (cancel != null) b.addAction(R.drawable.ic_stat_hearthhold, "Cancel", cancel)
+        return b.build()
     }
 
     /**

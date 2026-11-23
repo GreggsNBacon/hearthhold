@@ -78,4 +78,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun reviewDecisionDao(): ReviewDecisionDao
     abstract fun reviewKeepDao(): ReviewKeepDao
     abstract fun secondCopyDao(): SecondCopyDao
+    abstract fun restoreDao(): RestoreDao
 }
