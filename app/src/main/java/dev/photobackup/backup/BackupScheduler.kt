@@ -20,8 +20,10 @@ object BackupScheduler {
     const val PERIODIC = "pb_periodic"
     const val NOW = "pb_now"
     const val KEY_CHARGING_ONLY = "chargingOnly"
+    const val KEY_IS_TRIGGER = "isTrigger"
 
-    private fun input(chargingOnly: Boolean): Data = workDataOf(KEY_CHARGING_ONLY to chargingOnly)
+    private fun input(chargingOnly: Boolean, isTrigger: Boolean = false): Data =
+        workDataOf(KEY_CHARGING_ONLY to chargingOnly, KEY_IS_TRIGGER to isTrigger)
 
     fun scheduleAll(context: Context, chargingOnly: Boolean) {
         enqueueTrigger(context, chargingOnly)
@@ -40,7 +42,7 @@ object BackupScheduler {
     }
 
     /** Runs when new photos/videos appear. The worker re-enqueues it after every run. */
-    fun enqueueTrigger(context: Context, chargingOnly: Boolean) {
+    fun enqueueTrigger(context: Context, chargingOnly: Boolean, replace: Boolean = true) {
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.UNMETERED)
             .setRequiresCharging(chargingOnly)
@@ -48,16 +50,19 @@ object BackupScheduler {
         for (uri in LocalMediaSource(context).contentUris()) constraints.addContentUriTrigger(uri, true)
         val request = OneTimeWorkRequestBuilder<BackupWorker>()
             .setConstraints(constraints.build())
-            .setInputData(input(chargingOnly))
+            .setInputData(input(chargingOnly, isTrigger = true))
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.MINUTES)
             .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(TRIGGER, ExistingWorkPolicy.REPLACE, request)
+        // Only the trigger itself may replace itself; other workers must not cancel a running trigger.
+        val policy = if (replace) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP
+        WorkManager.getInstance(context).enqueueUniqueWork(TRIGGER, policy, request)
     }
 
     /** User pressed "Back up now": unmetered only, no charging requirement. */
-    fun runNow(context: Context) {
+    fun runNow(context: Context, chargingOnly: Boolean = false) {
         val request = OneTimeWorkRequestBuilder<BackupWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
+            .setInputData(input(chargingOnly)) // only used for the re-enqueued trigger, not a constraint here
             .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.MINUTES)
             .build()

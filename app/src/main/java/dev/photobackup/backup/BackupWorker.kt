@@ -10,7 +10,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
 /** ETA = remaining bytes / average bytes-per-second of the current run; null until 1 s has elapsed. */
@@ -33,6 +35,11 @@ object BackupMessages {
     const val PERMISSION = "Photos permission needed"
 }
 
+/** Only one backup run per process: a second engine would delete the first one's in-flight .part files. */
+object BackupLock {
+    val mutex = Mutex()
+}
+
 class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
     private data class Progress(val done: Int, val total: Int, val bytes: Long, val totalBytes: Long)
@@ -48,12 +55,18 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
     override suspend fun doWork(): Result {
         val repo = BackupStatusRepository.get(applicationContext)
         val chargingOnly = inputData.getBoolean(BackupScheduler.KEY_CHARGING_ONLY, false)
+        val isTrigger = inputData.getBoolean(BackupScheduler.KEY_IS_TRIGGER, false)
         try {
-            return runBackup(repo)
+            if (!BackupLock.mutex.tryLock()) return Result.success() // another run is active; leave status alone
+            try {
+                return runBackup(repo)
+            } finally {
+                BackupLock.mutex.unlock()
+            }
         } finally {
             // Last on purpose: REPLACE on pb_trigger cancels this very worker when it is the trigger.
             try {
-                BackupScheduler.enqueueTrigger(applicationContext, chargingOnly)
+                BackupScheduler.enqueueTrigger(applicationContext, chargingOnly, replace = isTrigger)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
             }
@@ -89,15 +102,16 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 }
                 repo.update { it.copy(inProgress = true, done = 0, total = 0, etaSec = null) }
                 trySetForeground(0, 0, null)
-                try {
-                    val r = runner.run { done, total, bytes, totalBytes ->
+                val r = try {
+                    runner.run { done, total, bytes, totalBytes ->
                         updates.trySend(Progress(done, total, bytes, totalBytes))
                     }
-                    finish(repo, r)
                 } finally {
+                    // Stop the consumer before any final status write so it cannot set inProgress afterwards.
                     updates.close()
-                    consumer.cancel()
+                    withContext(NonCancellable) { consumer.cancelAndJoin() }
                 }
+                finish(repo, r)
             }
         } catch (e: CancellationException) {
             idle(repo) { it }
@@ -127,8 +141,10 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 BackupNotifications.clearError(applicationContext)
             }
             is BackupResult.Stopped -> when (val e = r.reason) {
-                is RemoteException.Unreachable ->
+                is RemoteException.Unreachable -> {
                     idle(repo) { it.copy(lastRunMs = now, lastResult = BackupMessages.UNREACHABLE, lastError = null) }
+                    BackupNotifications.clearError(applicationContext)
+                }
                 else -> {
                     val text = when (e) {
                         is RemoteException.AuthFailed -> BackupMessages.AUTH

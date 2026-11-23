@@ -12,6 +12,7 @@ import androidx.work.WorkManager
 import androidx.work.testing.TestListenableWorkerBuilder
 import androidx.work.testing.WorkManagerTestInitHelper
 import dev.photobackup.smb.RemoteException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -167,5 +168,80 @@ class BackupWorkerTest {
         }
         BackupScheduler.runNow(app)
         assertEquals(1, wm.getWorkInfosForUniqueWork("pb_now").get().size)
+    }
+
+    private fun workerFor(chargingOnly: Boolean, isTrigger: Boolean) =
+        TestListenableWorkerBuilder<BackupWorker>(app)
+            .setInputData(
+                androidx.work.workDataOf(
+                    BackupScheduler.KEY_CHARGING_ONLY to chargingOnly,
+                    BackupScheduler.KEY_IS_TRIGGER to isTrigger,
+                )
+            ).build()
+
+    private fun triggerId() =
+        WorkManager.getInstance(app).getWorkInfosForUniqueWork("pb_trigger").get().single().id
+
+    @Test fun concurrentWorkersRunEngineOnce() {
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        runner = BackupRunner { _ ->
+            calls.incrementAndGet()
+            started.countDown()
+            release.await()
+            BackupResult.Done(1, 0, 0)
+        }
+        runBlocking {
+            val first = async(kotlinx.coroutines.Dispatchers.Default) {
+                workerFor(false, false).doWork()
+            }
+            assertTrue(started.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val before = status()
+            assertEquals(ListenableWorker.Result.success(), workerFor(false, false).doWork())
+            assertEquals(1, calls.get())
+            assertEquals(before, status()) // busy worker leaves status alone
+            release.complete(Unit)
+            assertEquals(ListenableWorker.Result.success(), first.await())
+        }
+        assertEquals(1, calls.get())
+    }
+
+    @Test fun nonTriggerWorkerDoesNotReplaceTrigger() {
+        BackupScheduler.scheduleAll(app, chargingOnly = false)
+        val id = triggerId()
+        runBlocking { workerFor(false, isTrigger = false).doWork() }
+        assertEquals(id, triggerId())
+    }
+
+    @Test fun triggerWorkerReplacesItselfAndKeepsChargingFlag() {
+        BackupScheduler.scheduleAll(app, chargingOnly = false)
+        val id = triggerId()
+        runBlocking { workerFor(true, isTrigger = true).doWork() }
+        assertTrue(id != triggerId())
+        val info = WorkManager.getInstance(app).getWorkInfosForUniqueWork("pb_trigger").get().single()
+        assertTrue(info.constraints.requiresCharging())
+    }
+
+    @Test fun runNowCarriesChargingFlagButIsNotConstrainedByIt() {
+        BackupScheduler.runNow(app, chargingOnly = true)
+        val info = WorkManager.getInstance(app).getWorkInfosForUniqueWork("pb_now").get().single()
+        assertFalse(info.constraints.requiresCharging())
+        val impl = WorkManager.getInstance(app) as androidx.work.impl.WorkManagerImpl
+        val spec = impl.workDatabase.workSpecDao().getWorkSpec(info.id.toString())!!
+        assertTrue(spec.input.getBoolean(BackupScheduler.KEY_CHARGING_ONLY, false))
+        // A worker built from that input re-enqueues the trigger with the charging requirement.
+        runBlocking { workerFor(true, isTrigger = false).doWork() }
+        val trig = WorkManager.getInstance(app).getWorkInfosForUniqueWork("pb_trigger").get().single()
+        assertTrue(trig.constraints.requiresCharging())
+    }
+
+    @Test fun unreachableClearsStaleErrorNotification() {
+        runner = BackupRunner { _ -> BackupResult.Stopped(RemoteException.AuthFailed()) }
+        runWorker()
+        assertEquals(1, errorNotifications().size)
+        runner = BackupRunner { _ -> BackupResult.Stopped(RemoteException.Unreachable()) }
+        runWorker()
+        assertTrue(errorNotifications().isEmpty())
     }
 }
