@@ -162,6 +162,8 @@ class HomeViewModel(
     }
 
     fun backUpNow() {
+        // Unreadable settings: the Retry state is showing; do nothing now and nothing later after Retry.
+        if (_state.value.settingsError) return
         viewModelScope.launch { backup.runNow(currentSettings().chargingOnly) }
     }
 

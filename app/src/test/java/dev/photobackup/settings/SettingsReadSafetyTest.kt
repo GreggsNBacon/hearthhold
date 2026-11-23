@@ -118,4 +118,34 @@ class SettingsReadSafetyTest {
         vm.setGesture(dev.photobackup.review.Swipe.LEFT, null).join()
         assertTrue(vm.state.value.settingsError)
     }
+
+    @Test fun driveRootIsNullWhenSettingsUnreadable() = runBlocking {
+        assertNull(dev.photobackup.app.driveRootOf { throw SettingsUnreadableException() })
+        val ok = dev.photobackup.app.driveRootOf { AppSettings(dev.photobackup.smb.SmbConfig("nas", "usb", null, null), "P") }
+        assertEquals("nas", ok?.host)
+    }
+
+    @Test fun driveRootStillPropagatesCancellation() = runBlocking {
+        var thrown: Throwable? = null
+        try {
+            dev.photobackup.app.driveRootOf { throw kotlinx.coroutines.CancellationException("c") }
+        } catch (e: Throwable) { thrown = e }
+        assertTrue(thrown is kotlinx.coroutines.CancellationException)
+    }
+
+    @Test fun backUpNowDoesNothingWhileSettingsAreUnreadableEvenAfterRetry() {
+        var broke = true
+        val control = FakeBackupControl()
+        val vm = HomeViewModel(
+            settings = flow { if (broke) throw SettingsUnreadableException() else emitAll(MutableStateFlow(AppSettings(null, null))) },
+            status = MutableStateFlow(BackupStatusSnapshot(null, null, null, false, 0, 0, null)),
+            counts = MutableStateFlow<Map<BackupStatus, Int>>(emptyMap()),
+            checkDrive = {}, reenterPassword = {}, freeUpBytes = { 0L }, backup = control,
+        )
+        vm.backUpNow()
+        assertTrue(vm.state.value.settingsError)
+        broke = false
+        vm.retrySettings()
+        assertEquals(emptyList<String>(), control.calls)
+    }
 }

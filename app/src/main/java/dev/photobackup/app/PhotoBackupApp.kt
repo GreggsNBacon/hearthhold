@@ -247,7 +247,7 @@ class AppContainer(context: Context) {
         driveStore().use { CopyToPhone.copy(app, it, remotePath, isVideo) }
     }
 
-    suspend fun driveRoot(): SmbRoot? = settings().smb?.let { SmbRoot(it.host, it.share) }
+    suspend fun driveRoot(): SmbRoot? = driveRootOf { settings() }
 
     /** Connects and logs in to the saved drive (via the auth prompt); throws on failure. */
     suspend fun checkDrive() {
