@@ -74,6 +74,8 @@ class SetupViewModel(
     private val openStore: (SmbConfig) -> RemoteStore,
     private val backup: BackupControl,
     val mode: SetupMode = SetupMode.MAIN,
+    /** Drops the stored second-location status line once a new second location is saved. */
+    private val clearSecondStatus: suspend () -> Unit = {},
 ) : ViewModel() {
     private val _state = MutableStateFlow(SetupUiState())
     val state: StateFlow<SetupUiState> = _state.asStateFlow()
@@ -241,6 +243,13 @@ class SetupViewModel(
                 if (same) {
                     _state.update { it.copy(message = OVERLAPS_MAIN, step = SetupStep.FOLDER) }
                     return@launch
+                }
+                try {
+                    clearSecondStatus() // the old location's line must not show for the new one
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // Best effort; the first run's result replaces it.
                 }
                 try {
                     backup.runNow(settingsStore.settings.first().chargingOnly)

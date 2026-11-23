@@ -72,6 +72,8 @@ class SettingsViewModel(
     private val assignments: FolderAssignmentStore? = null,
     /** Empties the SecondCopy table (Remove / Change of the second location). Never touches a drive. */
     private val clearSecondCopies: suspend () -> Unit = {},
+    /** Drops the stored second-location status line (and its notification) after Remove / Change. */
+    private val clearSecondStatus: suspend () -> Unit = {},
     /** The shared backup lock: Remove / Change never run while a backup does. */
     private val lock: Mutex = BackupLock.mutex,
 ) : ViewModel() {
@@ -384,7 +386,7 @@ class SettingsViewModel(
      * Remove (and the first half of Change): clears the SecondCopy table, then the `second` settings, under the shared
      * backup lock. Nothing on either drive is touched. A running backup → [BACKUP_RUNNING] and nothing changes. The
      * table goes first so a failure never leaves old rows behind for a location set up later. [onDone] runs only after
-     * both are cleared (Change then opens setup in second mode). Never throws but cancellation; never shows exception text.
+     * both are cleared (Change then opens setup in second mode); the stored second status is then dropped too. Never throws but cancellation; never shows exception text.
      */
     fun removeSecond(onDone: () -> Unit = {}): Job = viewModelScope.launch {
         if (!lock.tryLock()) {
@@ -400,6 +402,14 @@ class SettingsViewModel(
             false
         } finally {
             lock.unlock()
+        }
+        if (ok) {
+            // The old location's status ("Up to date") must not show for a new one; best effort.
+            try {
+                clearSecondStatus()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
         }
         _state.update { it.copy(secondMessage = if (ok) null else REMOVE_SECOND_FAILED) }
         if (ok) onDone()

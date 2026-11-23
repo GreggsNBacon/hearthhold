@@ -183,6 +183,12 @@ class AppContainer(context: Context) {
         backup.runNow(settings().chargingOnly)
     }
 
+    /** The second location was removed or replaced: its stored status line and notification no longer apply. */
+    private suspend fun clearSecondStatus() {
+        statusRepository.update { it.copy(secondStatus = null) }
+        BackupNotifications.clearSecondError(app)
+    }
+
     /** Opens the "Re-enter second location password" dialog and checks the new login against the second drive. */
     suspend fun reenterSecondPassword() {
         secondAuthPrompt.prompt { cfg -> storeFactory(cfg).use { it.connect() } }
@@ -324,6 +330,7 @@ class AppContainer(context: Context) {
                 openStore = storeFactory,
                 backup = backup,
                 mode = SetupMode.SECOND,
+                clearSecondStatus = { clearSecondStatus() },
             )
         }
     }
@@ -349,6 +356,7 @@ class AppContainer(context: Context) {
                 settingsStore, storeFactory, backup, media::folderCounts,
                 ledger = ledger, assignments = LedgerDatabase.get(app).folderAssignmentDao(),
                 clearSecondCopies = { LedgerDatabase.get(app).secondCopyDao().clear() },
+                clearSecondStatus = { clearSecondStatus() },
             )
         }
     }

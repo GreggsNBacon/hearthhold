@@ -48,6 +48,7 @@ class SecondLocationSettingsTest {
     private val opened = mutableListOf<SmbConfig>()
     private val lock = Mutex()
     private var cleared = 0
+    private var statusCleared = 0
     private var clearError: Exception? = null
     private val mainSmb = SmbConfig("nas", "usb", "greg", "pw")
     private val second = SecondLocation(SmbConfig("pc", "share", "pc", "pcpw"), "Copy")
@@ -64,6 +65,7 @@ class SecondLocationSettingsTest {
     private fun vm() = SettingsViewModel(
         settings, { opened += it; store }, backup,
         clearSecondCopies = { clearError?.let { throw it }; cleared++ },
+        clearSecondStatus = { statusCleared++ },
         lock = lock,
     )
 
@@ -82,6 +84,24 @@ class SecondLocationSettingsTest {
         assertFalse(lock.isLocked)
     }
 
+    @Test fun removeClearsTheStoredSecondStatus() = runBlocking {
+        vm().removeSecond().join()
+        assertEquals(1, statusCleared)
+    }
+
+    @Test fun removeStillSucceedsWhenTheStatusCantBeCleared() = runBlocking {
+        val vm = SettingsViewModel(
+            settings, { store }, backup, clearSecondCopies = { cleared++ },
+            clearSecondStatus = { throw IOException("datastore") }, lock = lock,
+        )
+        var done = 0
+        vm.removeSecond { done++ }.join()
+        assertNull(settings.settings.first().second)
+        assertEquals(1, done)
+        assertNull(vm.state.value.secondMessage)
+        assertFalse(lock.isLocked)
+    }
+
     @Test fun removeWhileABackupRunsChangesNothing() = runBlocking {
         lock.lock()
         var done = 0
@@ -89,6 +109,7 @@ class SecondLocationSettingsTest {
         vm.removeSecond { done++ }.join()
         assertEquals(second, settings.settings.first().second)
         assertEquals(0, cleared)
+        assertEquals(0, statusCleared)
         assertEquals(0, done)
         assertEquals(SettingsViewModel.BACKUP_RUNNING, vm.state.value.secondMessage)
         assertTrue(lock.isLocked) // still the backup's
@@ -101,6 +122,7 @@ class SecondLocationSettingsTest {
         vm.removeSecond { done++ }.join()
         assertEquals(second, settings.settings.first().second)
         assertEquals(0, done)
+        assertEquals(0, statusCleared)
         assertEquals(SettingsViewModel.REMOVE_SECOND_FAILED, vm.state.value.secondMessage)
         assertFalse(lock.isLocked)
     }

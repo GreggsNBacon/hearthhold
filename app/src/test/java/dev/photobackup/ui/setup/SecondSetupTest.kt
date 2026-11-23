@@ -46,6 +46,7 @@ class SecondSetupTest {
     private val backup = FakeBackupControl()
     private val opened = mutableListOf<SmbConfig>()
     private val mainSmb = SmbConfig("192.168.50.1", "usb", "greg", "pw")
+    private var statusCleared = 0
 
     @Before fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
@@ -63,6 +64,7 @@ class SecondSetupTest {
         openStore = { cfg -> opened += cfg; store },
         backup = backup,
         mode = SetupMode.SECOND,
+        clearSecondStatus = { statusCleared++ },
     )
 
     private suspend fun SetupViewModel.loggedIn(host: String, share: String): SetupViewModel = apply {
@@ -151,6 +153,7 @@ class SecondSetupTest {
         assertNull(settings.settings.first().second)
         assertEquals(SetupViewModel.OVERLAPS_MAIN, vm.state.value.message)
         assertFalse(vm.state.value.finished)
+        assertEquals(0, statusCleared) // nothing saved: the old status stays
     }
 
     @Test fun sameShareSiblingFolderIsAllowed() = runBlocking {
@@ -170,6 +173,20 @@ class SecondSetupTest {
         assertEquals("Phone backup", s.destination)
         assertTrue(vm.state.value.finished)
         assertEquals(listOf("runNow(false)"), backup.calls) // no re-scheduling from the second setup
+        assertEquals(1, statusCleared) // the old location's "Up to date" must not show for the new one
+    }
+
+    @Test fun finishStillSavesWhenTheStatusCantBeCleared() = runBlocking {
+        val vm = SetupViewModel(
+            settingsStore = settings, discover = { emptyFlow<FoundHost>() },
+            listShares = { _, _, _ -> listOf("pcshare") }, openStore = { store }, backup = backup,
+            mode = SetupMode.SECOND, clearSecondStatus = { throw java.io.IOException("datastore") },
+        ).loggedIn("pc.local", "pcshare")
+        vm.onFolderPicked("Hearthhold copy").join()
+        vm.finish().join()
+        assertEquals("Hearthhold copy", settings.settings.first().second?.destination)
+        assertTrue(vm.state.value.finished)
+        assertNull(vm.state.value.message)
     }
 
     @Test fun backFromDoneSkipsPermissions() = runBlocking {
