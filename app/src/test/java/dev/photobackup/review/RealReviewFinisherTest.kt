@@ -222,6 +222,68 @@ class RealReviewFinisherTest {
         assertTrue(requests.isEmpty())
     }
 
+    @Test fun editedPhoneFileIsListedAndItsDecisionCleared() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        photo(2, ReviewAction.DRIVE_ONLY)
+        phone[2] = phone[2]!!.copy(sizeBytes = 99) // edited since it was backed up
+        val f = finisher()
+        val r = f.prepare(decisions.all()) as PrepareResult.Ready
+        assertEquals(listOf(FailedRow(2, RealReviewFinisher.EDITED)), r.failed)
+        assertEquals(setOf(1L, 2L), decisions.rows.keys)
+        f.apply(r)
+        assertTrue(decisions.rows.isEmpty())
+    }
+
+    @Test fun rowWithoutLedgerEntryIsGoneAndCleared() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        ledger.delete(1)
+        val r = finisher().prepare(decisions.all())
+        assertEquals(
+            PrepareResult.NothingToDelete(false, 0, listOf(FailedRow(1, RealReviewFinisher.GONE_FROM_PHONE))), r,
+        )
+        assertTrue(decisions.rows.isEmpty())
+    }
+
+    @Test fun rowThatFailedEarlierIsNotReadyAndKeepsItsDecisionOnRetry() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        store.files["r\\f1.jpg"] = ByteArray(5) { 99 } // damaged: first Finish marks it FAILED
+        val f = finisher()
+        val first = f.prepare(decisions.all())
+        assertEquals(listOf(FailedRow(1, FreeUpRepository.DAMAGED)), (first as PrepareResult.NothingToDelete).failed)
+        assertEquals(BackupStatus.FAILED, ledger.get(1)!!.status)
+        val retry = f.prepare(decisions.all())
+        assertEquals(
+            PrepareResult.NothingToDelete(false, 0, listOf(FailedRow(1, RealReviewFinisher.NOT_READY))), retry,
+        )
+        assertEquals(setOf(1L), decisions.rows.keys)
+    }
+
+    @Test fun rowWithAMoveInFlightIsNotReadyAndKeepsItsDecision() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        photo(2, ReviewAction.DRIVE_ONLY)
+        ledger.upsert(ledger.get(2)!!.copy(movingTo = "elsewhere\\f2.jpg"))
+        val f = finisher()
+        val r = f.prepare(decisions.all()) as PrepareResult.Ready
+        assertEquals(listOf(FailedRow(2, RealReviewFinisher.NOT_READY)), r.failed)
+        f.apply(r)
+        assertEquals(setOf(2L), decisions.rows.keys)
+    }
+
+    @Test fun runNowStillCalledWhenAWriteFailsAfterConfirm() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        photo(2, ReviewAction.KEEP)
+        val f = RealReviewFinisher(
+            ledger, decisions,
+            object : ReviewKeepDao by keeps { override suspend fun upsert(k: ReviewKeep) = throw IllegalStateException() },
+            FreeUpRepository(ledger, clock = { now }), { store }, { phone.toMap() },
+            LocalOpener { m -> phoneBytes[m.mediaId]?.let { ByteArrayInputStream(it) } },
+            { "request" }, { runs++ }, { now },
+        )
+        val r = f.prepare(decisions.all()) as PrepareResult.Ready
+        try { f.apply(r); throw AssertionError("expected failure") } catch (_: IllegalStateException) {}
+        assertEquals(1, runs)
+    }
+
     @Test fun rowMovedByABackupRunMeanwhileKeepsItsDecisionAndIsCounted() = runBlocking {
         photo(1, ReviewAction.JUNK, size = 7)
         photo(2, ReviewAction.JUNK, size = 11)

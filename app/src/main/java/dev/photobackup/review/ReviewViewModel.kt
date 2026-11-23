@@ -289,6 +289,7 @@ class ReviewViewModel(
                             reload()
                         } else {
                             setFinish(FinishState.Error(failedMessage(r.failed.size)))
+                            reload() // the finisher may have cleared decisions for gone or edited rows
                         }
                     }
                     is PrepareResult.Ready -> {

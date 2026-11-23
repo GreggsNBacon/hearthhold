@@ -294,6 +294,19 @@ class ReviewViewModelTest {
         assertEquals(FinishState.Done(0, 0, 0, 2), v.state.value.finish)
     }
 
+    @Test fun finish_nothing_to_delete_with_failures_reloads_cleared_decisions() = runTest {
+        add(1); add(2)
+        val v = vm()
+        v.swipe(Swipe.LEFT)
+        assertEquals(2L, v.cur())
+        finisher.prepareResult = PrepareResult.NothingToDelete(false, 0, listOf(FailedRow(1, "gone")))
+        decisions.rows.clear() // the real finisher cleared the gone row's decision during prepare
+        v.startFinish()
+        assertEquals(FinishState.Error("1 item could not be verified and were left alone"), v.state.value.finish)
+        assertEquals(0, v.state.value.summary.junk)
+        assertEquals(2, v.state.value.remaining) // card 1 is back in the deck
+    }
+
     @Test fun finish_cancelled_returns_to_idle_without_applying() = runTest {
         add(1)
         val v = vm()

@@ -3,7 +3,8 @@ package dev.photobackup.ledger
 import dev.photobackup.media.PhoneMedia
 
 object LedgerRules {
-    private fun changed(e: LedgerEntry, p: PhoneMedia) =
+    /** The phone file was edited since this row was recorded. */
+    fun changed(e: LedgerEntry, p: PhoneMedia) =
         e.sizeBytes != p.sizeBytes || e.dateModifiedSec != p.dateModifiedSec
 
     fun needsUpload(existing: LedgerEntry?, phone: PhoneMedia): Boolean = when {

@@ -3,6 +3,7 @@ package dev.photobackup.review
 import dev.photobackup.backup.LocalOpener
 import dev.photobackup.freeup.FreeUpRepository
 import dev.photobackup.ledger.LedgerEntry
+import dev.photobackup.ledger.LedgerRules
 import dev.photobackup.ledger.LedgerStore
 import dev.photobackup.ledger.ReviewDecision
 import dev.photobackup.ledger.ReviewDecisionDao
@@ -78,14 +79,15 @@ class RealReviewFinisher(
 
         val failedIds = LinkedHashMap<Long, String>()
         val phone: Map<Long, PhoneMedia>
+        val rows: Map<Long, LedgerEntry>
         val passed: List<LedgerEntry>
         try {
             val store = openStore() ?: return PrepareResult.Offline
             phone = queryPhone()
             passed = store.use {
                 it.connect()
-                val rows = toDelete.mapNotNull { d -> ledger.get(d.mediaId) }
-                repo.recheck(rows, it, phone, opener, onFailed = { id, reason -> failedIds[id] = reason })
+                rows = toDelete.mapNotNull { d -> ledger.get(d.mediaId) }.associateBy { e -> e.mediaId }
+                repo.recheck(rows.values.toList(), it, phone, opener, onFailed = { id, reason -> failedIds[id] = reason })
             }
         } catch (e: IOException) { // includes RemoteException; never shown or logged
             return PrepareResult.Offline
@@ -93,7 +95,7 @@ class RealReviewFinisher(
 
         val passedIds = passed.map { it.mediaId }.toSet()
         val failed = toDelete.filter { it.mediaId !in passedIds }.map { d ->
-            FailedRow(d.mediaId, failedIds[d.mediaId] ?: if (phone[d.mediaId] == null) GONE_FROM_PHONE else CHANGED)
+            FailedRow(d.mediaId, failedIds[d.mediaId] ?: skipReason(rows[d.mediaId], phone[d.mediaId]))
         }
         if (passed.isEmpty()) {
             applyKeeps(keepList)
@@ -122,9 +124,12 @@ class RealReviewFinisher(
                 if (isJunk) junk++
             }
         }
-        applyKeeps(prepared.keeps, now)
-        decisions.clear(marked + stale(prepared.failed))
-        runNow()
+        try {
+            applyKeeps(prepared.keeps, now)
+            decisions.clear(marked + stale(prepared.failed))
+        } finally {
+            runNow() // Android already deleted the phone copies: start the drive-side work even if a write failed
+        }
         return ApplyResult.Done(freed, junk, prepared.keeps.size, leftAlone = prepared.passed.size - marked.size)
     }
 
@@ -134,12 +139,20 @@ class RealReviewFinisher(
         decisions.clear(list.map { it.mediaId })
     }
 
-    /** Rows whose decision can no longer apply (gone or changed); failed re-checks keep theirs for a retry. */
+    /** Why recheck skipped a row without failing it. Only gone or edited rows lose their decision. */
+    private fun skipReason(e: LedgerEntry?, m: PhoneMedia?) = when {
+        e == null || m == null -> GONE_FROM_PHONE
+        LedgerRules.changed(e, m) -> EDITED
+        else -> NOT_READY // not VERIFIED yet (e.g. failed earlier, re-uploading) or a drive move in flight
+    }
+
+    /** Rows whose decision can no longer apply; failed or not-ready rows keep theirs for a retry. */
     private fun stale(failed: List<FailedRow>) =
-        failed.filter { it.reason == GONE_FROM_PHONE || it.reason == CHANGED }.map { it.mediaId }
+        failed.filter { it.reason == GONE_FROM_PHONE || it.reason == EDITED }.map { it.mediaId }
 
     companion object {
         const val GONE_FROM_PHONE = "No longer on the phone"
-        const val CHANGED = "Changed since review"
+        const val EDITED = "Phone file changed since review"
+        const val NOT_READY = "Not ready yet — try again later"
     }
 }
