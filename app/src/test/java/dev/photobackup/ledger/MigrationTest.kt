@@ -37,7 +37,7 @@ class MigrationTest {
         v1.close()
 
         val db = Room.databaseBuilder(ctx, AppDatabase::class.java, "migration-test.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3).allowMainThreadQueries().build()
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).allowMainThreadQueries().build()
         try {
             val e = db.ledgerDao().get(7)!!
             assertEquals("Backup/Pixel/Camera/2024/a.jpg", e.remotePath)
@@ -94,7 +94,7 @@ class MigrationTest {
         v2.close()
 
         val db = Room.databaseBuilder(ctx, AppDatabase::class.java, "migration-test-v2.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3).allowMainThreadQueries().build()
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).allowMainThreadQueries().build()
         try {
             val a = db.ledgerDao().get(7)!!
             assertEquals("Backup/Pixel/Camera/2024/a.jpg", a.remotePath)
@@ -137,7 +137,7 @@ class MigrationTest {
         v1.version = 1
         v1.close()
         val db = Room.databaseBuilder(ctx, AppDatabase::class.java, "migration-test-v1v3.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3).allowMainThreadQueries().build()
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).allowMainThreadQueries().build()
         try {
             val e = db.ledgerDao().get(7)!!
             assertEquals(BackupStatus.VERIFIED, e.status)

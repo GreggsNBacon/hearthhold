@@ -8,6 +8,9 @@ import dev.photobackup.review.ReviewAction
 import dev.photobackup.review.Swipe
 import dev.photobackup.smb.SmbConfig
 
+/** The optional second backup location: its own drive login plus its own destination folder. */
+data class SecondLocation(val smb: SmbConfig, val destination: String)
+
 data class AppSettings(
     val smb: SmbConfig?,
     val destination: String?,
@@ -27,6 +30,10 @@ data class AppSettings(
     val folderRules: Map<String, String> = emptyMap(),
     /** Swipe review gestures; null = No action. At least one direction is not null. */
     val gestures: Map<Swipe, ReviewAction?> = DEFAULT_GESTURES,
+    /** Second backup location; null = off (the app behaves as without the feature). */
+    val second: SecondLocation? = null,
+    /** With a second location: Free up only deletes phone files verified on both drives. */
+    val freeUpNeedsBoth: Boolean = true,
 ) {
     /** The active window, or null when "Only back up overnight" is off. */
     fun overnightWindow(): OvernightWindow? =

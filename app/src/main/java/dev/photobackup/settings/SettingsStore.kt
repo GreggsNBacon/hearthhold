@@ -40,7 +40,7 @@ class SettingsStore internal constructor(
         dataStore.edit { prefs ->
             val before = read(prefs)
             val after = transform(before)
-            write(prefs, after, writeLogin = after.smb != before.smb)
+            write(prefs, after, writeLogin = after.smb != before.smb, writeSecond = after.second != before.second)
         }
     }
 
@@ -69,6 +69,19 @@ class SettingsStore internal constructor(
             overnightEndHour = (p[OVERNIGHT_END] ?: 6).coerceIn(0, 23),
             folderRules = (p[FOLDER_RULES] ?: emptySet()).mapNotNull { decodeRule(it) }.toMap(),
             gestures = readGestures(p),
+            second = readSecond(p),
+            freeUpNeedsBoth = p[FREE_UP_NEEDS_BOTH] ?: true,
+        )
+    }
+
+    private fun readSecond(p: Preferences): SecondLocation? {
+        val host = p[SECOND_HOST]
+        val share = p[SECOND_SHARE]
+        val dest = p[SECOND_DESTINATION]
+        if (host.isNullOrBlank() || share.isNullOrBlank() || dest.isNullOrBlank()) return null
+        return SecondLocation(
+            SmbConfig(host, share, p[SECOND_USER], p[SECOND_PASSWORD]?.let { decryptOrNull(it) }),
+            dest,
         )
     }
 
@@ -88,7 +101,15 @@ class SettingsStore internal constructor(
     private fun decryptOrNull(enc: String): String? =
         try { cipher.decrypt(enc) } catch (e: Exception) { null }
 
-    private fun write(p: MutablePreferences, s: AppSettings, writeLogin: Boolean) {
+    private fun write(p: MutablePreferences, s: AppSettings, writeLogin: Boolean, writeSecond: Boolean) {
+        if (writeSecond) {
+            p.putOrRemove(SECOND_HOST, s.second?.smb?.host)
+            p.putOrRemove(SECOND_SHARE, s.second?.smb?.share)
+            p.putOrRemove(SECOND_USER, s.second?.smb?.username)
+            p.putOrRemove(SECOND_PASSWORD, s.second?.smb?.password?.let { cipher.encrypt(it) })
+            p.putOrRemove(SECOND_DESTINATION, s.second?.destination)
+        }
+        p[FREE_UP_NEEDS_BOTH] = s.freeUpNeedsBoth
         if (writeLogin) {
             p.putOrRemove(HOST, s.smb?.host)
             p.putOrRemove(SHARE, s.smb?.share)
@@ -133,6 +154,12 @@ class SettingsStore internal constructor(
         val SHARE = stringPreferencesKey("smb_share")
         val USER = stringPreferencesKey("smb_username")
         val PASSWORD = stringPreferencesKey("smb_password")
+        val SECOND_HOST = stringPreferencesKey("second_smb_host")
+        val SECOND_SHARE = stringPreferencesKey("second_smb_share")
+        val SECOND_USER = stringPreferencesKey("second_smb_username")
+        val SECOND_PASSWORD = stringPreferencesKey("second_smb_password")
+        val SECOND_DESTINATION = stringPreferencesKey("second_destination")
+        val FREE_UP_NEEDS_BOTH = booleanPreferencesKey("free_up_needs_both")
         val DESTINATION = stringPreferencesKey("destination")
         val DEVICE_NAME = stringPreferencesKey("device_name")
         val CHARGING_ONLY = booleanPreferencesKey("charging_only")

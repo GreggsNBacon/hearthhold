@@ -13,6 +13,8 @@ class Converters {
     @TypeConverter fun toStatus(s: String): BackupStatus = BackupStatus.valueOf(s)
     @TypeConverter fun toName(a: ReviewAction): String = a.name
     @TypeConverter fun toAction(s: String): ReviewAction = ReviewAction.valueOf(s)
+    @TypeConverter fun toName(s: SecondStatus): String = s.name
+    @TypeConverter fun toSecondStatus(s: String): SecondStatus = SecondStatus.valueOf(s)
 }
 
 /** v1 -> v2: adds the FolderAssignment table and LedgerEntry.movingTo. Keeps every ledger row. */
@@ -43,9 +45,22 @@ val MIGRATION_2_3 = object : Migration(2, 3) {
     }
 }
 
+/** v3 -> v4: the SecondCopy table (second backup location). Keeps every row; empty until the feature is used. */
+val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `SecondCopy` (`mediaId` INTEGER NOT NULL, `remotePath` TEXT, `partPath` TEXT, " +
+                "`movingTo` TEXT, `status` TEXT NOT NULL, `sizeBytes` INTEGER NOT NULL, `sha256` TEXT, " +
+                "`lastError` TEXT, `updatedAtMs` INTEGER NOT NULL, PRIMARY KEY(`mediaId`))"
+        )
+    }
+}
+
 @Database(
-    entities = [LedgerEntry::class, FolderAssignment::class, ReviewDecision::class, ReviewKeep::class],
-    version = 3,
+    entities = [
+        LedgerEntry::class, FolderAssignment::class, ReviewDecision::class, ReviewKeep::class, SecondCopy::class,
+    ],
+    version = 4,
     exportSchema = false,
 )
 @TypeConverters(Converters::class)
@@ -54,4 +69,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun folderAssignmentDao(): FolderAssignmentDao
     abstract fun reviewDecisionDao(): ReviewDecisionDao
     abstract fun reviewKeepDao(): ReviewKeepDao
+    abstract fun secondCopyDao(): SecondCopyDao
 }
