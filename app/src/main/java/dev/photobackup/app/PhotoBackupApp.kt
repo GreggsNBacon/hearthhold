@@ -372,7 +372,8 @@ class AppContainer(context: Context) {
 
     /**
      * The second location's copies by mediaId for the Gallery badge, or null while no second location is set (then
-     * the table is not even observed). A read error falls back to null: the badges stay as without the feature.
+     * the table is not even observed). A read error falls back to null (badges as without the feature) for that
+     * observation only; a later settings change still starts a new one.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
     private fun secondCopies(): Flow<Map<Long, SecondCopy>?> =
@@ -380,8 +381,8 @@ class AppContainer(context: Context) {
             if (!on) flowOf(null)
             else LedgerDatabase.get(app).secondCopyDao().observeAll().map<List<SecondCopy>, Map<Long, SecondCopy>?> { rows ->
                 rows.associateBy { it.mediaId }
-            }
-        }.catch { e -> if (e is CancellationException) throw e else emit(null) }
+            }.catch { e -> if (e is CancellationException) throw e else emit(null) }
+        }
 
     /** Browse one folder; each `browse?path=` back-stack entry gets its own ViewModel and connection. */
     fun browseFactory(path: String): ViewModelProvider.Factory = viewModelFactory {

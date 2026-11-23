@@ -239,7 +239,13 @@ private fun SecondLocationSection(s: AppSettings, message: String?, vm: Settings
         AlertDialog(
             onDismissRequest = { confirm = null },
             title = { Text(if (c == SecondConfirm.CHANGE) "Change second location?" else "Remove second location?") },
-            text = { Text("Stops copying; nothing on either drive is deleted") },
+            text = {
+                Text(
+                    if (c == SecondConfirm.CHANGE) "Stops copying; nothing on either drive is deleted. The current " +
+                        "location is removed first, then you pick the new one."
+                    else "Stops copying; nothing on either drive is deleted"
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     confirm = null

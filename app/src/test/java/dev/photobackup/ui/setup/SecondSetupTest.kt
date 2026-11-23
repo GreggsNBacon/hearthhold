@@ -85,26 +85,77 @@ class SecondSetupTest {
         val vm = vm().loggedIn("192.168.50.1", "usb")
         vm.onFolderPicked("Phone backup").join()
         assertEquals(SetupStep.FOLDER, vm.state.value.step)
-        assertEquals(SetupViewModel.SAME_AS_MAIN, vm.state.value.message)
+        assertEquals(SetupViewModel.OVERLAPS_MAIN, vm.state.value.message)
         vm.finish().join()
         assertNull(settings.settings.first().second)
         assertFalse(vm.state.value.finished)
     }
 
-    @Test fun sameLocationIgnoresCaseAndSlashes() = runBlocking {
+    @Test fun overlapIgnoresCaseAndSlashes() = runBlocking {
         val vm = vm().loggedIn("192.168.50.1 ", "USB")
         vm.onFolderPicked("\\phone BACKUP/").join()
-        assertEquals(SetupViewModel.SAME_AS_MAIN, vm.state.value.message)
-        assertTrue(isSameLocation(mainSmb, "Phone backup", SmbConfig("192.168.50.1", "/usb/", null, null), "phone backup"))
-        assertTrue(isSameLocation(mainSmb, "A\\B",SmbConfig("192.168.50.1", "usb", null, null), "a//b\\"))
-        assertFalse(isSameLocation(mainSmb, "Phone backup", SmbConfig("192.168.50.1", "usb", null, null), "Copy"))
-        assertFalse(isSameLocation(mainSmb, "Phone backup", SmbConfig("other", "usb", null, null), "Phone backup"))
-        assertFalse(isSameLocation(mainSmb, "Phone backup", SmbConfig("192.168.50.1", "usb2", null, null), "Phone backup"))
+        assertEquals(SetupViewModel.OVERLAPS_MAIN, vm.state.value.message)
+        assertTrue(overlapsMain(mainSmb, "Phone backup", SmbConfig("192.168.50.1", "/usb/", null, null), "phone backup"))
+        assertTrue(overlapsMain(mainSmb, "A\\B", SmbConfig("192.168.50.1", "usb", null, null), "a//b\\"))
     }
 
-    @Test fun sameShareOtherFolderIsAllowed() = runBlocking {
+    private val sameShare = SmbConfig("192.168.50.1", "usb", null, null)
+
+    @Test fun exactChildAndParentOverlap() {
+        assertTrue(overlapsMain(mainSmb, "Phone backup", sameShare, "Phone backup"))
+        assertTrue(overlapsMain(mainSmb, "Phone backup", sameShare, "Phone backup\\Copy"))
+        assertTrue(overlapsMain(mainSmb, "Phone backup", sameShare, "phone backup/copy/deeper"))
+        assertTrue(overlapsMain(mainSmb, "Backups\\Phone", sameShare, "Backups"))
+    }
+
+    @Test fun shareRootOverlapsEverythingOnThatShare() {
+        assertTrue(overlapsMain(mainSmb, "Phone backup", sameShare, ""))
+        assertTrue(overlapsMain(mainSmb, "Phone backup", sameShare, "\\"))
+        assertTrue(overlapsMain(mainSmb, "", sameShare, "Anything"))
+        assertTrue(overlapsMain(mainSmb, null, sameShare, "Anything"))
+    }
+
+    @Test fun siblingsWithACommonPrefixAreAllowed() {
+        assertFalse(overlapsMain(mainSmb, "Photos", sameShare, "Photos2"))
+        assertFalse(overlapsMain(mainSmb, "Photos2", sameShare, "Photos"))
+        assertFalse(overlapsMain(mainSmb, "Backups\\Phone", sameShare, "Backups\\Phone copy"))
+        assertFalse(overlapsMain(mainSmb, "Phone backup", sameShare, "Copy"))
+    }
+
+    @Test fun differentHostOrShareIsAllowed() {
+        assertFalse(overlapsMain(mainSmb, "Phone backup", SmbConfig("other", "usb", null, null), "Phone backup"))
+        assertFalse(overlapsMain(mainSmb, "Phone backup", SmbConfig("192.168.50.1", "usb2", null, null), "Phone backup"))
+        assertFalse(overlapsMain(mainSmb, "", SmbConfig("192.168.50.1", "usb2", null, null), ""))
+    }
+
+    @Test fun refusesAFolderInsideTheMainOne() = runBlocking {
         val vm = vm().loggedIn("192.168.50.1", "usb")
-        vm.onFolderPicked("Second copy").join()
+        vm.onFolderPicked("Phone backup\\Second").join()
+        assertEquals(SetupStep.FOLDER, vm.state.value.step)
+        assertEquals(SetupViewModel.OVERLAPS_MAIN, vm.state.value.message)
+    }
+
+    @Test fun refusesTheShareRoot() = runBlocking {
+        val vm = vm().loggedIn("192.168.50.1", "usb")
+        vm.onFolderPicked("").join()
+        assertEquals(SetupViewModel.OVERLAPS_MAIN, vm.state.value.message)
+    }
+
+    @Test fun finishRechecksAgainstTheCurrentMainFolder() = runBlocking {
+        val vm = vm().loggedIn("192.168.50.1", "usb")
+        vm.onFolderPicked("Archive").join()
+        assertEquals(SetupStep.DONE, vm.state.value.step)
+        // The main folder moved inside the picked one meanwhile: Finish refuses too.
+        settings.update { it.copy(destination = "Archive\\Phone backup") }
+        vm.finish().join()
+        assertNull(settings.settings.first().second)
+        assertEquals(SetupViewModel.OVERLAPS_MAIN, vm.state.value.message)
+        assertFalse(vm.state.value.finished)
+    }
+
+    @Test fun sameShareSiblingFolderIsAllowed() = runBlocking {
+        val vm = vm().loggedIn("192.168.50.1", "usb")
+        vm.onFolderPicked("Phone backup2").join()
         assertNull(vm.state.value.message)
         assertEquals(SetupStep.DONE, vm.state.value.step) // no permissions step in second mode
     }
@@ -126,6 +177,12 @@ class SecondSetupTest {
         vm.onFolderPicked("Hearthhold copy").join()
         assertTrue(vm.back())
         assertEquals(SetupStep.FOLDER, vm.state.value.step)
+    }
+
+    @Test fun pickerStoreWithoutALoginFailsOnUseNotOnCreate() = runBlocking {
+        val s = vm().pickerStore() // must not throw inside the screen's remember {}
+        assertTrue(runCatching { s.list("") }.exceptionOrNull() is java.io.IOException)
+        assertTrue(opened.isEmpty())
     }
 
     @Test fun pickerStoreUsesTheTypedLogin() = runBlocking {

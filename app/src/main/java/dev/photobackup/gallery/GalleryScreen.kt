@@ -394,9 +394,10 @@ private fun BackupBadge(badge: Badge, onClick: (() -> Unit)?, modifier: Modifier
         Badge.DRIVE_ONLY -> Color(0xFF1565C0) to "On drive only"
         Badge.FAILED -> Color(0xFFC62828) to "Backup failed — show why"
         Badge.ONE_COPY -> Color(0xFF2E7D32) to "One copy so far"
+        Badge.DRIVE_ONE_COPY -> Color(0xFF1565C0) to "On drive only — one copy so far"
     }
-    // Outlined ✓: a white dot with a green rim and check, so it reads as "not quite done" next to the solid green one.
-    val outlined = badge == Badge.ONE_COPY
+    // Outlined ✓ / ☁: a white dot with a coloured rim and icon, so it reads as "not quite done" next to the solid one.
+    val outlined = badge == Badge.ONE_COPY || badge == Badge.DRIVE_ONE_COPY
     // The outer box is the touch target (bigger than the dot) when the badge is tappable.
     Box(
         modifier
@@ -415,6 +416,7 @@ private fun BackupBadge(badge: Badge, onClick: (() -> Unit)?, modifier: Modifier
             when (badge) {
                 Badge.BACKED_UP -> Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(14.dp))
                 Badge.ONE_COPY -> Icon(Icons.Filled.Check, null, tint = fill, modifier = Modifier.size(13.dp))
+                Badge.DRIVE_ONE_COPY -> Icon(CloudDone, null, tint = fill, modifier = Modifier.size(12.dp))
                 Badge.DRIVE_ONLY -> Icon(CloudDone, null, tint = Color.White, modifier = Modifier.size(13.dp))
                 else -> Text(
                     "!",

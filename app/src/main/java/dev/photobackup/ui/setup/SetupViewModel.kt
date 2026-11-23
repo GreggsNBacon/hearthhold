@@ -175,7 +175,7 @@ class SetupViewModel(
     }
 
     /** A store for the folder step, logged in with the typed login (second mode; the main mode uses the saved drive). */
-    fun pickerStore(): RemoteStore = openStore(config(_state.value) ?: throw IllegalStateException("no drive picked"))
+    fun pickerStore(): RemoteStore = config(_state.value)?.let(openStore) ?: NoDriveStore
 
     fun onFolderPicked(path: String): Job {
         if (mode == SetupMode.MAIN) {
@@ -185,15 +185,15 @@ class SetupViewModel(
         val cfg = config(_state.value) ?: return Job().apply { complete() }
         return viewModelScope.launch {
             val same = try {
-                settingsStore.settings.first().let { s -> s.smb != null && isSameLocation(s.smb, s.destination, cfg, path) }
+                settingsStore.settings.first().let { s -> s.smb != null && overlapsMain(s.smb, s.destination, cfg, path) }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                _state.update { it.copy(message = SAVE_FAILED) }
+                _state.update { it.copy(message = CHECK_FAILED) }
                 return@launch
             }
             _state.update {
-                if (same) it.copy(message = SAME_AS_MAIN)
+                if (same) it.copy(message = OVERLAPS_MAIN)
                 else it.copy(destination = path, step = SetupStep.DONE, message = null)
             }
         }
@@ -235,11 +235,11 @@ class SetupViewModel(
             try {
                 var same = false
                 settingsStore.update { cur ->
-                    same = cur.smb != null && isSameLocation(cur.smb, cur.destination, cfg, destination)
+                    same = cur.smb != null && overlapsMain(cur.smb, cur.destination, cfg, destination)
                     if (same) cur else cur.copy(second = SecondLocation(cfg, destination))
                 }
                 if (same) {
-                    _state.update { it.copy(message = SAME_AS_MAIN, step = SetupStep.FOLDER) }
+                    _state.update { it.copy(message = OVERLAPS_MAIN, step = SetupStep.FOLDER) }
                     return@launch
                 }
                 try {
@@ -276,21 +276,45 @@ class SetupViewModel(
     }
 
     companion object {
-        const val SAME_AS_MAIN = "That's the main backup location — pick a different drive or folder"
+        const val OVERLAPS_MAIN = "That's the main backup location, or inside or around it — pick a different drive or folder"
         const val SAVE_FAILED = "Couldn't save the second location"
+        const val CHECK_FAILED = "Couldn't check the folder — try again"
     }
 }
 
 /**
- * True when [cfg] + [folder] name the main drive's share and folder ([main] + [mainFolder]): host, share and folder
- * compared case-insensitively, with `/` and `\` treated alike and leading, trailing and doubled slashes ignored.
+ * True when [cfg] + [folder] overlap the main drive's share and folder ([main] + [mainFolder]): same host and share,
+ * and one folder equals, sits inside, or contains the other. Folders are compared whole segment by segment,
+ * case-insensitively, with `/` and `\` treated alike and leading, trailing and doubled slashes ignored, so
+ * `Photos` and `Photos2` are siblings, not nested. A blank folder is the share root, which contains everything on
+ * that share. Hosts are compared as text only: an IP address and a name for the same machine are not caught.
  */
-fun isSameLocation(main: SmbConfig, mainFolder: String?, cfg: SmbConfig, folder: String): Boolean =
-    main.host.trim().equals(cfg.host.trim(), ignoreCase = true) &&
-        normalisePath(main.share).equals(normalisePath(cfg.share), ignoreCase = true) &&
-        normalisePath(mainFolder.orEmpty()).equals(normalisePath(folder), ignoreCase = true)
+fun overlapsMain(main: SmbConfig, mainFolder: String?, cfg: SmbConfig, folder: String): Boolean {
+    if (!main.host.trim().equals(cfg.host.trim(), ignoreCase = true)) return false
+    if (!segments(main.share).equals(segments(cfg.share))) return false
+    val a = segments(mainFolder.orEmpty())
+    val b = segments(folder)
+    val n = minOf(a.size, b.size)
+    return a.subList(0, n) == b.subList(0, n)
+}
 
-private fun normalisePath(p: String): String =
-    p.trim().replace('/', BACKSLASH).split(BACKSLASH).filter { it.isNotBlank() }.joinToString(BACKSLASH.toString()) { it.trim() }
+/** Lower-cased path segments: `/` and `\` alike, blank segments (leading, trailing, doubled slashes) dropped. */
+private fun segments(p: String): List<String> =
+    p.replace('/', BACKSLASH).split(BACKSLASH).map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+
+/** The folder step's store before any login was typed (unreachable in practice): every call fails as not reachable. */
+private object NoDriveStore : RemoteStore {
+    private fun fail(): Nothing = throw RemoteException.Unreachable()
+    override suspend fun connect() = fail()
+    override suspend fun list(dir: String) = fail()
+    override suspend fun stat(path: String) = fail()
+    override suspend fun mkdirs(dir: String) = fail()
+    override suspend fun openWrite(path: String) = fail()
+    override suspend fun openRead(path: String, offset: Long) = fail()
+    override suspend fun rename(from: String, to: String) = fail()
+    override suspend fun delete(path: String) = fail()
+    override suspend fun setTimes(path: String, modifiedMs: Long) = fail()
+    override fun close() {}
+}
 
 private const val BACKSLASH = '\\'

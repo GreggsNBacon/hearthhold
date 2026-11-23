@@ -40,14 +40,16 @@ enum class Badge {
     DRIVE_ONLY,
     /** The last backup attempt failed; tap for the reason. */
     FAILED,
-    /** Backed up on the main drive, but its copy on the second location is still to come (outlined ✓). */
+    /** On the phone and the main drive, but its copy on the second location is still to come (outlined ✓). */
     ONE_COPY,
+    /** Only on the main drive, its copy on the second location still to come (outlined ☁). */
+    DRIVE_ONE_COPY,
 }
 
 /** Without a second location [GalleryItem.oneCopy] is always false, so this is exactly the badge from before it. */
 fun badgeFor(item: GalleryItem): Badge = when (item.location) {
     Location.BOTH -> if (item.oneCopy) Badge.ONE_COPY else Badge.BACKED_UP
-    Location.DRIVE -> if (item.oneCopy) Badge.ONE_COPY else Badge.DRIVE_ONLY
+    Location.DRIVE -> if (item.oneCopy) Badge.DRIVE_ONE_COPY else Badge.DRIVE_ONLY
     Location.PHONE -> if (item.status == BackupStatus.FAILED) Badge.FAILED else Badge.NONE
 }
 

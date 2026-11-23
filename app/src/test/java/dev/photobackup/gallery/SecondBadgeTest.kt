@@ -74,9 +74,12 @@ class SecondBadgeTest {
         location = location, phoneUri = null, remotePath = null, status = status, lastError = null, oneCopy = oneCopy,
     )
 
-    @Test fun oneCopyBadgeOnBackedUpItems() {
+    @Test fun phoneAndDriveItemWithOneCopyIsOutlinedCheck() =
         assertEquals(Badge.ONE_COPY, badgeFor(item(Location.BOTH, BackupStatus.VERIFIED, true)))
-        assertEquals(Badge.ONE_COPY, badgeFor(item(Location.DRIVE, BackupStatus.REMOVED_FROM_PHONE, true)))
+
+    @Test fun driveOnlyItemWithOneCopyKeepsTheCloudOutlined() {
+        assertEquals(Badge.DRIVE_ONE_COPY, badgeFor(item(Location.DRIVE, BackupStatus.REMOVED_FROM_PHONE, true)))
+        assertEquals(Badge.DRIVE_ONE_COPY, badgeFor(item(Location.DRIVE, BackupStatus.VERIFIED, true)))
     }
 
     @Test fun phoneItemsKeepTheirBadge() {
