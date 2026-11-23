@@ -176,7 +176,7 @@ class SecondCopyDaoTest {
         v3.close()
 
         val mdb = Room.databaseBuilder(ctx, AppDatabase::class.java, "migration-test-v3.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).allowMainThreadQueries().build()
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).allowMainThreadQueries().build()
         try {
             val e = mdb.ledgerDao().get(7)!!
             assertEquals("Backup/Pixel/Camera/2024/a.jpg", e.remotePath)

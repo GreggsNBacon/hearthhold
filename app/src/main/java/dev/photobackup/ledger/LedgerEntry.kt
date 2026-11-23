@@ -35,4 +35,6 @@ data class LedgerEntry(
     val binPath: String? = null,
     /** When the row became BINNED; auto-empty deletes the file once this is more than 30 days ago. */
     val binnedAt: Long? = null,
+    /** When the health check last read this row's drive file in full and judged it (null = never). */
+    val lastCheckedAt: Long? = null,
 )

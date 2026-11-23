@@ -8,6 +8,7 @@ import dev.photobackup.ledger.LedgerDao
 import dev.photobackup.ledger.MIGRATION_1_2
 import dev.photobackup.ledger.MIGRATION_2_3
 import dev.photobackup.ledger.MIGRATION_3_4
+import dev.photobackup.ledger.MIGRATION_4_5
 import dev.photobackup.ledger.LedgerRules
 import dev.photobackup.media.FolderRules
 import dev.photobackup.media.LocalMediaSource
@@ -70,7 +71,7 @@ object LedgerDatabase {
 
     fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
         instance ?: Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "ledger.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .build().also { instance = it }
     }
 }
@@ -110,13 +111,30 @@ class ProductionBackupRunner(private val context: Context) : BackupRunner {
                 folderFor = { id, rel -> FolderRules.desired(rel, assignments.get(id)?.folder, settings.folderRules) },
                 assignments = assignments,
             )
-            return secondStep(media, ledger, assignments).around(smb, store) {
+            val result = secondStep(media, ledger, assignments).around(smb, store) {
                 engine.run(items, onMoving) { done, total, bytes -> onProgress(done, total, bytes, totalBytes) }
             }
+            // Health check last, in the same BackupLock hold, on the main store (still open after a Done run).
+            if (result is BackupResult.Done) healthStep(media, ledger).runIfDue(store)
+            return result
         } finally {
             runCatching { store.close() }
         }
     }
+
+    /** The daily health check. The second location is re-read: off (or removed meanwhile) = no second-drive fallback. */
+    private fun healthStep(media: LocalMediaSource, ledger: LedgerDao) = HealthStep(
+        status = BackupStatusRepository.get(context),
+        clock = System::currentTimeMillis,
+        secondConfig = { SettingsStore(context, KeystoreCredentialCipher()).settings.first().second?.smb },
+        openStore = { cfg -> SmbjRemoteStore(cfg) },
+        check = HealthCheck(
+            ledger = ledger,
+            copies = LedgerDatabase.get(context).secondCopyDao(),
+            opener = media.opener(),
+            clock = System::currentTimeMillis,
+        ),
+    )
 
     /** The optional second step. It re-reads the settings itself, so a second location removed meanwhile is skipped. */
     private fun secondStep(media: LocalMediaSource, ledger: LedgerDao, assignments: FolderAssignmentDao) = SecondStep(

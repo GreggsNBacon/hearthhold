@@ -37,6 +37,12 @@ data class BackupStatusSnapshot(
     val lastStaleWarnMs: Long? = null,
     /** When the stale check first ran: stands in for [lastSuccessMs] until the first success. */
     val staleBaselineMs: Long? = null,
+    /** When a health check pass last ran to its end (the once-per-20-h gate); null = never. */
+    val lastHealthCheckMs: Long? = null,
+    /** Files the last health check pass read and judged (a pass cut short counts what it got through). */
+    val healthChecked: Int = 0,
+    /** Ledger rows marked "Damaged on drive — no good copy left", as of the last health check pass. */
+    val healthDamaged: Int = 0,
 )
 
 /** The second location's status texts. */
@@ -100,6 +106,9 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
             p.putOrRemove(LAST_SUCCESS, s.lastSuccessMs)
             p.putOrRemove(LAST_STALE_WARN, s.lastStaleWarnMs)
             p.putOrRemove(STALE_BASELINE, s.staleBaselineMs)
+            p.putOrRemove(LAST_HEALTH_CHECK, s.lastHealthCheckMs)
+            p[HEALTH_CHECKED] = s.healthChecked
+            p[HEALTH_DAMAGED] = s.healthDamaged
         }
     }
 
@@ -128,6 +137,9 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
         lastSuccessMs = p[LAST_SUCCESS],
         lastStaleWarnMs = p[LAST_STALE_WARN],
         staleBaselineMs = p[STALE_BASELINE],
+        lastHealthCheckMs = p[LAST_HEALTH_CHECK],
+        healthChecked = p[HEALTH_CHECKED] ?: 0,
+        healthDamaged = p[HEALTH_DAMAGED] ?: 0,
     )
 
     private fun <T> MutablePreferences.putOrRemove(key: Preferences.Key<T>, value: T?) {
@@ -148,6 +160,9 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
         private val LAST_SUCCESS = longPreferencesKey("last_success_ms")
         private val LAST_STALE_WARN = longPreferencesKey("last_stale_warn_ms")
         private val STALE_BASELINE = longPreferencesKey("stale_baseline_ms")
+        private val LAST_HEALTH_CHECK = longPreferencesKey("last_health_check_ms")
+        private val HEALTH_CHECKED = intPreferencesKey("health_checked")
+        private val HEALTH_DAMAGED = intPreferencesKey("health_damaged")
 
         val defaultProvider: (Context) -> BackupStatusRepository = { ctx ->
             BackupStatusRepository(ctx.applicationContext.statusDataStore)

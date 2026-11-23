@@ -56,11 +56,19 @@ val MIGRATION_3_4 = object : Migration(3, 4) {
     }
 }
 
+/** v4 -> v5: health check's lastCheckedAt on LedgerEntry and SecondCopy (null = never checked). Keeps every row. */
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `LedgerEntry` ADD COLUMN `lastCheckedAt` INTEGER")
+        db.execSQL("ALTER TABLE `SecondCopy` ADD COLUMN `lastCheckedAt` INTEGER")
+    }
+}
+
 @Database(
     entities = [
         LedgerEntry::class, FolderAssignment::class, ReviewDecision::class, ReviewKeep::class, SecondCopy::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 @TypeConverters(Converters::class)

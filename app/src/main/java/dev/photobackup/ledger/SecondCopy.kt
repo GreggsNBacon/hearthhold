@@ -26,6 +26,8 @@ data class SecondCopy(
     val sha256: String?,
     val lastError: String?,
     val updatedAtMs: Long,
+    /** When the health check last read this copy in full and judged it (null = never). */
+    val lastCheckedAt: Long? = null,
 )
 
 @Dao

@@ -115,6 +115,53 @@ interface LedgerDao : LedgerStore {
     override fun observeCounts(): Flow<Map<BackupStatus, Int>> =
         observeStatusCounts().map { rows -> rows.associate { it.status to it.n } }
 
+    // ---- Health check. Every write is conditional: only while the row is still the same settled copy. ----
+
+    /**
+     * Up to [limit] rows whose main drive file the health check may read: VERIFIED or REMOVED_FROM_PHONE, path and
+     * hash recorded, no bin request, no move or `.part` in flight. Never checked first, then oldest checked.
+     */
+    @Query(
+        "SELECT * FROM LedgerEntry WHERE status IN ('VERIFIED', 'REMOVED_FROM_PHONE') AND binRequestedAt IS NULL " +
+            "AND movingTo IS NULL AND partPath IS NULL AND remotePath IS NOT NULL AND localSha256 IS NOT NULL " +
+            "ORDER BY lastCheckedAt IS NOT NULL, lastCheckedAt, mediaId LIMIT :limit"
+    )
+    suspend fun healthBatch(limit: Int): List<LedgerEntry>
+
+    /**
+     * Sets lastCheckedAt and lastError ([clearError]: only that exact text is cleared, other errors stay; or
+     * [setError]: replaces it) only while the row is still the settled copy at [remotePath] with [sha].
+     */
+    @Query(
+        "UPDATE LedgerEntry SET lastCheckedAt = :nowMs, updatedAtMs = :nowMs, " +
+            "lastError = CASE WHEN :setError IS NOT NULL THEN :setError " +
+            "WHEN lastError = :clearError THEN NULL ELSE lastError END " +
+            "WHERE mediaId = :mediaId AND remotePath = :remotePath AND localSha256 = :sha " +
+            "AND movingTo IS NULL AND partPath IS NULL AND binRequestedAt IS NULL " +
+            "AND status IN ('VERIFIED', 'REMOVED_FROM_PHONE')"
+    )
+    suspend fun markCheckedCount(
+        mediaId: Long, remotePath: String, sha: String, clearError: String?, setError: String?, nowMs: Long,
+    ): Int
+
+    /**
+     * Repoints a repaired row at [newPath] (lastError cleared: healthy again; lastCheckedAt = [nowMs]) only while it
+     * is still the settled copy at [oldPath] with [sha]. False = it changed meanwhile, left alone.
+     */
+    @Query(
+        "UPDATE LedgerEntry SET remotePath = :newPath, lastError = NULL, lastCheckedAt = :nowMs, updatedAtMs = :nowMs " +
+            "WHERE mediaId = :mediaId AND remotePath = :oldPath AND localSha256 = :sha " +
+            "AND movingTo IS NULL AND partPath IS NULL AND binRequestedAt IS NULL " +
+            "AND status IN ('VERIFIED', 'REMOVED_FROM_PHONE')"
+    )
+    suspend fun repointCount(mediaId: Long, oldPath: String, newPath: String, sha: String, nowMs: Long): Int
+
+    suspend fun repoint(mediaId: Long, oldPath: String, newPath: String, sha: String, nowMs: Long): Boolean =
+        repointCount(mediaId, oldPath, newPath, sha, nowMs) > 0
+
+    @Query("SELECT COUNT(*) FROM LedgerEntry WHERE lastError = :error")
+    suspend fun countWithError(error: String): Int
+
     @Query("SELECT * FROM LedgerEntry ORDER BY dateTakenMs DESC")
     override fun observeAll(): Flow<List<LedgerEntry>>
 }
