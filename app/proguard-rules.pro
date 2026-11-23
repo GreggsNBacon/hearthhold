@@ -14,3 +14,10 @@
 -dontwarn javax.security.**
 -dontwarn org.ietf.jgss.**
 -dontwarn java.lang.management.**
+
+# media3 FFmpeg audio decoder: DefaultRenderersFactory finds it by name (reflection), so keep that name and
+# constructor rather than relying on R8 rewriting the Class.forName string. Natives are kept by the AAR's own rules.
+-keep class androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer {
+    <init>(android.os.Handler, androidx.media3.exoplayer.audio.AudioRendererEventListener, androidx.media3.exoplayer.audio.AudioSink);
+}
+-keep class androidx.media3.decoder.ffmpeg.FfmpegLibrary { *; }

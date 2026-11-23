@@ -41,9 +41,8 @@ object VideoCache {
 
     /**
      * The renderers every player here uses (viewer and review cards). If the primary decoder for a track fails to
-     * start, the next one on the phone is tried. Extension renderers are ON (after the phone's own decoders), so an
-     * FFmpeg audio decoder on the classpath would be picked up as a fallback; none is bundled yet (no build for
-     * media3 1.4.x on Maven Central).
+     * start, the next one on the phone is tried. Extension renderers are ON: the bundled FFmpeg audio decoder
+     * (AC3, E-AC3, DTS, MP2, ...) comes after the phone's own decoders, so it only plays what the phone can't.
      */
     @OptIn(UnstableApi::class)
     fun renderersFactory(context: Context): RenderersFactory = DefaultRenderersFactory(context)
