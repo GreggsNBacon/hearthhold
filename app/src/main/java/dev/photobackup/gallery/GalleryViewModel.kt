@@ -2,7 +2,7 @@ package dev.photobackup.gallery
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import dev.photobackup.backup.RemotePathPlanner
+import dev.photobackup.backup.DrivePaths
 import dev.photobackup.ledger.FolderAssignment
 import dev.photobackup.ledger.FolderAssignmentStore
 import dev.photobackup.ledger.LedgerEntry
@@ -81,6 +81,7 @@ data class GalleryUiState(
 }
 
 private const val SEND_FAILED = "Couldn't move those just now"
+internal const val NAMES_FAILED = "Couldn't list every folder name"
 
 /**
  * The combined Gallery. The phone list is loaded on first show and on [refresh]; the ledger is observed, so backups
@@ -292,36 +293,48 @@ class GalleryViewModel(
     }
 
     /**
-     * Folder names for the picker: drive folders seen in the ledger under `<destination>\<device>\`, then folders
-     * already assigned, then rule folders; deduped ignoring case, first spelling wins. No drive access.
+     * Folder names for the picker: drive folders seen in the ledger under `<destination>\<device>\` (today's layout
+     * only, through [DrivePaths], so an old `YYYY\MM` row never offers "2023"), then folders already assigned, then
+     * rule folders; deduped ignoring case, first spelling wins. No drive access. Never throws (except cancellation):
+     * a source that can't be read is skipped and a fixed notice says the list may be short, so the sheet still opens
+     * and a name can be typed.
      */
     suspend fun folderNames(): List<String> {
         val out = ArrayList<String>()
+        var failed = false
         fun add(n: String?) {
             val c = n?.let { FolderRules.canonical(it) } ?: return
             if (c.all { it == '_' }) return
             if (out.none { FolderRules.same(it, c) }) out += c
         }
-        val prefix = try {
-            root()?.let { (dest, device) ->
-                val d = (dest ?: "").replace('/', '\\').trim('\\')
-                listOf(d, RemotePathPlanner.sanitise(device)).filter { it.isNotEmpty() }.joinToString("\\") + "\\"
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            null
-        }
-        if (prefix != null) {
-            for (e in ledger.first()) {
-                val full = e.remotePath ?: continue
-                if (!full.startsWith(prefix, ignoreCase = true)) continue
-                val parts = full.substring(prefix.length).split('\\')
-                if (parts.size == 3 && parts.none { it.isEmpty() }) add(parts[0])
+        suspend fun guarded(block: suspend () -> Unit) {
+            try {
+                block()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                failed = true
             }
         }
-        assignments?.all()?.sortedBy { it.mediaId }?.forEach { add(it.folder) }
-        rules().values.sortedBy { it.lowercase() }.forEach { add(it) }
+        guarded {
+            val r = root() ?: return@guarded
+            val deviceRoot = DrivePaths.deviceRoot(r.first, r.second)
+            for (e in ledger.first()) add(DrivePaths.parse(e, deviceRoot)?.folder)
+        }
+        guarded { assignments?.all()?.sortedBy { it.mediaId }?.forEach { add(it.folder) } }
+        guarded { rules().values.sortedBy { it.lowercase() }.forEach { add(it) } }
+        if (failed) _notice.value = NAMES_FAILED
         return out
     }
+}
+
+/**
+ * What a tap on a Gallery cell does. In selection mode every item toggles, drive-only ones too even when the drive
+ * is unreachable (an assignment needs no drive access); otherwise only an available item opens. Pure.
+ */
+enum class CellTap { TOGGLE, OPEN, NONE }
+
+fun cellTap(selecting: Boolean, available: Boolean): CellTap = when {
+    selecting -> CellTap.TOGGLE
+    available -> CellTap.OPEN
+    else -> CellTap.NONE
 }

@@ -11,6 +11,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
@@ -346,5 +347,45 @@ class GalleryViewModelTest {
         var names = emptyList<String>()
         kotlinx.coroutines.runBlocking { names = vm.folderNames() }
         assertEquals(listOf("DOG", "Birds", "Cats"), names)
+    }
+
+    @Test fun folderNamesNeverOfferAYearFromTheOldYearMonthLayout() {
+        ledger.value = listOf(
+            entry(1, BackupStatus.VERIFIED, 10).copy(remotePath = "Backups\\Pixel 7\\2023\\05\\a.jpg"),
+            entry(2, BackupStatus.VERIFIED, 10).copy(remotePath = "Backups\\Pixel 7\\Dog\\2024\\b.jpg"),
+            entry(3, BackupStatus.VERIFIED, 10).copy(remotePath = "backups\\pixel 7\\Cats\\2024\\c.jpg"),
+        )
+        val vm = foldersVm(FakeAssignments())
+        var names = emptyList<String>()
+        kotlinx.coroutines.runBlocking { names = vm.folderNames() }
+        assertEquals(listOf("Dog", "Cats"), names)
+        assertNull(vm.notice.value)
+    }
+
+    @Test fun folderNamesSurviveDatabaseFailuresWithAFixedNotice() {
+        var collects = 0
+        val flaky = kotlinx.coroutines.flow.flow {
+            if (collects++ == 0) emitAll(ledger) else throw IllegalStateException("secret-detail")
+        }
+        val failing = object : FolderAssignmentStore by FakeAssignments() {
+            override suspend fun all(): List<FolderAssignment> = throw IllegalStateException("secret-detail")
+        }
+        val vm = GalleryViewModel(
+            queryPhone = { phone }, ledger = flaky, checkDrive = {}, driveRoot = { SmbRoot("nas", "usb") },
+            compute = dispatcher, assignments = failing, rules = { mapOf("x/" to "Cats") }, runNow = {},
+            root = { "Backups" to "Pixel 7" },
+        )
+        var names = emptyList<String>()
+        kotlinx.coroutines.runBlocking { names = vm.folderNames() }
+        assertEquals(listOf("Cats"), names)
+        assertEquals(NAMES_FAILED, vm.notice.value)
+        assertFalse(vm.notice.value!!.contains("secret-detail"))
+    }
+
+    @Test fun cellTapTogglesAnyItemWhileSelectingEvenWhenUnavailable() {
+        assertEquals(CellTap.TOGGLE, cellTap(selecting = true, available = false))
+        assertEquals(CellTap.TOGGLE, cellTap(selecting = true, available = true))
+        assertEquals(CellTap.OPEN, cellTap(selecting = false, available = true))
+        assertEquals(CellTap.NONE, cellTap(selecting = false, available = false))
     }
 }

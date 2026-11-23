@@ -227,9 +227,13 @@ fun GalleryScreen(
                             driveReachable = state.drive == DriveState.REACHABLE,
                             selected = item.key in selection,
                             onClick = {
-                                if (selecting) viewModel.toggle(item.key) else {
-                                    val list = state.items
-                                    onOpen(list, list.indexOf(item))
+                                when (cellTap(selecting, available)) {
+                                    CellTap.TOGGLE -> viewModel.toggle(item.key)
+                                    CellTap.OPEN -> {
+                                        val list = state.items
+                                        onOpen(list, list.indexOf(item))
+                                    }
+                                    CellTap.NONE -> {}
                                 }
                             },
                             onLongClick = { viewModel.select(item.key) },
@@ -317,8 +321,9 @@ private fun Cell(
             .aspectRatio(1f)
             .padding(1.dp)
             .background(MaterialTheme.colorScheme.surfaceVariant)
+            // Always enabled: selection works on drive-only items even when the drive is unreachable ([cellTap]
+            // decides whether a plain tap opens anything).
             .combinedClickable(
-                enabled = available,
                 onClick = onClick,
                 onLongClick = onLongClick,
             ),
