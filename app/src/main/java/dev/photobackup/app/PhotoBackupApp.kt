@@ -38,6 +38,7 @@ import dev.photobackup.smb.SmbjRemoteStore
 import dev.photobackup.ui.auth.AuthPrompt
 import dev.photobackup.ui.auth.AuthRetryingStore
 import dev.photobackup.ui.home.HomeViewModel
+import dev.photobackup.ui.home.passwordUnreadable
 import dev.photobackup.ui.settings.SettingsViewModel
 import dev.photobackup.ui.setup.SetupViewModel
 import kotlinx.coroutines.CancellationException
@@ -235,6 +236,7 @@ class AppContainer(context: Context) {
                 ledger = ledger.observeAll(),
                 checkDrive = { checkDrive() },
                 driveRoot = { driveRoot() },
+                needsPassword = { passwordUnreadable(settings()) },
             )
         }
     }

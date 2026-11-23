@@ -10,8 +10,9 @@ enum class ChipKind { OK, BUSY, WAITING, PROBLEM }
 data class ChipState(val text: String, val kind: ChipKind)
 
 /**
- * One short line for the top bar, most important first: a run in progress, the drive not reachable, a run error
- * or unreadable password, waiting for the overnight window, files waiting, failed files, else "Up to date".
+ * One short line for the top bar, most important first: a run in progress, the drive not reachable, an unreadable
+ * password, the last run's error (shortened), waiting for the overnight window, files waiting, failed files, a drive
+ * check still running ("Checking…", never a premature "Up to date"), else "Up to date".
  * [window] is the active overnight window (null when off); [now] is local wall-clock time. Pure.
  */
 fun statusChip(
@@ -27,10 +28,20 @@ fun statusChip(
     status.inProgress ->
         ChipState(if (status.total > 0) "Backing up ${status.done} of ${status.total}" else "Backing up…", ChipKind.BUSY)
     reach == Reachability.NO -> ChipState("Drive not reachable", ChipKind.PROBLEM)
-    status.lastError != null || needsPassword -> ChipState("Backup problem", ChipKind.PROBLEM)
+    needsPassword -> ChipState("Re-enter drive password", ChipKind.PROBLEM)
+    status.lastError != null -> ChipState(shortError(status.lastError), ChipKind.PROBLEM)
     waiting > 0 && window != null && !window.contains(now) ->
         ChipState("Waiting for overnight window", ChipKind.WAITING)
     waiting > 0 -> ChipState("$waiting waiting", ChipKind.WAITING)
     failed > 0 -> ChipState("$failed failed", ChipKind.PROBLEM)
+    reach == Reachability.CHECKING -> ChipState("Checking…", ChipKind.BUSY)
     else -> ChipState("Up to date", ChipKind.OK)
+}
+
+private const val CHIP_ERROR_CHARS = 24
+
+/** First line of [error], cut to [CHIP_ERROR_CHARS] characters plus "…" when longer. */
+private fun shortError(error: String): String {
+    val line = error.lineSequence().first().trim()
+    return if (line.length <= CHIP_ERROR_CHARS) line else line.take(CHIP_ERROR_CHARS).trimEnd() + "…"
 }

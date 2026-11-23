@@ -24,7 +24,35 @@ import kotlinx.coroutines.launch
 /** Host and share of the saved drive, for building `smb://` thumbnail URIs. */
 data class SmbRoot(val host: String, val share: String)
 
-enum class DriveState { CHECKING, REACHABLE, UNREACHABLE, NOT_CONFIGURED }
+enum class DriveState {
+    CHECKING, REACHABLE, UNREACHABLE, NOT_CONFIGURED,
+
+    /** The saved password can't be decrypted: automatic checks are skipped (no surprise dialog); the user re-enters it. */
+    NEEDS_PASSWORD,
+}
+
+/** Automatic drive checks (first show, on resume) run at most this often. */
+const val AUTO_RECHECK_GAP_MS = 10_000L
+
+enum class AutoCheck { CHECK, SKIP_BUSY, SKIP_PASSWORD, SKIP_RECENT }
+
+/**
+ * Whether an automatic (not user-asked) drive check should run: not while one is running, not while the saved
+ * password is unreadable (that would pop the password dialog on every start), and not within [minGapMs] of the last
+ * finished check. A clock that went backwards counts as "long ago". Pure.
+ */
+fun autoCheck(
+    needsPassword: Boolean,
+    checking: Boolean,
+    lastDoneMs: Long?,
+    nowMs: Long,
+    minGapMs: Long = AUTO_RECHECK_GAP_MS,
+): AutoCheck = when {
+    checking -> AutoCheck.SKIP_BUSY
+    needsPassword -> AutoCheck.SKIP_PASSWORD
+    lastDoneMs != null && nowMs >= lastDoneMs && nowMs - lastDoneMs < minGapMs -> AutoCheck.SKIP_RECENT
+    else -> AutoCheck.CHECK
+}
 
 data class GalleryUiState(
     val items: List<GalleryItem> = emptyList(),
@@ -41,9 +69,10 @@ data class GalleryUiState(
 }
 
 /**
- * The combined Gallery. The phone list is (re)loaded on [refresh]; the ledger is observed, so backups and removals
- * show up live. The merge runs on [compute], never on the main thread. The drive check goes through the auth prompt
- * (a refused login re-prompts once; cancelling counts as not reachable).
+ * The combined Gallery. The phone list is loaded on first show and on [refresh]; the ledger is observed, so backups
+ * and removals show up live. The merge runs on [compute], never on the main thread. The drive check goes through the
+ * auth prompt (a refused login re-prompts once; cancelling counts as not reachable). It runs automatically on first
+ * show and on every [resume] (see [autoCheck]), and always on [refresh] (user-asked).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class GalleryViewModel(
@@ -52,6 +81,9 @@ class GalleryViewModel(
     private val checkDrive: suspend () -> Unit,
     private val driveRoot: suspend () -> SmbRoot?,
     compute: CoroutineDispatcher = Dispatchers.Default,
+    /** True when a login is saved but its password can't be decrypted. */
+    private val needsPassword: suspend () -> Boolean = { false },
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {
     private class Phone(val items: List<PhoneMedia>, val denied: Boolean)
 
@@ -67,17 +99,30 @@ class GalleryViewModel(
     }.stateIn(viewModelScope, SharingStarted.Eagerly, GalleryUiState())
 
     private var driveJob: Job? = null
+    private var lastCheckDoneMs: Long? = null
     private var started = false
 
     /** First show: load once (coming back from the viewer keeps the list and the drive state). */
     fun start() {
         if (started) return
         started = true
-        refresh()
+        loadPhone()
+        autoCheckDrive()
     }
 
+    /** Screen resumed (also on first show): re-check the drive, e.g. after fixing Wi-Fi or Settings. */
+    fun resume() {
+        if (!started) start() else autoCheckDrive()
+    }
+
+    /** User-asked: reload the phone list and check the drive now (may show the password dialog). */
     fun refresh() {
         started = true
+        loadPhone()
+        checkDriveNow()
+    }
+
+    private fun loadPhone() {
         viewModelScope.launch {
             phone.value = try {
                 Phone(queryPhone(), denied = false)
@@ -89,30 +134,62 @@ class GalleryViewModel(
                 Phone(emptyList(), denied = false) // MediaStore hiccup: show the drive side, retry on next refresh
             }
         }
-        driveJob?.cancel()
+    }
+
+    private fun autoCheckDrive() {
+        val checking = driveJob?.isActive == true
+        if (checking) return
         driveJob = viewModelScope.launch {
-            extra.update { it.copy(drive = DriveState.CHECKING, driveMessage = null) }
-            val root = try {
-                driveRoot()
+            val unreadable = try {
+                needsPassword()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                null
+                false
             }
-            extra.update { it.copy(root = root) }
-            var message: String? = null
-            val result = try {
-                checkDrive()
-                DriveState.REACHABLE
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: DriveNotConfiguredException) {
-                DriveState.NOT_CONFIGURED
-            } catch (e: Exception) {
-                message = userMessage(e)
-                DriveState.UNREACHABLE
+            when (autoCheck(unreadable, checking = false, lastCheckDoneMs, clock())) {
+                AutoCheck.CHECK -> runCheck()
+                AutoCheck.SKIP_PASSWORD -> {
+                    loadRoot()
+                    extra.update { it.copy(drive = DriveState.NEEDS_PASSWORD, driveMessage = null) }
+                }
+                AutoCheck.SKIP_BUSY, AutoCheck.SKIP_RECENT -> {}
             }
-            extra.update { it.copy(drive = result, driveMessage = message) }
         }
+    }
+
+    private fun checkDriveNow() {
+        driveJob?.cancel()
+        driveJob = viewModelScope.launch { runCheck() }
+    }
+
+    private suspend fun loadRoot() {
+        val root = try {
+            driveRoot()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+        extra.update { it.copy(root = root) }
+    }
+
+    private suspend fun runCheck() {
+        extra.update { it.copy(drive = DriveState.CHECKING, driveMessage = null) }
+        loadRoot()
+        var message: String? = null
+        val result = try {
+            checkDrive()
+            DriveState.REACHABLE
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: DriveNotConfiguredException) {
+            DriveState.NOT_CONFIGURED
+        } catch (e: Exception) {
+            message = userMessage(e)
+            DriveState.UNREACHABLE
+        }
+        lastCheckDoneMs = clock()
+        extra.update { it.copy(drive = result, driveMessage = message) }
     }
 }

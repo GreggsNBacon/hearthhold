@@ -3,6 +3,7 @@ package dev.photobackup.ui.home
 import dev.photobackup.backup.BackupStatusSnapshot
 import dev.photobackup.backup.OvernightWindow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalTime
 
@@ -37,11 +38,23 @@ class StatusChipTest {
     @Test fun driveNotReachable() =
         assertEquals(ChipState("Drive not reachable", ChipKind.PROBLEM), chip(reach = Reachability.NO, waiting = 3))
 
-    @Test fun runErrorIsBackupProblem() =
-        assertEquals(ChipState("Backup problem", ChipKind.PROBLEM), chip(idle.copy(lastError = "Wrong password")))
+    @Test fun shortRunErrorShownAsIs() =
+        assertEquals(ChipState("Wrong password", ChipKind.PROBLEM), chip(idle.copy(lastError = "Wrong password")))
 
-    @Test fun unreadablePasswordIsBackupProblem() =
-        assertEquals(ChipState("Backup problem", ChipKind.PROBLEM), chip(needsPassword = true))
+    @Test fun longRunErrorTruncated() {
+        val text = chip(idle.copy(lastError = "The drive is full — free some space and try again")).text
+        assertEquals("The drive is full — free…", text)
+        assertTrue(text.length <= 25)
+    }
+
+    @Test fun multiLineRunErrorUsesFirstLine() =
+        assertEquals("Drive is full", chip(idle.copy(lastError = "Drive is full\nmore detail")).text)
+
+    @Test fun unreadablePasswordAsksToReenter() =
+        assertEquals(ChipState("Re-enter drive password", ChipKind.PROBLEM), chip(needsPassword = true))
+
+    @Test fun unreadablePasswordWinsOverRunError() =
+        assertEquals("Re-enter drive password", chip(idle.copy(lastError = "x"), needsPassword = true).text)
 
     @Test fun unreachableWinsOverRunError() =
         assertEquals("Drive not reachable", chip(idle.copy(lastError = "x"), Reachability.NO).text)
@@ -63,10 +76,12 @@ class StatusChipTest {
 
     @Test fun failedItems() = assertEquals(ChipState("2 failed", ChipKind.PROBLEM), chip(failed = 2))
 
-    @Test fun reachUnknownOrCheckingDoesNotBlockUpToDate() {
-        assertEquals("Up to date", chip(reach = Reachability.CHECKING).text)
-        assertEquals("Up to date", chip(reach = Reachability.UNKNOWN).text)
-    }
+    @Test fun checkingDriveIsNotUpToDate() =
+        assertEquals(ChipState("Checking…", ChipKind.BUSY), chip(reach = Reachability.CHECKING))
+
+    @Test fun checkingDriveStillShowsWaitingCount() = assertEquals("5 waiting", chip(reach = Reachability.CHECKING, waiting = 5).text)
+
+    @Test fun reachUnknownDoesNotBlockUpToDate() = assertEquals("Up to date", chip(reach = Reachability.UNKNOWN).text)
 
     @Test fun statusNotLoadedYet() = assertEquals(ChipState("Checking…", ChipKind.BUSY), chip(status = null))
 }

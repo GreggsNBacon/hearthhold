@@ -32,8 +32,11 @@ data class HomeUiState(
     val freeUpBytes: Long = 0,
 ) {
     /** A login is saved but its password can't be decrypted (e.g. after a phone restore). */
-    val needsPassword: Boolean get() = settings?.smb?.let { it.username != null && it.password == null } ?: false
+    val needsPassword: Boolean get() = passwordUnreadable(settings)
 }
+
+/** A login is saved but its password can't be decrypted (e.g. after a phone restore). Guest logins never need one. */
+fun passwordUnreadable(s: AppSettings?): Boolean = s?.smb?.let { it.username != null && it.password == null } ?: false
 
 class HomeViewModel(
     settings: Flow<AppSettings>,

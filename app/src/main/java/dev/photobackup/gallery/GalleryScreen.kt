@@ -35,7 +35,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,6 +50,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -74,7 +76,7 @@ const val THUMB_PX = 384
 /**
  * The main screen: the combined Gallery with backup badges, a status chip (tap → status sheet with the old Home
  * content) and an overflow menu (Browse drive, Settings). It is the start destination, so Back exits the app.
- * The drive check is the Gallery's own; the status sheet reuses its result (no second login).
+ * The drive check is the Gallery's own (re-run on resume); the status sheet reuses its result (no second login).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,14 +90,17 @@ fun GalleryScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val home by status.state.collectAsState()
-    LaunchedEffect(Unit) { viewModel.start() }
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { status.refreshFreeUp() }
+    // First show loads everything; later resumes (back from Settings, app switch) re-check the drive.
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        viewModel.resume()
+        status.refreshFreeUp()
+    }
 
     val reach = when (state.drive) {
         DriveState.CHECKING -> Reachability.CHECKING
         DriveState.REACHABLE -> Reachability.YES
         DriveState.UNREACHABLE -> Reachability.NO
-        DriveState.NOT_CONFIGURED -> Reachability.UNKNOWN
+        DriveState.NOT_CONFIGURED, DriveState.NEEDS_PASSWORD -> Reachability.UNKNOWN
     }
     val chip = statusChip(
         status = home.status,
@@ -145,6 +150,8 @@ fun GalleryScreen(
             when (state.drive) {
                 DriveState.UNREACHABLE -> Banner("Drive not reachable — items only on the drive are greyed out")
                 DriveState.CHECKING -> Banner("Checking the drive…")
+                DriveState.NEEDS_PASSWORD ->
+                    Banner("The saved drive password can't be read — tap to re-enter it") { showSheet = true }
                 else -> {}
             }
             if (state.phoneDenied) Banner("Allow photo access to see what's on the phone")
@@ -206,12 +213,13 @@ fun GalleryScreen(
 }
 
 @Composable
-private fun Banner(text: String) {
+private fun Banner(text: String, onClick: (() -> Unit)? = null) {
     Text(
         text,
         style = MaterialTheme.typography.bodySmall,
         modifier = Modifier
             .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .padding(horizontal = 16.dp, vertical = 8.dp),
     )
@@ -284,13 +292,14 @@ private fun BackupBadge(badge: Badge, onClick: (() -> Unit)?, modifier: Modifier
     val (fill, label) = when (badge) {
         Badge.NONE -> return
         Badge.BACKED_UP -> Color(0xFF2E7D32) to "Backed up"
-        Badge.DRIVE_ONLY -> Color(0xFF1565C0) to "Only on the drive"
-        Badge.FAILED -> Color(0xFFC62828) to "Backup failed"
+        Badge.DRIVE_ONLY -> Color(0xFF1565C0) to "On drive only"
+        Badge.FAILED -> Color(0xFFC62828) to "Backup failed — show why"
     }
     // The outer box is the touch target (bigger than the dot) when the badge is tappable.
     Box(
         modifier
             .size(30.dp)
+            .semantics(mergeDescendants = true) { contentDescription = label }
             .then(if (onClick != null) Modifier.clickable(onClickLabel = "Show why", onClick = onClick) else Modifier),
         contentAlignment = Alignment.Center,
     ) {
@@ -302,9 +311,15 @@ private fun BackupBadge(badge: Badge, onClick: (() -> Unit)?, modifier: Modifier
             contentAlignment = Alignment.Center,
         ) {
             when (badge) {
-                Badge.BACKED_UP -> Icon(Icons.Filled.Check, label, tint = Color.White, modifier = Modifier.size(14.dp))
-                Badge.DRIVE_ONLY -> Icon(CloudDone, label, tint = Color.White, modifier = Modifier.size(13.dp))
-                else -> Text("!", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Badge.BACKED_UP -> Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                Badge.DRIVE_ONLY -> Icon(CloudDone, null, tint = Color.White, modifier = Modifier.size(13.dp))
+                else -> Text(
+                    "!",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.clearAndSetSemantics {},
+                )
             }
         }
     }

@@ -28,6 +28,8 @@ class GalleryViewModelTest {
     private var driveError: Exception? = null
     private var driveGate: CompletableDeferred<Unit>? = null
     private var checks = 0
+    private var passwordUnreadable = false
+    private var nowMs = 100_000L
 
     @Before fun setUp() = Dispatchers.setMain(dispatcher)
     @After fun tearDown() = Dispatchers.resetMain()
@@ -38,6 +40,8 @@ class GalleryViewModelTest {
         checkDrive = { checks++; driveGate?.await(); driveError?.let { throw it } },
         driveRoot = { SmbRoot("nas", "usb") },
         compute = dispatcher,
+        needsPassword = { passwordUnreadable },
+        clock = { nowMs },
     )
 
     private fun phone(id: Long, taken: Long) = PhoneMedia(
@@ -131,5 +135,58 @@ class GalleryViewModelTest {
         val s = vm.state.value
         assertTrue(s.phoneDenied)
         assertEquals(1, s.items.size)
+    }
+
+    @Test fun startLoadsOnceAndChecksDrive() {
+        val vm = vm()
+        vm.start()
+        vm.start()
+        assertEquals(1, checks)
+        assertEquals(DriveState.REACHABLE, vm.state.value.drive)
+    }
+
+    @Test fun resumeReChecksDriveAfterGap() {
+        driveError = RemoteException.Unreachable()
+        val vm = vm()
+        vm.resume() // first resume = start
+        assertEquals(1, checks)
+        assertEquals(DriveState.UNREACHABLE, vm.state.value.drive)
+        nowMs += 5_000
+        vm.resume() // too soon after the last check
+        assertEquals(1, checks)
+        driveError = null
+        nowMs += 6_000
+        vm.resume()
+        assertEquals(2, checks)
+        assertEquals(DriveState.REACHABLE, vm.state.value.drive)
+    }
+
+    @Test fun resumeWhileCheckingDoesNotStartAnother() {
+        driveGate = CompletableDeferred()
+        val vm = vm()
+        vm.resume()
+        nowMs += 60_000
+        vm.resume()
+        assertEquals(1, checks)
+        driveGate!!.complete(Unit)
+    }
+
+    @Test fun unreadablePasswordSkipsAutomaticChecks() {
+        passwordUnreadable = true
+        val vm = vm()
+        vm.resume()
+        nowMs += 60_000
+        vm.resume()
+        assertEquals(0, checks)
+        assertEquals(DriveState.NEEDS_PASSWORD, vm.state.value.drive)
+        assertFalse(vm.state.value.loading) // the phone side still loads
+    }
+
+    @Test fun userRefreshChecksEvenWithUnreadablePassword() {
+        passwordUnreadable = true
+        val vm = vm()
+        vm.resume()
+        vm.refresh()
+        assertEquals(1, checks)
     }
 }
