@@ -59,7 +59,7 @@ object BackupScheduler {
     }
 
     /** User pressed "Back up now": unmetered only, no charging requirement. */
-    fun runNow(context: Context, chargingOnly: Boolean = false) {
+    fun runNow(context: Context, chargingOnly: Boolean) {
         val request = OneTimeWorkRequestBuilder<BackupWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
             .setInputData(input(chargingOnly)) // only used for the re-enqueued trigger, not a constraint here

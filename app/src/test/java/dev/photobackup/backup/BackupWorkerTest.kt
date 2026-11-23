@@ -85,6 +85,25 @@ class BackupWorkerTest {
         assertEquals("Wrong username or password", status().lastError)
     }
 
+    @Test fun authFailedNotificationOpensReenterPasswordDialog() {
+        runner = BackupRunner { _ -> BackupResult.Stopped(RemoteException.AuthFailed()) }
+        runWorker()
+        val pi = errorNotifications().single().contentIntent
+        assertNotNull(pi)
+        assertTrue(shadowOf(pi).isActivityIntent)
+        assertTrue(shadowOf(pi).flags and android.app.PendingIntent.FLAG_IMMUTABLE != 0)
+        val intent = shadowOf(pi).savedIntent
+        assertEquals(dev.photobackup.MainActivity::class.java.name, intent.component?.className)
+        assertTrue(intent.getBooleanExtra(dev.photobackup.MainActivity.EXTRA_REAUTH, false))
+    }
+
+    @Test fun otherErrorNotificationsHaveNoReauthIntent() {
+        runner = BackupRunner { _ -> BackupResult.Stopped(RemoteException.DriveFull()) }
+        runWorker()
+        val pi = errorNotifications().single().contentIntent
+        if (pi != null) assertFalse(shadowOf(pi).savedIntent.getBooleanExtra(dev.photobackup.MainActivity.EXTRA_REAUTH, false))
+    }
+
     @Test fun smb1OnlyMessageMentionsRouterSetting() {
         runner = BackupRunner { _ -> BackupResult.Stopped(RemoteException.Smb1Only()) }
         runWorker()
@@ -166,7 +185,7 @@ class BackupWorkerTest {
         for (name in listOf("pb_trigger", "pb_periodic")) {
             assertEquals(name, 1, wm.getWorkInfosForUniqueWork(name).get().size)
         }
-        BackupScheduler.runNow(app)
+        BackupScheduler.runNow(app, chargingOnly = false)
         assertEquals(1, wm.getWorkInfosForUniqueWork("pb_now").get().size)
     }
 

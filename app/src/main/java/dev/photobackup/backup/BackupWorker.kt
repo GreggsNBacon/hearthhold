@@ -154,7 +154,7 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                         is RemoteException.Unreachable -> BackupMessages.UNREACHABLE
                     }
                     idle(repo) { it.copy(lastRunMs = now, lastResult = text, lastError = text) }
-                    BackupNotifications.error(applicationContext, text)
+                    BackupNotifications.error(applicationContext, text, reauth = e is RemoteException.AuthFailed)
                 }
             }
         }
