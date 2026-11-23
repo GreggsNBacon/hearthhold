@@ -28,12 +28,12 @@ class DriveMover(
     }
 
     /** Target names (and their `.part`) held by in-flight items. Guard with `synchronized(reserved)`. */
-    val reserved = mutableSetOf<String>()
+    private val reserved = mutableSetOf<String>()
 
     /** Serialises "is this name free?" checks with the reservation that follows. */
     val nameLock = Mutex()
 
-    fun key(path: String) = path.lowercase(Locale.ROOT)
+    private fun key(path: String) = path.lowercase(Locale.ROOT)
 
     fun isReserved(path: String) = synchronized(reserved) {
         key(path) in reserved || key(RemotePathPlanner.partName(path)) in reserved
@@ -144,6 +144,7 @@ enum class EmptyOutcome { DELETED, REFUSED, FAILED }
  */
 object BinFiles {
     const val AUTO_EMPTY_AFTER_MS = 30L * 24 * 60 * 60 * 1000
+    const val MISMATCH_ERROR = "The file in the bin has changed on the drive — left as it is"
 
     /** Auto-empty: BINNED for strictly more than 30 days. */
     fun isExpired(e: LedgerEntry, nowMs: Long): Boolean {
@@ -151,16 +152,29 @@ object BinFiles {
         return nowMs - at > AUTO_EMPTY_AFTER_MS
     }
 
+    /**
+     * Auto-empty takes only cleanly BINNED rows: expired, settled, and with no error (a failed restore or a changed
+     * file is left for the owner to decide on the Bin screen).
+     */
+    fun isAutoEmptyCandidate(e: LedgerEntry, nowMs: Long): Boolean =
+        e.status == BackupStatus.BINNED && e.movingTo == null && e.partPath == null && e.lastError == null &&
+            isExpired(e, nowMs)
+
     fun mayDelete(e: LedgerEntry, root: String): Boolean =
         e.status == BackupStatus.BINNED && e.movingTo == null && e.partPath == null &&
             DrivePaths.isInBin(e.remotePath, root)
 
-    /** A [RemoteException] propagates; any other IOException fails this row only (file and row stay). */
+    /**
+     * A [RemoteException] propagates; any other IOException fails this row only (file and row stay). A file whose size
+     * is not the row's (the name may now hold another file, e.g. after a hand delete and a later bin move) is refused:
+     * file and row stay, the row gets [MISMATCH_ERROR].
+     */
     suspend fun empty(
         e: LedgerEntry,
         root: String,
         store: RemoteStore,
         ledger: LedgerStore,
+        nowMs: Long,
         clearAssignment: suspend (Long) -> Unit,
     ): EmptyOutcome {
         if (!mayDelete(e, root)) return EmptyOutcome.REFUSED
@@ -169,6 +183,10 @@ object BinFiles {
             val st = store.stat(path)
             if (st != null) {
                 if (st.isDirectory) return EmptyOutcome.REFUSED
+                if (st.sizeBytes != e.sizeBytes) {
+                    ledger.setLastError(e.mediaId, MISMATCH_ERROR, nowMs)
+                    return EmptyOutcome.REFUSED
+                }
                 store.delete(path)
             }
         } catch (x: IOException) {

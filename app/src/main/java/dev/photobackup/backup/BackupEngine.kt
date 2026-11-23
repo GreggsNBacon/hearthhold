@@ -170,9 +170,12 @@ class BackupEngine(
         val unsettled: Set<Long>
         val binFailed: Set<Long>
         val moves = try {
+            // Rows whose interrupted move is settled now (e.g. a restore that never renamed) are not auto-emptied
+            // in this run: the owner's restore intent wins.
+            val recovered = ledger.withMovingTo().mapTo(HashSet()) { it.mediaId }
             unsettled = recoverMoves()
             binFailed = binMoves(unsettled)
-            autoEmpty()
+            autoEmpty(skip = recovered)
             reconcile(unsettled, onMoving)
         } catch (e: RemoteException) {
             return@withContext BackupResult.Stopped(e)
@@ -457,14 +460,15 @@ class BackupEngine(
 
     /**
      * Deletes bin files BINNED more than 30 days ago (strictly), through [BinFiles.empty]: only paths inside the
-     * current `<root>\.Bin\`, never anything else. A failed delete keeps the row for the next run.
+     * current `<root>\.Bin\`, never anything else, and only cleanly BINNED rows ([BinFiles.isAutoEmptyCandidate])
+     * not in [skip]. A failed delete keeps the row for the next run.
      */
-    private suspend fun autoEmpty() {
+    private suspend fun autoEmpty(skip: Set<Long>) {
         val now = clock()
         for (row in ledger.byStatus(BackupStatus.BINNED).sortedBy { it.mediaId }) {
             coroutineContext.ensureActive()
-            if (!BinFiles.isExpired(row, now)) continue
-            BinFiles.empty(row, root, store, ledger) { assignments?.clear(it) }
+            if (row.mediaId in skip || !BinFiles.isAutoEmptyCandidate(row, now)) continue
+            BinFiles.empty(row, root, store, ledger, now) { assignments?.clear(it) }
         }
     }
 

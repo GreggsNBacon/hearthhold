@@ -318,6 +318,39 @@ class BackupEngineBinTest {
         assertNull(ledger.get(2))
     }
 
+    /** A bin file deleted by hand and its name taken by a later bin move: the old row must not delete the new file. */
+    @Test fun autoEmptyRefusesAFileThatIsNotThisRowsSize() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger()
+        seed(store, ledger, binned(1, "$bin\\1.jpg", 0), data = bytes(50)) // row says 100 bytes
+        engine(store, ledger).run(emptyList())
+        assertTrue(store.deletes.isEmpty())
+        assertNotNull(store.files["$bin\\1.jpg"])
+        val e = ledger.get(1)!!
+        assertEquals(BackupStatus.BINNED, e.status)
+        assertEquals(BinFiles.MISMATCH_ERROR, e.lastError)
+    }
+
+    /** A restore of an old bin item was interrupted before its rename: recovery clears movingTo, but the run must not
+     *  then auto-empty the item the user asked to restore. */
+    @Test fun autoEmptySkipsARowWhoseInterruptedMoveWasJustRecovered() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger()
+        seed(store, ledger, binned(1, "$bin\\1.jpg", 0).copy(movingTo = "$camera\\1.jpg"))
+        engine(store, ledger).run(emptyList())
+        assertTrue(store.deletes.isEmpty())
+        val e = ledger.get(1)!!
+        assertEquals(BackupStatus.BINNED, e.status)
+        assertNull(e.movingTo)
+    }
+
+    /** Not cleanly BINNED (a failed restore left an error): auto-empty leaves it; only an explicit Empty deletes it. */
+    @Test fun autoEmptySkipsRowsWithAnError() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger()
+        seed(store, ledger, binned(1, "$bin\\1.jpg", 0).copy(lastError = "Couldn't restore from the bin"))
+        engine(store, ledger).run(emptyList())
+        assertTrue(store.deletes.isEmpty())
+        assertNotNull(ledger.get(1))
+    }
+
     @Test fun autoEmptyRunsAfterBinMovesInTheSameRun() = runBlocking {
         val store = FakeRemoteStore(); val ledger = MemoryLedger()
         seed(store, ledger, row(1, "$camera\\IMG.jpg"))

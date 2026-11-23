@@ -249,6 +249,34 @@ class BinRepositoryTest {
         assertFalse(lock.isLocked)
     }
 
+    @Test fun nonIoErrorsFromSettingsOpeningOrClosingAreOffline() = runBlocking {
+        seed(binned(1))
+        val throwingRoot = BinRepository(ledger, assigns, { store }, { throw IllegalStateException("settings") }, { now }, lock)
+        assertEquals(BinResult.Offline, throwingRoot.empty(listOf(1)))
+        assertEquals(BinResult.Offline, repo(open = { throw java.security.GeneralSecurityException("key") }).restore(listOf(1)))
+        assertEquals(BinResult.Offline, repo(open = { throw IllegalStateException("x") }).emptyAll())
+        val badClose = object : RemoteStore by store {
+            override fun close() = throw IllegalStateException("close")
+        }
+        assertEquals(BinResult.Offline, repo(open = { badClose }).restore(listOf(99)))
+        assertFalse(lock.isLocked)
+    }
+
+    /** The bin name now holds another file (the old one was deleted by hand and the name reused). */
+    @Test fun emptyAndRestoreRefuseAFileThatIsNotThisRowsSize() = runBlocking {
+        seed(binned(1), bytes(50)) // row says 100 bytes
+        assertEquals(BinResult.Done(0, 1), repo().empty(listOf(1)))
+        assertEquals(BinResult.Done(0, 1), repo().emptyAll())
+        assertEquals(BinResult.Done(0, 1), repo().restore(listOf(1)))
+        assertTrue(store.deletes.isEmpty())
+        assertNotNull(store.files["$bin\\1.jpg"])
+        assertNull(store.files["$camera\\1.jpg"])
+        val e = ledger.get(1)!!
+        assertEquals(BackupStatus.BINNED, e.status)
+        assertEquals("$bin\\1.jpg", e.remotePath)
+        assertEquals(dev.photobackup.backup.BinFiles.MISMATCH_ERROR, e.lastError)
+    }
+
     @Test fun databaseErrorsNeverThrow() = runBlocking {
         seed(binned(1))
         val broken = object : LedgerStore by ledger {

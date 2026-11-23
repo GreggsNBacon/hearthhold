@@ -76,12 +76,17 @@ class BinRepository(
             if (e is CancellationException) throw e
             return@withDrive BinResult.Done(0, 1) // the list itself could not be read
         }
-        tally(rows.map { it.mediaId }) { id -> emptyOne(rows.first { it.mediaId == id }, store, deviceRoot) }
+        val byId = rows.associateBy { it.mediaId }
+        tally(rows.map { it.mediaId }) { id -> emptyOne(byId[id], store, deviceRoot) }
     }
 
     private fun isWaiting(e: LedgerEntry) = e.status == BackupStatus.REMOVED_FROM_PHONE && e.binRequestedAt != null
 
-    /** Lock (or Busy), open + connect (or Offline), run [block]. IOExceptions (RemoteException too) → Offline. */
+    /**
+     * Lock (or Busy), open + connect (or Offline), run [block]. Any exception outside the per-item tally (drive,
+     * settings, credentials, close) → Offline. A drive drop part-way through returns Offline even though earlier
+     * items in the batch were already restored or deleted; [list] shows the true state.
+     */
     private suspend fun withDrive(block: suspend (RemoteStore, String) -> BinResult): BinResult {
         if (!lock.tryLock()) return BinResult.Busy
         try {
@@ -94,8 +99,12 @@ class BinRepository(
                         it.connect()
                         block(it, deviceRoot)
                     }
-                } catch (e: IOException) {
-                    BinResult.Offline // never shown or logged: exception text can carry server paths
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // IOException (RemoteException too) from the drive, or anything from settings, credentials or
+                    // closing the store. Never shown or logged: exception text can carry server paths.
+                    BinResult.Offline
                 }
             }
         } finally {
@@ -137,6 +146,13 @@ class BinRepository(
         if (row.status != BackupStatus.BINNED) return false
         val from = row.remotePath ?: return false
         val original = row.binPath ?: return false
+        // Only this row's own file goes back: the bin name may now hold another file (hand delete + name reuse).
+        val st = store.stat(from)
+        if (st == null || st.isDirectory) return false
+        if (st.sizeBytes != row.sizeBytes) {
+            ledger.setLastError(id, BinFiles.MISMATCH_ERROR, clock())
+            return false
+        }
         val cut = original.lastIndexOf('\\')
         if (cut <= 0 || cut == original.length - 1) return false
         val outcome = mover.move(
@@ -149,6 +165,6 @@ class BinRepository(
 
     private suspend fun emptyOne(row: LedgerEntry?, store: RemoteStore, deviceRoot: String): Boolean {
         row ?: return false
-        return BinFiles.empty(row, deviceRoot, store, ledger) { assignments?.clear(it) } == EmptyOutcome.DELETED
+        return BinFiles.empty(row, deviceRoot, store, ledger, clock()) { assignments?.clear(it) } == EmptyOutcome.DELETED
     }
 }
