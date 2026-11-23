@@ -232,7 +232,7 @@ class SmbjRemoteStore(private val config: SmbConfig) : RemoteStore {
         private const val OP_TIMEOUT_S = 60L
         private const val FS_UNKNOWN = "UNKNOWN"
 
-        /** SMB 2.0.2 is needed for routers whose "SMB2" means 2.0.2 (e.g. ASUS RT-AX86U USB share). */
+        /** SMB 2.0.2 is needed for routers whose "SMB2" means 2.0.2 (e.g. some consumer routers' USB shares). */
         internal val DIALECTS = listOf(
             SMB2Dialect.SMB_2_0_2, SMB2Dialect.SMB_2_1, SMB2Dialect.SMB_3_0, SMB2Dialect.SMB_3_0_2, SMB2Dialect.SMB_3_1_1,
         )

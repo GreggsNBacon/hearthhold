@@ -44,11 +44,11 @@ class NetBiosTest {
 
     @Test fun parsesNameFromCapturedReply() {
         val p = reply(
-            Triple("RT-AX86U", 0x00, 0x0400),
-            Triple("RT-AX86U", 0x20, 0x0400),
+            Triple("HOMEROUTER", 0x00, 0x0400),
+            Triple("HOMEROUTER", 0x20, 0x0400),
             Triple("WORKGROUP", 0x00, 0x8400), // group
         )
-        assertEquals("RT-AX86U", NetBios.parseNodeStatusName(p))
+        assertEquals("HOMEROUTER", NetBios.parseNodeStatusName(p))
     }
 
     @Test fun prefersFileServerSuffixOverWorkstation() {
