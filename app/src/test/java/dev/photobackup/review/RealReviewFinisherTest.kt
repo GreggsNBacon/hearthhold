@@ -578,4 +578,14 @@ class RealReviewFinisherTest {
         assertEquals(listOf(1L), r.passed.map { it.mediaId })
         assertEquals(1, asked)
     }
+
+    @Test fun keepOnlyFinishIsNotHeldWhenTheSecondLocationIsOffline() = runBlocking {
+        photo(1, ReviewAction.KEEP); photo(2, ReviewAction.KEEP)
+        var asked = 0
+        secondGate = { asked++; SecondGateOpen.Unreachable }
+        val r = finisher().prepare(decisions.all())
+        assertEquals(PrepareResult.NothingToDelete(keepOnlyApplied = true, keptCount = 2), r)
+        assertEquals(0, asked) // nothing leaves the phone: the second location is not needed
+        assertEquals(setOf(1L, 2L), keeps.rows.keys)
+    }
 }

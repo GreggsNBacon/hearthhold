@@ -72,10 +72,12 @@
 - Off by default. In Settings → **Second backup location**: **Set up** (same steps as the drive setup), **Change**, or **Remove**.
 - Remove stops copying; nothing on either drive is deleted.
 - It refuses the main share or folder, or a folder inside or containing it.
+- Enter the drive the same way in both setups (both by name or both by IP address): the check compares the text, so a name and an IP for the same drive are not caught.
 - After each backup run, everything already verified on the main drive is copied to the second location: from the phone file, or from the main drive if the phone no longer has it.
 - Each copy is verified by SHA-256. Layout is the same: `<dest>\<device>\<folder>\<year>\`.
-- Folder moves are mirrored. Nothing is ever deleted there: the Bin and emptying it leave the second copy alone, and junk is not copied.
+- Folder moves are mirrored. Nothing is ever deleted there: the Bin and emptying it leave the second copy alone, and items already waiting for the Bin are not copied.
 - If the second location is offline, it catches up on a later run.
+- If the second drive is replaced or its device folder wiped, everything is copied again on the next run. A single missing second copy is noticed when you try to free that item up, and is copied again on the next run.
 - Free up, swipe "Drive only" and Junk wait until the second copy is verified. Turn on **Allow freeing up with only the main drive** to skip that wait.
 
 ## Swipe review and the Bin

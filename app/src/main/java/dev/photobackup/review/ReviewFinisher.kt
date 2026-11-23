@@ -121,7 +121,8 @@ class RealReviewFinisher(
             phone = queryPhone()
             passed = store.use {
                 it.connect()
-                val gate = when (val g = openSecondGate()) {
+                // Keep-only: nothing leaves the phone, so the second location is not needed (nor asked for).
+                val gate = when (val g = if (toDelete.isEmpty()) SecondGateOpen.Off else openSecondGate()) {
                     SecondGateOpen.Off -> null
                     SecondGateOpen.Unreachable -> return PrepareResult.SecondUnreachable
                     is SecondGateOpen.Open -> g.gate
