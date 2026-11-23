@@ -27,6 +27,7 @@ import dev.photobackup.gallery.ViewerListHolder
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.LedgerDao
 import dev.photobackup.media.LocalMediaSource
+import dev.photobackup.player.PlayerSession
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.settings.KeystoreCredentialCipher
 import dev.photobackup.settings.SettingsStore
@@ -109,6 +110,14 @@ class AppContainer(context: Context) {
 
     /** Hands the Gallery/Browse list to the viewer (`viewer/{source}/{index}`). */
     val viewerLists = ViewerListHolder()
+
+    /** Player speed for this launch only (resets to 1× next launch). */
+    val playerSession = PlayerSession()
+
+    /** Saves the viewer's loop toggle. */
+    fun setLoopVideos(loop: Boolean) {
+        appScope.launch { settingsStore.update { it.copy(loopVideos = loop) } }
+    }
 
     /**
      * The one store all drive thumbnails go through (SmbCoilFetcher serialises its calls), kept open for the app's

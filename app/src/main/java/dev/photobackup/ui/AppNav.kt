@@ -11,8 +11,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -28,11 +30,13 @@ import dev.photobackup.gallery.BrowseScreen
 import dev.photobackup.gallery.GalleryScreen
 import dev.photobackup.gallery.SmbRoot
 import dev.photobackup.gallery.ViewerListHolder
+import dev.photobackup.player.ViewerScreen
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.ui.home.HomeScreen
 import dev.photobackup.ui.settings.SettingsScreen
 import dev.photobackup.ui.setup.SetupScreen
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 
 object Routes {
     const val SETUP = "setup"
@@ -116,14 +120,35 @@ fun AppNav(container: AppContainer) {
                 },
             )
         }
-        // Placeholder: Task 11 replaces this. It reads its list from container.viewerLists.get(source).
         composable(
             Routes.VIEWER,
             arguments = listOf(
                 navArgument("source") { type = NavType.StringType },
                 navArgument("index") { type = NavType.IntType },
             ),
-        ) { ComingSoon("Viewer") { nav.popBackStack() } }
+        ) { entry ->
+            val source = entry.arguments?.getString("source").orEmpty()
+            val index = entry.arguments?.getInt("index") ?: 0
+            // The list is gone after process death: go back to where it came from.
+            val items = remember(source) { container.viewerLists.get(source).orEmpty() }
+            val loop by remember { container.settingsStore.settings.map { it.loopVideos } }.collectAsState(initial = true)
+            val root by produceState<Loaded<SmbRoot?>?>(null) { value = Loaded(container.driveRoot()) }
+            val loaded = root
+            if (loaded == null) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            } else {
+                ViewerScreen(
+                    items = items,
+                    startIndex = index,
+                    root = loaded.value,
+                    loop = loop,
+                    onLoopChange = container::setLoopVideos,
+                    session = container.playerSession,
+                    openStore = container::driveStore,
+                    onBack = { nav.popBackStack() },
+                )
+            }
+        }
     }
 }
 
@@ -149,9 +174,5 @@ fun Screen(
     }
 }
 
-@Composable
-private fun ComingSoon(title: String, onBack: () -> Unit) {
-    Screen(title, onBack = onBack) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Coming soon") }
-    }
-}
+/** A value that has finished loading (which may itself be null). */
+private class Loaded<T>(val value: T)
