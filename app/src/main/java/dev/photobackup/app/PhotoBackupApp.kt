@@ -53,6 +53,7 @@ import dev.photobackup.ui.home.passwordUnreadable
 import dev.photobackup.ui.settings.SettingsViewModel
 import dev.photobackup.ui.setup.SetupMode
 import dev.photobackup.ui.setup.SetupViewModel
+import dev.photobackup.ui.setup.resolveHost
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -334,6 +335,7 @@ class AppContainer(context: Context) {
                 backup = backup,
                 mode = SetupMode.SECOND,
                 clearSecondStatus = { clearSecondStatus() },
+                resolve = ::resolveHost,
             )
         }
     }

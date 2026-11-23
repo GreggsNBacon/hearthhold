@@ -588,4 +588,14 @@ class RealReviewFinisherTest {
         assertEquals(0, asked) // nothing leaves the phone: the second location is not needed
         assertEquals(setOf(1L, 2L), keeps.rows.keys)
     }
+
+    @Test fun prepareReportsRecheckProgress() = runBlocking {
+        photo(1, ReviewAction.JUNK)
+        photo(2, ReviewAction.DRIVE_ONLY)
+        photo(3, ReviewAction.KEEP)
+        val seen = mutableListOf<Pair<Int, Int>>()
+        finisher().prepare(decisions.all()) { c, t -> seen += c to t }
+        assertEquals(0 to 2, seen.first())
+        assertEquals(2 to 2, seen.last())
+    }
 }

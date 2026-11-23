@@ -2,6 +2,7 @@ package dev.photobackup.review
 
 import android.app.Activity
 import android.content.IntentSender
+import android.view.LayoutInflater
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -11,6 +12,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -28,6 +30,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -39,6 +43,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -54,14 +59,30 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.addPathNodes
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import dev.photobackup.R
 import dev.photobackup.ui.Screen
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -75,6 +96,32 @@ private fun actionColor(a: ReviewAction): Color = when (a) {
     ReviewAction.DRIVE_ONLY -> Color(0xFF1565C0)
     ReviewAction.JUNK -> Color(0xFFC62828)
     ReviewAction.SKIP -> Color(0xFF616161)
+}
+
+/** Material "cloud" icon path (Apache 2.0); material-icons-extended is not a dependency. */
+private val CloudIcon: ImageVector by lazy {
+    ImageVector.Builder("Cloud", 24.dp, 24.dp, 24f, 24f).addPath(
+        pathData = addPathNodes(
+            "M19.35,10.04C18.67,6.59 15.64,4 12,4 9.11,4 6.6,5.64 5.35,8.04 2.34,8.36 0,10.91 0,14c0,3.31 " +
+                "2.69,6 6,6h13c2.76,0 5,-2.24 5,-5 0,-2.64 -2.05,-4.78 -4.65,-4.96z",
+        ),
+        fill = SolidColor(Color.Black),
+    ).build()
+}
+
+/** Material "skip_next" icon path (Apache 2.0). */
+private val SkipNextIcon: ImageVector by lazy {
+    ImageVector.Builder("SkipNext", 24.dp, 24.dp, 24f, 24f).addPath(
+        pathData = addPathNodes("M6,18l8.5,-6L6,6v12zM16,6v12h2V6h-2z"),
+        fill = SolidColor(Color.Black),
+    ).build()
+}
+
+private fun actionIcon(a: ReviewAction): ImageVector = when (a) {
+    ReviewAction.KEEP -> Icons.Filled.Check
+    ReviewAction.DRIVE_ONLY -> CloudIcon
+    ReviewAction.JUNK -> Icons.Filled.Delete
+    ReviewAction.SKIP -> SkipNextIcon
 }
 
 /** The direction a drag is heading in (the dominant axis), and how far towards its threshold (0..1+). */
@@ -191,7 +238,7 @@ fun ReviewScreen(viewModel: ReviewViewModel, gestures: Map<Swipe, ReviewAction?>
         )
     }
     when (finish) {
-        FinishState.Checking -> Progress("Checking the drive copies…")
+        is FinishState.Checking -> Progress(checkingText(finish))
         FinishState.Applying -> Progress("Applying your choices…")
         is FinishState.Done -> ResultDialog("Review finished", doneLines(finish), state.leftAlone, viewModel::dismissFinish)
         is FinishState.Error -> ResultDialog("Couldn't finish", listOf(finish.message), state.leftAlone, viewModel::dismissFinish)
@@ -258,14 +305,31 @@ private fun SwipeCard(
     onSwipe: (Swipe) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val haptics = LocalHapticFeedback.current
     val currentGestures by rememberUpdatedState(gestures)
     var offset by remember { mutableStateOf(Offset.Zero) }
     var flying by remember { mutableStateOf(false) }
+    /** Past the threshold towards a direction with an action: one haptic tick each time this flips. */
+    var armed by remember { mutableStateOf(false) }
+    /** Video cards: tap plays muted, tap again pauses. [videoStarted] keeps the player once made, for resume. */
+    var playing by remember { mutableStateOf(false) }
+    var videoStarted by remember { mutableStateOf(false) }
+
+    fun updateArmed() {
+        val hd = heading(offset, w, h)
+        val now = hd != null && hd.second >= 1f && currentGestures[hd.first] != null
+        if (now != armed) {
+            armed = now
+            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        }
+    }
 
     /** Flies the card off in [dir], then applies it; the next card (or this one again, after Skip) starts centred. */
     fun fling(dir: Swipe) {
         if (flying) return
         flying = true
+        armed = false
+        playing = false
         scope.launch {
             val target = when (dir) {
                 Swipe.RIGHT -> Offset(w * 1.5f, offset.y)
@@ -276,11 +340,13 @@ private fun SwipeCard(
             animate(Offset.VectorConverter, offset, target, animationSpec = tween(180)) { v, _ -> offset = v }
             onSwipe(dir)
             offset = Offset.Zero
+            videoStarted = false // Skip brings this card back: its player is released and starts over on tap
             flying = false
         }
     }
 
     fun settle() {
+        armed = false
         scope.launch { animate(Offset.VectorConverter, offset, Offset.Zero, animationSpec = tween(200)) { v, _ -> offset = v } }
     }
 
@@ -296,6 +362,16 @@ private fun SwipeCard(
                     translationY = offset.y
                     rotationZ = if (w > 0f) offset.x / w * 15f else 0f
                 }
+                .pointerInput(enabled, card.phone.isVideo) {
+                    if (!enabled || !card.phone.isVideo) return@pointerInput
+                    // A drag consumes the pointer, so it never counts as a tap.
+                    detectTapGestures(onTap = {
+                        if (!flying) {
+                            videoStarted = true
+                            playing = !playing
+                        }
+                    })
+                }
                 .pointerInput(enabled) {
                     if (!enabled) return@pointerInput
                     detectDragGestures(
@@ -308,39 +384,62 @@ private fun SwipeCard(
                             if (!flying) {
                                 change.consume()
                                 offset += amount
+                                updateArmed()
                             }
                         },
                     )
                 },
             tint = headAction?.let { actionColor(it).copy(alpha = 0.4f * min(1f, head.second)) },
-            stamp = headAction?.takeIf { head.second >= 1f }?.label,
+            // Fades in from the start of the drag; full strength at the threshold.
+            stamp = headAction,
+            stampAlpha = head?.second?.coerceIn(0f, 1f) ?: 0f,
+            video = if (card.phone.isVideo && videoStarted) VideoState(playing) { playing = false } else null,
         )
-        // Direction hints: what each swipe does (tap one to apply it). Hidden for No action.
-        Hint(gestures[Swipe.UP], enabled, Modifier.align(Alignment.TopCenter)) { fling(Swipe.UP) }
-        Hint(gestures[Swipe.DOWN], enabled, Modifier.align(Alignment.BottomCenter)) { fling(Swipe.DOWN) }
-        Hint(gestures[Swipe.LEFT], enabled, Modifier.align(Alignment.CenterStart)) { fling(Swipe.LEFT) }
-        Hint(gestures[Swipe.RIGHT], enabled, Modifier.align(Alignment.CenterEnd)) { fling(Swipe.RIGHT) }
+        // Direction hints: what each swipe does (tap one to apply it). Hidden for No action. The one being
+        // approached grows and brightens with the drag.
+        fun near(dir: Swipe) = if (head != null && head.first == dir) head.second.coerceIn(0f, 1f) else 0f
+        Hint(gestures[Swipe.UP], enabled, near(Swipe.UP), Modifier.align(Alignment.TopCenter)) { fling(Swipe.UP) }
+        Hint(gestures[Swipe.DOWN], enabled, near(Swipe.DOWN), Modifier.align(Alignment.BottomCenter)) { fling(Swipe.DOWN) }
+        Hint(gestures[Swipe.LEFT], enabled, near(Swipe.LEFT), Modifier.align(Alignment.CenterStart)) { fling(Swipe.LEFT) }
+        Hint(gestures[Swipe.RIGHT], enabled, near(Swipe.RIGHT), Modifier.align(Alignment.CenterEnd)) { fling(Swipe.RIGHT) }
+    }
+}
+
+/** In-card video: [playing] or paused; [onStopped] pauses it (playback error, app in the background). */
+private class VideoState(val playing: Boolean, val onStopped: () -> Unit)
+
+@Composable
+private fun Hint(action: ReviewAction?, enabled: Boolean, near: Float, modifier: Modifier, onClick: () -> Unit) {
+    action ?: return
+    Row(
+        modifier = modifier
+            .padding(8.dp)
+            .graphicsLayer {
+                val s = 1f + 0.25f * near
+                scaleX = s
+                scaleY = s
+            }
+            .clip(RoundedCornerShape(12.dp))
+            .background(actionColor(action).copy(alpha = 0.7f + 0.3f * near))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(actionIcon(action), contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+        Text(action.label, color = Color.White, style = MaterialTheme.typography.labelLarge)
     }
 }
 
 @Composable
-private fun Hint(action: ReviewAction?, enabled: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    action ?: return
-    Text(
-        action.label,
-        color = Color.White,
-        style = MaterialTheme.typography.labelLarge,
-        modifier = modifier
-            .padding(8.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(actionColor(action).copy(alpha = 0.85f))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-    )
-}
-
-@Composable
-private fun PhotoCard(card: ReviewCard, modifier: Modifier, tint: Color? = null, stamp: String? = null) {
+private fun PhotoCard(
+    card: ReviewCard,
+    modifier: Modifier,
+    tint: Color? = null,
+    stamp: ReviewAction? = null,
+    stampAlpha: Float = 1f,
+    video: VideoState? = null,
+) {
     Box(modifier.clip(RoundedCornerShape(16.dp)).background(Color.Black)) {
         // Phone copy (still on the phone: the deck only holds phone-present items). Videos show their first frame.
         AsyncImage(
@@ -349,21 +448,27 @@ private fun PhotoCard(card: ReviewCard, modifier: Modifier, tint: Color? = null,
             contentScale = ContentScale.Fit,
             modifier = Modifier.fillMaxSize(),
         )
-        if (card.phone.isVideo) {
+        if (video != null) CardVideo(card, video)
+        if (card.phone.isVideo && video?.playing != true) {
             Icon(
                 Icons.Filled.PlayArrow, "Video", tint = Color.White,
                 modifier = Modifier.align(Alignment.Center).size(64.dp).background(Color(0x66000000), CircleShape).padding(8.dp),
             )
         }
         if (tint != null) Box(Modifier.fillMaxSize().background(tint))
-        if (stamp != null) {
-            Text(
-                stamp,
-                color = Color.White,
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.align(Alignment.Center),
-            )
+        if (stamp != null && stampAlpha > 0f) {
+            Column(
+                Modifier.align(Alignment.Center).graphicsLayer { alpha = stampAlpha },
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Icon(actionIcon(stamp), contentDescription = null, tint = Color.White, modifier = Modifier.size(56.dp))
+                Text(
+                    stamp.label,
+                    color = Color.White,
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
         }
         Text(
             card.phone.displayName,
@@ -425,5 +530,54 @@ private fun ResultDialog(title: String, lines: List<String>, leftAlone: List<Lef
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("OK") } },
+    )
+}
+
+/**
+ * Muted playback of the phone copy inside the current card. One player, made when the card is first tapped and
+ * released when the card leaves (swiped away, or Skip) or the screen goes; paused when the app goes to the background.
+ * Uses the TextureView player layout so it turns with the card and never shows black.
+ */
+@Composable
+private fun CardVideo(card: ReviewCard, video: VideoState) {
+    val context = LocalContext.current
+    val currentVideo by rememberUpdatedState(video)
+    val player = remember(card.phone.uri) {
+        ExoPlayer.Builder(context).build().apply {
+            volume = 0f
+            repeatMode = Player.REPEAT_MODE_ONE
+            setMediaItem(MediaItem.fromUri(card.phone.uri))
+            prepare()
+        }
+    }
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) = currentVideo.onStopped() // never shown or logged
+        }
+        player.addListener(listener)
+        onDispose {
+            player.removeListener(listener)
+            player.release()
+        }
+    }
+    LaunchedEffect(player, video.playing) { player.playWhenReady = video.playing }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(player, lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) currentVideo.onStopped()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+    AndroidView(
+        factory = { ctx ->
+            (LayoutInflater.from(ctx).inflate(R.layout.video_player_view, null) as PlayerView).apply {
+                useController = false
+                this.player = player
+            }
+        },
+        update = { it.player = player },
+        onRelease = { it.player = null },
+        modifier = Modifier.fillMaxSize(),
     )
 }

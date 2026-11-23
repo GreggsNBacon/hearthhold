@@ -42,7 +42,8 @@ data class FinishSummary(val keep: Int, val driveOnly: Int, val junk: Int, val b
 
 sealed interface FinishState {
     data object Idle : FinishState
-    data object Checking : FinishState
+    /** Re-checking the drive copies: [checked] of [total] rows (total 0 until the count is known). */
+    data class Checking(val checked: Int = 0, val total: Int = 0) : FinishState
     data class NeedsConfirm(val request: Any?, val passedCount: Int, val failedCount: Int) : FinishState
     data object Applying : FinishState
     data class Done(val freedBytes: Long, val junkCount: Int, val keptCount: Int, val failedCount: Int = 0) : FinishState
@@ -308,12 +309,14 @@ class ReviewViewModel(
 
     fun startFinish() {
         if (_state.value.finish != FinishState.Idle) return
-        setFinish(FinishState.Checking)
+        setFinish(FinishState.Checking())
         _state.update { it.copy(leftAlone = emptyList()) }
         viewModelScope.launch {
             try {
                 val all = lock.withLock { decisions.all() }
-                val r = finisher.prepare(all)
+                val r = finisher.prepare(all) { checked, total ->
+                    _state.update { s -> if (s.finish is FinishState.Checking) s.copy(finish = FinishState.Checking(checked, total)) else s }
+                }
                 when (r) {
                     is PrepareResult.NothingToDelete -> setLeftAlone(r.failed)
                     is PrepareResult.Ready -> setLeftAlone(r.failed)
@@ -437,6 +440,10 @@ fun finishSummaryText(s: FinishSummary): String {
 }
 
 /** The lines of the Finish result. */
+/** The Finish progress line: "Checking 12 of 40…" once the count is known. */
+fun checkingText(c: FinishState.Checking): String =
+    if (c.total > 0) "Checking ${c.checked} of ${c.total}…" else "Checking the drive copies…"
+
 fun doneLines(d: FinishState.Done): List<String> {
     val lines = listOfNotNull(
         if (d.freedBytes > 0) "Freed ${formatSize(d.freedBytes)} on the phone" else null,

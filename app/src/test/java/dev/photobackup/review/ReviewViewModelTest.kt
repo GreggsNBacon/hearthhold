@@ -63,7 +63,11 @@ private class FakeFinisher : ReviewFinisher {
     var applyResult: ApplyResult = ApplyResult.Done(0, 0, 0)
     var prepared: List<ReviewDecision>? = null
     var applied: PrepareResult.Ready? = null
-    override suspend fun prepare(decisions: List<ReviewDecision>): PrepareResult { prepared = decisions; return prepareResult }
+    /** Runs inside prepare with its progress callback (to report progress and hold the check open). */
+    var during: suspend ((Int, Int) -> Unit) -> Unit = {}
+    override suspend fun prepare(decisions: List<ReviewDecision>, onProgress: (checked: Int, total: Int) -> Unit): PrepareResult {
+        prepared = decisions; during(onProgress); return prepareResult
+    }
     override suspend fun apply(prepared: PrepareResult.Ready): ApplyResult { applied = prepared; return applyResult }
 }
 
@@ -265,6 +269,27 @@ class ReviewViewModelTest {
         assertEquals(FinishState.Error(CONNECT_TO_FINISH_MESSAGE), v.state.value.finish)
         assertEquals(1, decisions.rows.size)
         assertEquals(listOf(1L), finisher.prepared?.map { it.mediaId })
+    }
+
+    @Test fun finish_checking_shows_progress() = runTest {
+        add(1)
+        val v = vm()
+        v.swipe(Swipe.LEFT)
+        val hold = CompletableDeferred<Unit>()
+        finisher.during = { progress ->
+            progress(0, 40)
+            progress(12, 40)
+            hold.await()
+        }
+        v.startFinish()
+        assertEquals(FinishState.Checking(12, 40), v.state.value.finish)
+        assertEquals("Checking 12 of 40…", checkingText(v.state.value.finish as FinishState.Checking))
+        hold.complete(Unit)
+        assertEquals(FinishState.Error(CONNECT_TO_FINISH_MESSAGE), v.state.value.finish)
+    }
+
+    @Test fun checking_text_before_the_count_is_known() {
+        assertEquals("Checking the drive copies…", checkingText(FinishState.Checking()))
     }
 
     @Test fun finish_second_unreachable_reports_it_and_keeps_decisions() = runTest {

@@ -70,7 +70,11 @@ sealed interface ApplyResult {
 
 /** Applies the decisions to the phone and the drive. Platform-free so the ViewModel is unit-testable. */
 interface ReviewFinisher {
-    suspend fun prepare(decisions: List<ReviewDecision>): PrepareResult
+    /** [onProgress] reports the drive re-check: rows checked of the Drive only / Junk rows being checked. */
+    suspend fun prepare(
+        decisions: List<ReviewDecision>,
+        onProgress: (checked: Int, total: Int) -> Unit = { _, _ -> },
+    ): PrepareResult
     suspend fun apply(prepared: PrepareResult.Ready): ApplyResult
 }
 
@@ -107,7 +111,10 @@ class RealReviewFinisher(
     private val openSecondGate: suspend () -> SecondGateOpen = { SecondGateOpen.Off },
 ) : ReviewFinisher {
 
-    override suspend fun prepare(decisions: List<ReviewDecision>): PrepareResult {
+    override suspend fun prepare(
+        decisions: List<ReviewDecision>,
+        onProgress: (checked: Int, total: Int) -> Unit,
+    ): PrepareResult {
         val keepList = decisions.filter { it.action == ReviewAction.KEEP }
         val toDelete = decisions.filter { it.action == ReviewAction.DRIVE_ONLY || it.action == ReviewAction.JUNK }
         if (keepList.isEmpty() && toDelete.isEmpty()) return PrepareResult.NothingToDelete(keepOnlyApplied = false)
@@ -132,6 +139,7 @@ class RealReviewFinisher(
                     repo.recheck(
                         rows.values.toList(), it, phone, opener,
                         onFailed = { id, reason -> failedIds[id] = reason }, second = gate,
+                        onProgress = { checked, total, _, _ -> onProgress(checked, total) },
                     )
                 } finally {
                     gate?.let { g -> runCatching { g.close() } }

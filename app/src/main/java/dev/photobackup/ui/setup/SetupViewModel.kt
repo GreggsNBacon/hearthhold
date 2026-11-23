@@ -12,7 +12,10 @@ import dev.photobackup.smb.RemoteStore
 import dev.photobackup.smb.SmbConfig
 import dev.photobackup.ui.userMessage
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,6 +23,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import java.net.InetAddress
 
 enum class SetupStep { DISCOVER, SHARE, CREDENTIALS, FOLDER, PERMISSIONS, DONE }
 
@@ -76,6 +81,11 @@ class SetupViewModel(
     val mode: SetupMode = SetupMode.MAIN,
     /** Drops the stored second-location status line once a new second location is saved. */
     private val clearSecondStatus: suspend () -> Unit = {},
+    /**
+     * A host name or address → its IP address text, or null if it can't be resolved (production: [resolveHost]).
+     * Lets the overlap check catch the main drive typed by name instead of IP. Failures fall back to comparing text.
+     */
+    private val resolve: suspend (String) -> String? = { null },
 ) : ViewModel() {
     private val _state = MutableStateFlow(SetupUiState())
     val state: StateFlow<SetupUiState> = _state.asStateFlow()
@@ -187,7 +197,9 @@ class SetupViewModel(
         val cfg = config(_state.value) ?: return Job().apply { complete() }
         return viewModelScope.launch {
             val same = try {
-                settingsStore.settings.first().let { s -> s.smb != null && overlapsMain(s.smb, s.destination, cfg, path) }
+                settingsStore.settings.first().let { s ->
+                    s.smb != null && overlapsMain(s.smb, s.destination, cfg, path, sameAddress(s.smb.host, cfg.host))
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -235,9 +247,14 @@ class SetupViewModel(
         _state.update { it.copy(busy = true, message = null) }
         return viewModelScope.launch {
             try {
+                // Name lookups can't run inside the settings write: resolve against the main host read now, and use
+                // that answer only if the main host is still the same when the write runs.
+                val mainHost = settingsStore.settings.first().smb?.host
+                val ipSame = mainHost != null && sameAddress(mainHost, cfg.host)
                 var same = false
                 settingsStore.update { cur ->
-                    same = cur.smb != null && overlapsMain(cur.smb, cur.destination, cfg, destination)
+                    same = cur.smb != null &&
+                        overlapsMain(cur.smb, cur.destination, cfg, destination, ipSame && cur.smb.host == mainHost)
                     if (same) cur else cur.copy(second = SecondLocation(cfg, destination))
                 }
                 if (same) {
@@ -269,6 +286,21 @@ class SetupViewModel(
         }
     }
 
+    /** True when both hosts resolve to the same address. False when either can't be resolved (text compare decides). */
+    private suspend fun sameAddress(a: String, b: String): Boolean {
+        val ra = safeResolve(a) ?: return false
+        val rb = safeResolve(b) ?: return false
+        return ra == rb
+    }
+
+    private suspend fun safeResolve(host: String): String? = try {
+        resolve(host.trim())?.takeIf { it.isNotBlank() }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null // never shown or logged
+    }
+
     /** Back one step; returns false on the first step. */
     fun back(): Boolean {
         val prev = when (_state.value.step) {
@@ -296,16 +328,39 @@ class SetupViewModel(
  * and one folder equals, sits inside, or contains the other. Folders are compared whole segment by segment,
  * case-insensitively, with `/` and `\` treated alike and leading, trailing and doubled slashes ignored, so
  * `Photos` and `Photos2` are siblings, not nested. A blank folder is the share root, which contains everything on
- * that share. Hosts are compared as text only: an IP address and a name for the same machine are not caught.
+ * that share. Hosts match when equal as text (case-insensitively) or when [sameAddress] says both resolve to the same
+ * IP address (the caller resolves; false when either name doesn't resolve).
  */
-fun overlapsMain(main: SmbConfig, mainFolder: String?, cfg: SmbConfig, folder: String): Boolean {
-    if (!main.host.trim().equals(cfg.host.trim(), ignoreCase = true)) return false
+fun overlapsMain(
+    main: SmbConfig,
+    mainFolder: String?,
+    cfg: SmbConfig,
+    folder: String,
+    sameAddress: Boolean = false,
+): Boolean {
+    if (!sameAddress && !main.host.trim().equals(cfg.host.trim(), ignoreCase = true)) return false
     if (!segments(main.share).equals(segments(cfg.share))) return false
     val a = segments(mainFolder.orEmpty())
     val b = segments(folder)
     val n = minOf(a.size, b.size)
     return a.subList(0, n) == b.subList(0, n)
 }
+
+/**
+ * Production resolver for [SetupViewModel]: the host's IP address text via [InetAddress], on [Dispatchers.IO] with a
+ * short timeout; null on any failure (never logged).
+ */
+suspend fun resolveHost(host: String): String? = try {
+    // The lookup itself ignores interrupts, so it runs detached and only the wait is bounded.
+    val lookup = CoroutineScope(Dispatchers.IO).async { runCatching { InetAddress.getByName(host).hostAddress }.getOrNull() }
+    withTimeoutOrNull(RESOLVE_TIMEOUT_MS) { lookup.await() }
+} catch (e: CancellationException) {
+    throw e
+} catch (_: Exception) {
+    null
+}
+
+private const val RESOLVE_TIMEOUT_MS = 2_000L
 
 /** Lower-cased path segments: `/` and `\` alike, blank segments (leading, trailing, doubled slashes) dropped. */
 private fun segments(p: String): List<String> =

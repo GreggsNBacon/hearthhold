@@ -57,6 +57,11 @@ class SecondSetupTest {
 
     @After fun tearDown() = Dispatchers.resetMain()
 
+    /** Fake name lookup: "nas.local" is the main drive's IP; unknown names don't resolve. */
+    private var addresses: Map<String, String> = mapOf("nas.local" to "192.168.50.1", "192.168.50.1" to "192.168.50.1",
+        "pc.local" to "192.168.50.7")
+    private var resolveFails = false
+
     private fun vm() = SetupViewModel(
         settingsStore = settings,
         discover = { emptyFlow<FoundHost>() },
@@ -65,6 +70,7 @@ class SecondSetupTest {
         backup = backup,
         mode = SetupMode.SECOND,
         clearSecondStatus = { statusCleared++ },
+        resolve = { name -> if (resolveFails) throw java.io.IOException("dns") else addresses[name.trim().lowercase()] },
     )
 
     private suspend fun SetupViewModel.loggedIn(host: String, share: String): SetupViewModel = apply {
@@ -128,6 +134,48 @@ class SecondSetupTest {
         assertFalse(overlapsMain(mainSmb, "Phone backup", SmbConfig("other", "usb", null, null), "Phone backup"))
         assertFalse(overlapsMain(mainSmb, "Phone backup", SmbConfig("192.168.50.1", "usb2", null, null), "Phone backup"))
         assertFalse(overlapsMain(mainSmb, "", SmbConfig("192.168.50.1", "usb2", null, null), ""))
+    }
+
+    @Test fun refusesTheMainShareByNameWhenItResolvesToTheMainIp() = runBlocking {
+        val vm = vm().loggedIn("NAS.local", "usb")
+        vm.onFolderPicked("Phone backup").join()
+        assertEquals(SetupStep.FOLDER, vm.state.value.step)
+        assertEquals(SetupViewModel.OVERLAPS_MAIN, vm.state.value.message)
+    }
+
+    @Test fun finishRefusesByIpToo() = runBlocking {
+        val vm = vm().loggedIn("nas.local", "usb")
+        vm.onFolderPicked("Archive").join()
+        assertEquals(SetupStep.DONE, vm.state.value.step)
+        settings.update { it.copy(destination = "Archive\\Phone backup") }
+        vm.finish().join()
+        assertNull(settings.settings.first().second)
+        assertEquals(SetupViewModel.OVERLAPS_MAIN, vm.state.value.message)
+    }
+
+    @Test fun differentIpsAreNotTheMainDrive() = runBlocking {
+        val vm = vm().loggedIn("pc.local", "usb")
+        vm.onFolderPicked("Phone backup").join()
+        assertNull(vm.state.value.message)
+        assertEquals(SetupStep.DONE, vm.state.value.step)
+    }
+
+    @Test fun unresolvableNameFallsBackToText() = runBlocking {
+        addresses = mapOf("192.168.50.1" to "192.168.50.1") // nas.local doesn't resolve
+        val vm = vm().loggedIn("nas.local", "usb")
+        vm.onFolderPicked("Phone backup").join()
+        assertNull(vm.state.value.message) // names differ as text: allowed
+        assertEquals(SetupStep.DONE, vm.state.value.step)
+    }
+
+    @Test fun failingResolverFallsBackToText() = runBlocking {
+        resolveFails = true
+        val byName = vm().loggedIn("nas.local", "usb")
+        byName.onFolderPicked("Phone backup").join()
+        assertEquals(SetupStep.DONE, byName.state.value.step)
+        val sameText = vm().loggedIn("192.168.50.1", "usb")
+        sameText.onFolderPicked("Phone backup").join()
+        assertEquals(SetupViewModel.OVERLAPS_MAIN, sameText.state.value.message)
     }
 
     @Test fun refusesAFolderInsideTheMainOne() = runBlocking {
