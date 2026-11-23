@@ -96,9 +96,11 @@
 ## Health check
 
 - Runs about once a day at most (roughly every 20 hours), on Wi-Fi, checking up to 200 files per drive per run, within a 2 GB read cap.
-- A damaged drive file is repaired from the phone copy, or from the second copy if the phone no longer has it.
-- A bad file is never deleted; it stays put until repaired.
-- The status sheet shows a line such as "Health check: all good (last checked 3 hours ago)".
+- Checks the files not checked for longest first.
+- A damaged drive file is repaired from the phone copy, but only if the phone file still matches the hash recorded at backup. Otherwise a verified second copy is used.
+- A damaged file is never deleted or overwritten. The repaired copy is saved beside it under a new name, and the gallery points at the repaired copy. The bad file stays on the drive for you to remove.
+- If no good copy is left, the item shows "Damaged on drive — no good copy left" and the status line shows "N damaged — tap for details". It stays in the rotation and is checked again.
+- The status sheet shows a line such as "Health check: all good (last checked today)", or "1 day ago" / "N days ago".
 
 ## Stale warning
 
