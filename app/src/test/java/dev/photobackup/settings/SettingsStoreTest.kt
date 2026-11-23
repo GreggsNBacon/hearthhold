@@ -76,4 +76,20 @@ class SettingsStoreTest {
         assertFalse(s.folders.camera)
         assertEquals(setOf("Movies/"), s.folders.extraRelativePaths)
     }
+
+    private class ThrowingCipher : CredentialCipher {
+        override fun encrypt(plain: String) = "enc:$plain"
+        override fun decrypt(cipher: String): String = throw java.security.GeneralSecurityException("bad tag")
+    }
+
+    @Test fun decryptFailureYieldsNullPasswordAndAllowsUpdate() = runBlocking {
+        val ds = PreferenceDataStoreFactory.create { File(tmp.root, "t.preferences_pb") }
+        val store = SettingsStore(ApplicationProvider.getApplicationContext(), ThrowingCipher(), ds)
+        store.update { it.copy(smb = SmbConfig("nas", "share", "u", "pw")) }
+        val s = store.settings.first()
+        assertEquals("nas", s.smb?.host)
+        assertNull(s.smb?.password)
+        store.update { it.copy(smb = SmbConfig("nas", "share", "u", "new")) }
+        assertEquals("enc:new", ds.data.first()[stringPreferencesKey("smb_password")])
+    }
 }

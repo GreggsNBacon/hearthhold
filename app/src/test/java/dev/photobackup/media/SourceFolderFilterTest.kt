@@ -19,4 +19,6 @@ class SourceFolderFilterTest {
     @Test fun extraPathNotPrefixOfSibling() =
         assertFalse(SourceFolders(extraRelativePaths = setOf("Movies")).matches("MoviesOther/"))
     @Test fun disabledCameraDoesNotMatch() = assertFalse(SourceFolders(camera = false).matches("DCIM/Camera/"))
+    @Test fun blankExtraPathsIgnored() =
+        assertFalse(SourceFolders(extraRelativePaths = setOf("", "  ")).matches("Documents/"))
 }

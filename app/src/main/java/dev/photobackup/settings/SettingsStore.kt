@@ -35,7 +35,7 @@ class SettingsStore internal constructor(
         val host = p[HOST]
         val share = p[SHARE]
         val smb = if (!host.isNullOrBlank() && !share.isNullOrBlank()) {
-            SmbConfig(host, share, p[USER], p[PASSWORD]?.let { cipher.decrypt(it) })
+            SmbConfig(host, share, p[USER], p[PASSWORD]?.let { decryptOrNull(it) })
         } else null
         return AppSettings(
             smb = smb,
@@ -51,6 +51,10 @@ class SettingsStore internal constructor(
             loopVideos = p[LOOP_VIDEOS] ?: true,
         )
     }
+
+    /** A lost key or corrupt value must not block the user from re-entering credentials. */
+    private fun decryptOrNull(enc: String): String? =
+        try { cipher.decrypt(enc) } catch (e: Exception) { null }
 
     private fun write(p: MutablePreferences, s: AppSettings) {
         p.putOrRemove(HOST, s.smb?.host)

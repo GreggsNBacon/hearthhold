@@ -17,7 +17,7 @@ data class SourceFolders(
         val path = relativePath.withTrailingSlash()
         if (camera && path.startsWith("DCIM/Camera/", ignoreCase = true)) return true
         if (screenshots && path.split('/').any { it.equals("Screenshots", ignoreCase = true) }) return true
-        return extraRelativePaths.any { path.startsWith(it.withTrailingSlash()) }
+        return extraRelativePaths.any { it.isNotBlank() && path.startsWith(it.trim().withTrailingSlash()) }
     }
 
     private fun String.withTrailingSlash() = if (isEmpty() || endsWith("/")) this else "$this/"
@@ -76,6 +76,10 @@ class LocalMediaSource(private val context: Context) {
         try {
             context.contentResolver.openInputStream(Uri.parse(m.uri))
         } catch (_: FileNotFoundException) {
+            null
+        } catch (_: SecurityException) {
+            null
+        } catch (_: IllegalStateException) {
             null
         }
     }
