@@ -80,7 +80,7 @@ The chip at the top shows overall status, e.g. "Backing up 3 of 40", "5 waiting"
 
 ## Drive layout
 
-`<dest>/<device>/<source>/YYYY/`
+`<dest>\<device>\<source>\YYYY\`
 
 With named folders: `<dest>\<device>\<folder or source>\YYYY\`.
 

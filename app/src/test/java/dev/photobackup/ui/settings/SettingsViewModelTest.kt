@@ -6,6 +6,7 @@ import dev.photobackup.backup.MemoryAssignments
 import dev.photobackup.backup.MemoryLedger
 import dev.photobackup.ledger.BackupStatus
 import dev.photobackup.ledger.FolderAssignment
+import dev.photobackup.ledger.FolderAssignmentStore
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.media.PartialMediaAccessException
 import dev.photobackup.settings.CredentialCipher
@@ -27,6 +28,8 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Rule
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
@@ -187,6 +190,38 @@ class SettingsViewModelTest {
         ledger.upsert(row(2, "Pictures/WhatsApp/Sent/", "Photos\\Dev\\Sent\\2026\\2.jpg", BackupStatus.REMOVED_FROM_PHONE))
         ledger.upsert(row(3, "DCIM/Camera/", "Photos\\Dev\\Camera\\2026\\3.jpg"))
         ledger.upsert(row(4, "Pictures/WhatsApp/", null, BackupStatus.PENDING))
+    }
+
+    @Test fun saveRuleWithNothingToMoveAddsAndClearsBusy() = runBlocking {
+        val vm = ruleVm()
+        var added = false
+        var asked = -1
+        vm.saveRule("Pictures/WhatsApp", "Family", { added = true }, { asked = it }).join()
+        assertTrue(added)
+        assertEquals(-1, asked)
+        assertFalse(vm.state.value.ruleBusy)
+        assertEquals(mapOf("Pictures/WhatsApp/" to "Family"), settings.settings.first().folderRules)
+    }
+
+    @Test fun saveRuleAsksWhenFilesWouldMoveAndClearsBusy() = runBlocking {
+        seedRows()
+        val vm = ruleVm()
+        var asked = -1
+        vm.saveRule("Pictures/WhatsApp", "Family", { }, { asked = it }).join()
+        assertEquals(2, asked)
+        assertFalse(vm.state.value.ruleBusy)
+    }
+
+    @Test fun saveRuleFailureClearsBusy() = runBlocking {
+        runBlocking { settings.update { it.copy(deviceName = "Dev") } }
+        val failing = object : FolderAssignmentStore by assigns {
+            override suspend fun all(): List<FolderAssignment> = throw IllegalStateException("db")
+        }
+        val vm = SettingsViewModel(settings, { opened += it; store }, backup, ledger = ledger, assignments = failing)
+        var called = false
+        vm.saveRule("Pictures/WhatsApp", "Family", { called = true }, { called = true }).join()
+        assertFalse(called)
+        assertFalse(vm.state.value.ruleBusy)
     }
 
     @Test fun addRuleWithoutMovingPinsExistingRows() = runBlocking {

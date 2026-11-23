@@ -54,7 +54,6 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
     var addingRule by remember { mutableStateOf(false) }
     var rulePath by remember { mutableStateOf<String?>(null) }
     var confirm by remember { mutableStateOf<RuleConfirm?>(null) }
-    var ruleBusy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val s = state.settings
 
@@ -113,20 +112,16 @@ fun SettingsScreen(viewModel: SettingsViewModel, driveStore: () -> RemoteStore, 
                     actionLabel = "Choose",
                 )
             } else {
-                RuleNameEntry(path, s.folderRules.values.distinct().sortedBy { it.lowercase() }, viewModel, ruleBusy) { name ->
-                    ruleBusy = true
-                    scope.launch {
-                        val n = viewModel.countOnDrive(path, name)
-                        if (n == 0) {
-                            viewModel.addRule(path, name, moveExisting = false)
-                            rulePath = null; addingRule = false
-                        } else confirm = RuleConfirm.Add(path, name, n)
-                    }
+                RuleNameEntry(path, s.folderRules.values.distinct().sortedBy { it.lowercase() }, viewModel, state.ruleBusy) { name ->
+                    viewModel.saveRule(
+                        path, name,
+                        onAdded = { rulePath = null; addingRule = false },
+                        onAsk = { n -> confirm = RuleConfirm.Add(path, name, n) },
+                    )
                 }
             }
-            RuleDialog(confirm, { confirm = null; ruleBusy = false }) { c, yes ->
+            RuleDialog(confirm, { confirm = null }) { c, yes ->
                 confirm = null
-                ruleBusy = false
                 if (c is RuleConfirm.Add) {
                     viewModel.addRule(c.path, c.name, yes)
                     rulePath = null; addingRule = false

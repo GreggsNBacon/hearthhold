@@ -80,6 +80,8 @@ data class GalleryUiState(
     fun isAvailable(item: GalleryItem): Boolean = item.location != Location.DRIVE || drive == DriveState.REACHABLE
 }
 
+private const val SEND_FAILED = "Couldn't move those just now"
+
 /**
  * The combined Gallery. The phone list is loaded on first show and on [refresh]; the ledger is observed, so backups
  * and removals show up live. The merge runs on [compute], never on the main thread. The drive check goes through the
@@ -87,8 +89,6 @@ data class GalleryUiState(
  * show and on every [resume] (see [autoCheck]), and always on [refresh] (user-asked).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
-private const val SEND_FAILED = "Couldn't move those just now"
-
 class GalleryViewModel(
     private val queryPhone: suspend () -> List<PhoneMedia>,
     private val ledger: kotlinx.coroutines.flow.Flow<List<LedgerEntry>>,

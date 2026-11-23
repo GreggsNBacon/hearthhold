@@ -34,6 +34,8 @@ data class SettingsUiState(
     val driveMessage: String? = null,
     /** Phone folders with photos or videos, for the "Add folder" browser; null until loaded. */
     val phoneFolders: PhoneFolderList? = null,
+    /** True while a new rule is being checked against the drive files it would move. */
+    val ruleBusy: Boolean = false,
 )
 
 sealed interface PhoneFolderList {
@@ -167,6 +169,28 @@ class SettingsViewModel(
     }
 
     private suspend fun runNowFromSettings() = backup.runNow(store.settings.first().chargingOnly)
+
+    /**
+     * Saves a new rule when no existing drive file would move ([onAdded]); otherwise calls [onAsk] with how many
+     * would, for the "also move them?" question. [ruleBusy] is set only while checking, and cleared on any outcome.
+     */
+    fun saveRule(path: String, name: String, onAdded: () -> Unit, onAsk: (Int) -> Unit): Job {
+        if (_state.value.ruleBusy) return Job().apply { complete() }
+        _state.update { it.copy(ruleBusy = true) }
+        return viewModelScope.launch {
+            try {
+                val n = countOnDrive(path, name)
+                if (n == 0) {
+                    addRule(path, name, moveExisting = false).join()
+                    onAdded()
+                } else onAsk(n)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            } finally {
+                _state.update { it.copy(ruleBusy = false) }
+            }
+        }
+    }
 
     /**
      * Adds (or replaces) a rule sending [path] to drive folder [name]. [moveExisting] false keeps the files already on

@@ -297,6 +297,21 @@ class GalleryViewModelTest {
         assertNotEquals("Moving 1 to Dog", n)
     }
 
+    @Test fun sendToDaoFailureShowsNoticeAndDoesNotRun() {
+        val failing = object : FolderAssignmentStore by FakeAssignments() {
+            override suspend fun set(a: FolderAssignment) { throw IllegalStateException("secret-detail") }
+        }
+        var runs = 0
+        val vm = GalleryViewModel(
+            queryPhone = { phone }, ledger = ledger, checkDrive = {}, driveRoot = { SmbRoot("nas", "usb") },
+            compute = dispatcher, assignments = failing, rules = { emptyMap() }, runNow = { runs++ },
+            root = { "Backups" to "Pixel 7" },
+        )
+        vm.sendTo(listOf("media:1"), "Dog")
+        assertEquals(0, runs)
+        assertFalse(vm.notice.value!!.contains("secret-detail"))
+    }
+
     @Test fun selectionTogglesAndClearsAfterSending() {
         val vm = foldersVm(FakeAssignments())
         vm.select("media:1")
