@@ -12,16 +12,16 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Inet4Address
@@ -39,30 +39,17 @@ data class FoundHost(val name: String?, val address: String)
 class HostDiscovery(context: Context) {
     private val app = context.applicationContext
 
-    fun discover(timeoutMs: Long = 4000): Flow<FoundHost> = channelFlow {
-        val local = localIpv4() ?: return@channelFlow // no Wi-Fi IPv4: nothing to find
-        val seen = HashMap<String, String?>()
-
-        // Emits on first sight of an address, and again when a name arrives for a previously nameless one.
-        val emit: suspend (String?, String) -> Unit = { name, address ->
-            val send = synchronized(seen) {
-                when {
-                    !seen.containsKey(address) -> { seen[address] = name; true }
-                    seen[address] == null && name != null -> { seen[address] = name; true }
-                    else -> false
-                }
-            }
-            if (send) trySend(FoundHost(name, address))
-        }
-        val known: (String) -> Boolean = { synchronized(seen) { seen.containsKey(it) } }
-
-        val sources = launch {
-            launch { mdns(local.first, emit) }
-            launch { netbios(local.first, local.second, emit) }
-            launch { probe445(local.first, local.second, known, emit) }
-        }
-        delay(timeoutMs)
-        sources.cancelAndJoin()
+    fun discover(timeoutMs: Long = 4000): Flow<FoundHost> {
+        val local = localIpv4() ?: return emptyFlow() // no Wi-Fi IPv4: nothing to find
+        val (ip, prefix) = local
+        return mergeSources(
+            timeoutMs,
+            listOf(
+                { _, emit -> mdns(ip, emit) },
+                { _, emit -> netbios(ip, prefix, emit) },
+                { known, emit -> probe445(ip, prefix, known, emit) },
+            ),
+        )
     }
 
     /** (ipv4, prefix) of the active Wi-Fi network, or null. */
@@ -75,34 +62,43 @@ class HostDiscovery(context: Context) {
         return ip to la.prefixLength
     }
 
-    private suspend fun mdns(localIp: String, emit: suspend (String?, String) -> Unit): Unit = withContext(Dispatchers.IO) {
-        val wifi = app.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        val lock = wifi.createMulticastLock("photobackup-mdns").apply { setReferenceCounted(false); acquire() }
-        var jmdns: JmDNS? = null
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        try {
-            jmdns = JmDNS.create(InetAddress.getByName(localIp))
-            jmdns.addServiceListener("_smb._tcp.local.", object : ServiceListener {
-                override fun serviceAdded(event: ServiceEvent) {
-                    event.dns.requestServiceInfo(event.type, event.name, 1000)
-                }
+    private suspend fun mdns(localIp: String, emit: suspend (String?, String) -> Unit): Unit =
+        withContext(Dispatchers.IO) {
+            val wifi = app.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val lock = wifi.createMulticastLock("photobackup-mdns").apply { setReferenceCounted(false); acquire() }
+            // JmDNS.create/close block and cannot be cancelled, so they live on a detached scope:
+            // this source returns promptly on cancel, and the detached job still closes JmDNS and releases the lock.
+            val detached = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val job = detached.launch {
+                var jmdns: JmDNS? = null
+                try {
+                    jmdns = JmDNS.create(InetAddress.getByName(localIp))
+                    jmdns.addServiceListener("_smb._tcp.local.", object : ServiceListener {
+                        override fun serviceAdded(event: ServiceEvent) {
+                            event.dns.requestServiceInfo(event.type, event.name, 1000)
+                        }
 
-                override fun serviceRemoved(event: ServiceEvent) {}
+                        override fun serviceRemoved(event: ServiceEvent) {}
 
-                override fun serviceResolved(event: ServiceEvent) {
-                    val addr = event.info.inet4Addresses.firstOrNull()?.hostAddress ?: return
-                    scope.launch { emit(event.info.name, addr) }
+                        override fun serviceResolved(event: ServiceEvent) {
+                            val addr = event.info.inet4Addresses.firstOrNull()?.hostAddress ?: return
+                            detached.launch { emit(event.info.name, addr) }
+                        }
+                    })
+                    awaitCancellation()
+                } finally {
+                    withContext(NonCancellable) {
+                        runCatching { jmdns?.close() }
+                        runCatching { lock.release() }
+                    }
                 }
-            })
-            awaitCancellation()
-        } finally {
-            scope.cancel()
-            withContext(NonCancellable) {
-                runCatching { jmdns?.close() }
-                runCatching { lock.release() }
+            }
+            try {
+                job.join()
+            } finally {
+                job.cancel()
             }
         }
-    }
 
     private suspend fun netbios(ip: String, prefix: Int, emit: suspend (String?, String) -> Unit) =
         withContext(Dispatchers.IO) {
@@ -152,4 +148,44 @@ class HostDiscovery(context: Context) {
             }
         }.awaitAll()
     }
+}
+
+/**
+ * Runs [sources] concurrently for [timeoutMs], deduping by address (re-emitting when a name arrives for a
+ * nameless address). A source that throws (other than cancellation) is ignored; the others keep going.
+ * The flow completes promptly at the timeout, without waiting on slow source teardown.
+ */
+internal fun mergeSources(
+    timeoutMs: Long,
+    sources: List<suspend (known: (String) -> Boolean, emit: suspend (String?, String) -> Unit) -> Unit>,
+): Flow<FoundHost> = channelFlow {
+    val seen = HashMap<String, String?>()
+    val emit: suspend (String?, String) -> Unit = { name, address ->
+        val send = synchronized(seen) {
+            when {
+                !seen.containsKey(address) -> { seen[address] = name; true }
+                seen[address] == null && name != null -> { seen[address] = name; true }
+                else -> false
+            }
+        }
+        if (send) trySend(FoundHost(name, address))
+    }
+    val known: (String) -> Boolean = { synchronized(seen) { seen.containsKey(it) } }
+
+    val running = launch {
+        for (source in sources) {
+            launch {
+                try {
+                    source(known, emit)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // one failing source must not fail discovery
+                }
+            }
+        }
+    }
+    delay(timeoutMs)
+    running.cancel()
+    withTimeoutOrNull(500) { running.join() }
 }

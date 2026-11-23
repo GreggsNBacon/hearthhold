@@ -29,7 +29,7 @@ object NetBios {
             if (pos >= packet.size) return null
             val len = packet[pos].toInt() and 0xFF
             if (len == 0) { pos++; break }
-            if (len and 0xC0 == 0xC0) { pos += 2; break }
+            if ((len and 0xC0) == 0xC0) { pos += 2; break }
             pos += 1 + len
         }
         pos += 10 // TYPE, CLASS, TTL, RDLENGTH
@@ -41,7 +41,7 @@ object NetBios {
             val at = pos + i * 18
             if (at + 18 > packet.size) break
             val flags = u16(packet, at + 16)
-            if (flags and 0x8000 != 0) continue // group name
+            if ((flags and 0x8000) != 0) continue // group name
             val name = String(packet, at, 15, Charsets.US_ASCII).trim()
             if (name.isEmpty()) continue
             when (packet[at + 15].toInt() and 0xFF) {

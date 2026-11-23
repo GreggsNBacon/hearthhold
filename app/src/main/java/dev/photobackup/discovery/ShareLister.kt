@@ -7,6 +7,7 @@ import com.rapid7.client.dcerpc.mssrvs.ServerService
 import com.rapid7.client.dcerpc.transport.SMBTransportFactories
 import dev.photobackup.smb.ConnectTimeoutSocketFactory
 import dev.photobackup.smb.SmbjRemoteStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
@@ -35,6 +36,8 @@ class ShareLister {
                         .sortedBy { it.lowercase() }
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             throw SmbjRemoteStore.mapConnect(e)
         } finally {
