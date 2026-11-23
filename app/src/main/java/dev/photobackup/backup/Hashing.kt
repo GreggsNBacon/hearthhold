@@ -9,14 +9,15 @@ object Hashing {
 
     fun hex(digest: ByteArray): String = digest.joinToString("") { "%02x".format(it) }
 
-    /** SHA-256 of everything in [input], as lowercase hex. Does not close [input]. */
-    fun sha256(input: InputStream): String {
+    /** SHA-256 of everything in [input], as lowercase hex. [onChunk] gets each chunk size (it may throw to abort). Does not close [input]. */
+    fun sha256(input: InputStream, onChunk: (Int) -> Unit = {}): String {
         val md = MessageDigest.getInstance("SHA-256")
         val buf = ByteArray(BUFFER_BYTES)
         while (true) {
             val n = input.read(buf)
             if (n < 0) break
             md.update(buf, 0, n)
+            onChunk(n)
         }
         return hex(md.digest())
     }

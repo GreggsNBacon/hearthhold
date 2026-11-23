@@ -18,6 +18,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -37,7 +38,10 @@ fun FreeUpScreen(viewModel: FreeUpViewModel) {
     }
     LaunchedEffect(Unit) { viewModel.refresh() }
     LaunchedEffect(state.pendingDelete) {
-        state.pendingDelete?.let { launcher.launch(IntentSenderRequest.Builder(it).build()) }
+        state.pendingDelete?.let {
+            viewModel.onDeleteLaunched()
+            launcher.launch(IntentSenderRequest.Builder(it).build())
+        }
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
@@ -77,12 +81,18 @@ fun FreeUpScreen(viewModel: FreeUpViewModel) {
         if (message != null) {
             Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 8.dp))
         }
+        state.checking?.let { c ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Checking ${c.checked} of ${c.total} · ${formatSize(c.bytesChecked)}", Modifier.weight(1f))
+                TextButton(onClick = { viewModel.cancelCheck() }) { Text("Cancel") }
+            }
+        }
         Button(
             onClick = { viewModel.removeSelected() },
             enabled = state.driveReachable && !state.busy && state.selectedCount > 0,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Remove ${state.selectedCount} items from phone (${formatSize(state.totalBytes)})")
+            Text("Remove ${state.selectedCount} ${if (state.selectedCount == 1) "item" else "items"} from phone (${formatSize(state.totalBytes)})")
         }
     }
 }
