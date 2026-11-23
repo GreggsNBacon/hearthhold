@@ -3,6 +3,8 @@ package dev.photobackup.backup
 import android.content.Context
 import androidx.room.Room
 import dev.photobackup.ledger.AppDatabase
+import dev.photobackup.ledger.FolderAssignmentDao
+import dev.photobackup.ledger.LedgerDao
 import dev.photobackup.ledger.MIGRATION_1_2
 import dev.photobackup.ledger.MIGRATION_2_3
 import dev.photobackup.ledger.MIGRATION_3_4
@@ -49,6 +51,14 @@ object BackupRunnerFactory {
     }
 
     @Volatile var overnightWindow: suspend (Context) -> OvernightWindow? = defaultOvernightWindow
+
+    /** Items still without a verified second copy (the status line's "N waiting"). */
+    val defaultSecondWaiting: suspend (Context) -> Int = { ctx ->
+        val db = LedgerDatabase.get(ctx.applicationContext)
+        SecondWaiting.count(db.ledgerDao(), db.secondCopyDao())
+    }
+
+    @Volatile var secondWaiting: suspend (Context) -> Int = defaultSecondWaiting
 
     val defaultNow: () -> LocalTime = { LocalTime.now() }
 
@@ -100,9 +110,29 @@ class ProductionBackupRunner(private val context: Context) : BackupRunner {
                 folderFor = { id, rel -> FolderRules.desired(rel, assignments.get(id)?.folder, settings.folderRules) },
                 assignments = assignments,
             )
-            return engine.run(items, onMoving) { done, total, bytes -> onProgress(done, total, bytes, totalBytes) }
+            return secondStep(media, ledger, assignments).around(smb, store) {
+                engine.run(items, onMoving) { done, total, bytes -> onProgress(done, total, bytes, totalBytes) }
+            }
         } finally {
             runCatching { store.close() }
         }
     }
+
+    /** The optional second step. It re-reads the settings itself, so a second location removed meanwhile is skipped. */
+    private fun secondStep(media: LocalMediaSource, ledger: LedgerDao, assignments: FolderAssignmentDao) = SecondStep(
+        readSettings = { SettingsStore(context, KeystoreCredentialCipher()).settings.first() },
+        openStore = { cfg -> SmbjRemoteStore(cfg) },
+        runEngine = { env ->
+            SecondBackupEngine(
+                store = env.store,
+                mainStore = env.mainStore,
+                ledger = ledger,
+                copies = LedgerDatabase.get(context).secondCopyDao(),
+                opener = media.opener(),
+                settings = BackupSettings(env.second.destination, env.settings.deviceName, ZoneId.systemDefault()),
+                clock = System::currentTimeMillis,
+                folderFor = { id, rel -> FolderRules.desired(rel, assignments.get(id)?.folder, env.settings.folderRules) },
+            ).run()
+        },
+    )
 }

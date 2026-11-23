@@ -10,6 +10,10 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import dev.photobackup.ledger.BackupStatus
+import dev.photobackup.ledger.LedgerStore
+import dev.photobackup.ledger.SecondCopyDao
+import dev.photobackup.ledger.SecondStatus
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -25,7 +29,47 @@ data class BackupStatusSnapshot(
     val driveFreeBytes: Long? = null,
     /** Drive files being moved to their folders right now (0 = not moving). */
     val moving: Int = 0,
+    /** The second backup location's status line (see [SecondStatusText]); null when it is off or has not run. */
+    val secondStatus: String? = null,
 )
+
+/** The second location's status texts. */
+object SecondStatusText {
+    const val UP_TO_DATE = "Up to date"
+    const val NOT_REACHABLE = "Not reachable"
+    const val REENTER_PASSWORD = "Re-enter second location password"
+
+    fun waiting(n: Int) = "$n waiting"
+    fun failed(n: Int) = "$n failed"
+
+    /**
+     * null result = off or not run = no line. [waiting]: eligible ledger rows still without a verified second copy
+     * ([SecondWaiting]). Failed items come first, then waiting, else up to date.
+     */
+    fun of(result: SecondResult?, waiting: Int): String? = when (result) {
+        null -> null
+        SecondResult.Unreachable -> NOT_REACHABLE
+        SecondResult.AuthFailed -> REENTER_PASSWORD
+        is SecondResult.Done -> when {
+            result.failed > 0 -> failed(result.failed)
+            waiting > 0 -> waiting(waiting)
+            else -> UP_TO_DATE
+        }
+    }
+}
+
+/** How many items still need a second copy. */
+object SecondWaiting {
+    /**
+     * Copy-eligible ledger rows (VERIFIED or REMOVED_FROM_PHONE, hash recorded, no bin request: the engine's rule)
+     * without a VERIFIED [SecondCopy] of that hash. An UPLOADING row, with or without a `.part`, is waiting.
+     */
+    suspend fun count(ledger: LedgerStore, copies: SecondCopyDao): Int {
+        val done = copies.byStatus(SecondStatus.VERIFIED).associateBy { it.mediaId }
+        return (ledger.byStatus(BackupStatus.VERIFIED) + ledger.byStatus(BackupStatus.REMOVED_FROM_PHONE))
+            .count { it.localSha256 != null && it.binRequestedAt == null && done[it.mediaId]?.sha256 != it.localSha256 }
+    }
+}
 
 private val Context.statusDataStore: DataStore<Preferences> by preferencesDataStore(name = "backup_status")
 
@@ -46,6 +90,7 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
             p.putOrRemove(ETA, s.etaSec)
             p.putOrRemove(DRIVE_FREE, s.driveFreeBytes)
             p[MOVING] = s.moving
+            p.putOrRemove(SECOND_STATUS, s.secondStatus)
         }
     }
 
@@ -70,6 +115,7 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
         etaSec = p[ETA],
         driveFreeBytes = p[DRIVE_FREE],
         moving = p[MOVING] ?: 0,
+        secondStatus = p[SECOND_STATUS],
     )
 
     private fun <T> MutablePreferences.putOrRemove(key: Preferences.Key<T>, value: T?) {
@@ -86,6 +132,7 @@ class BackupStatusRepository(private val dataStore: DataStore<Preferences>) {
         private val ETA = longPreferencesKey("eta_sec")
         private val DRIVE_FREE = longPreferencesKey("drive_free_bytes")
         private val MOVING = intPreferencesKey("moving")
+        private val SECOND_STATUS = stringPreferencesKey("second_status")
 
         val defaultProvider: (Context) -> BackupStatusRepository = { ctx ->
             BackupStatusRepository(ctx.applicationContext.statusDataStore)

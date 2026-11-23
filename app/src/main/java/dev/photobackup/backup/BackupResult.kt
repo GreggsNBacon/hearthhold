@@ -19,6 +19,8 @@ sealed interface BackupResult {
         val moved: Int = 0,
         /** Drive files that couldn't be moved this run (failed moves and unsettled interrupted ones). */
         val moveFailed: Int = 0,
+        /** The optional second backup location step; null when it is off or did not run. Never affects success. */
+        val second: SecondResult? = null,
     ) : BackupResult
-    data class Stopped(val reason: RemoteException) : BackupResult
+    data class Stopped(val reason: RemoteException, val second: SecondResult? = null) : BackupResult
 }

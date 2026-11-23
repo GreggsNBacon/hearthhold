@@ -186,6 +186,12 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
 
     private suspend fun finish(repo: BackupStatusRepository, r: BackupResult): Result {
         val now = System.currentTimeMillis()
+        val secondResult = when (r) {
+            is BackupResult.Done -> r.second
+            is BackupResult.Stopped -> r.second
+        }
+        // null (second off, or not run) clears an old line.
+        val secondStatus = SecondStatusText.of(secondResult, secondWaiting(secondResult))
         when (r) {
             is BackupResult.Done -> {
                 val err = when {
@@ -199,6 +205,7 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                         lastResult = BackupMessages.summary(r.uploaded, r.failed, r.moved, r.moveFailed),
                         lastError = err,
                         driveFreeBytes = r.driveFreeBytes ?: it.driveFreeBytes,
+                        secondStatus = secondStatus,
                     )
                 }
                 // A full drive is a persistent problem (spec: Home + notification); other item failures show in-app.
@@ -213,7 +220,9 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             }
             is BackupResult.Stopped -> when (val e = r.reason) {
                 is RemoteException.Unreachable -> {
-                    idle(repo) { it.copy(lastRunMs = now, lastResult = BackupMessages.UNREACHABLE, lastError = null) }
+                    idle(repo) {
+                        it.copy(lastRunMs = now, lastResult = BackupMessages.UNREACHABLE, lastError = null, secondStatus = secondStatus)
+                    }
                     BackupNotifications.clearError(applicationContext)
                 }
                 else -> {
@@ -224,12 +233,30 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                         is RemoteException.DriveFull -> BackupMessages.FULL
                         is RemoteException.Unreachable -> BackupMessages.UNREACHABLE
                     }
-                    idle(repo) { it.copy(lastRunMs = now, lastResult = text, lastError = text) }
+                    idle(repo) { it.copy(lastRunMs = now, lastResult = text, lastError = text, secondStatus = secondStatus) }
                     BackupNotifications.error(applicationContext, text, reauth = e is RemoteException.AuthFailed)
                 }
             }
         }
+        // The second location speaks up only when the user must act: its login was refused. "Not reachable" and
+        // waiting are normal away from home; failed items are shown in-app, as for the main drive.
+        if (secondResult == SecondResult.AuthFailed) {
+            BackupNotifications.secondError(applicationContext, SecondStatusText.REENTER_PASSWORD)
+        } else {
+            BackupNotifications.clearSecondError(applicationContext)
+        }
         return Result.success()
+    }
+
+    /** Ledger rows still without a second copy; a failure to count falls back to what the run itself left waiting. */
+    private suspend fun secondWaiting(second: SecondResult?): Int {
+        if (second !is SecondResult.Done) return 0
+        return try {
+            BackupRunnerFactory.secondWaiting(applicationContext)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            second.waiting
+        }
     }
 
     /** The Settings toggle; a settings read failure must not fail a finished run, so it defaults to on. */

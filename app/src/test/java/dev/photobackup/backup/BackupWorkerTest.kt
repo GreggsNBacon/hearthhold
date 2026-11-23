@@ -41,6 +41,7 @@ class BackupWorkerTest {
     private var window: OvernightWindow? = null
     private var clockTime: java.time.LocalTime = java.time.LocalTime.of(12, 0)
     private var runner: BackupRunner = BackupRunner { _ -> BackupResult.Done(0, 0, 0) }
+    private var secondWaiting = 0
 
     @Before fun setUp() {
         app = ApplicationProvider.getApplicationContext()
@@ -52,6 +53,7 @@ class BackupWorkerTest {
         BackupRunnerFactory.notifyOnComplete = { notifyEnabled }
         BackupRunnerFactory.overnightWindow = { window }
         BackupRunnerFactory.now = { clockTime }
+        BackupRunnerFactory.secondWaiting = { secondWaiting }
     }
 
     @After fun tearDown() {
@@ -60,6 +62,7 @@ class BackupWorkerTest {
         BackupRunnerFactory.notifyOnComplete = BackupRunnerFactory.defaultNotifyOnComplete
         BackupRunnerFactory.overnightWindow = BackupRunnerFactory.defaultOvernightWindow
         BackupRunnerFactory.now = BackupRunnerFactory.defaultNow
+        BackupRunnerFactory.secondWaiting = BackupRunnerFactory.defaultSecondWaiting
     }
 
     private fun runWorker(): ListenableWorker.Result = runBlocking {
@@ -129,6 +132,86 @@ class BackupWorkerTest {
         runner = BackupRunner { _ -> BackupResult.Stopped(RemoteException.DriveFull()) }
         runWorker()
         assertEquals("The drive is full", status().lastError)
+    }
+
+    // ---- Second backup location ----
+
+    @Test fun mainDoneWithSecondUnreachableIsStillSuccessWithSecondStatus() {
+        runner = BackupRunner { _ -> BackupResult.Done(2, 0, 0, second = SecondResult.Unreachable) }
+        assertEquals(ListenableWorker.Result.success(), runWorker())
+        val s = status()
+        assertEquals("Backed up 2, failed 0", s.lastResult)
+        assertNull(s.lastError)
+        assertEquals("Not reachable", s.secondStatus)
+        assertTrue(errorNotifications().isEmpty()) // like an unreachable main drive: status only
+    }
+
+    @Test fun mainUnreachableWithSecondDoneRecordsBoth() {
+        runner = BackupRunner { _ ->
+            BackupResult.Stopped(RemoteException.Unreachable(), second = SecondResult.Done(4, 0, 0, 0))
+        }
+        assertEquals(ListenableWorker.Result.success(), runWorker())
+        val s = status()
+        assertEquals("Drive not reachable — not at home?", s.lastResult)
+        assertEquals("Up to date", s.secondStatus)
+    }
+
+    @Test fun waitingComesFromTheLedgerCount() {
+        secondWaiting = 7
+        runner = BackupRunner { _ -> BackupResult.Done(0, 0, 0, second = SecondResult.Done(0, 0, 0, 0)) }
+        runWorker()
+        assertEquals("7 waiting", status().secondStatus)
+    }
+
+    @Test fun failedCopiesShowAsFailed() {
+        runner = BackupRunner { _ -> BackupResult.Done(0, 0, 0, second = SecondResult.Done(0, 0, 2, 0)) }
+        runWorker()
+        assertEquals("2 failed", status().secondStatus)
+    }
+
+    @Test fun secondAuthFailurePostsItsOwnErrorAndKeepsMainOne() {
+        runner = BackupRunner { _ ->
+            BackupResult.Done(1, 0, 0, noRoom = 1, second = SecondResult.AuthFailed)
+        }
+        assertEquals(ListenableWorker.Result.success(), runWorker())
+        assertEquals("Re-enter second location password", status().secondStatus)
+        val texts = errorNotifications().map { text(it) }.toSet()
+        assertEquals(
+            setOf("1 file doesn't fit on the drive — free up space", "Re-enter second location password"), texts,
+        )
+    }
+
+    @Test fun secondNotificationsStayQuietWhenFine() {
+        runner = BackupRunner { _ -> BackupResult.Done(1, 0, 0, second = SecondResult.Done(1, 0, 0, 0)) }
+        runWorker()
+        assertTrue(errorNotifications().isEmpty())
+        assertEquals("Up to date", status().secondStatus)
+    }
+
+    @Test fun secondAuthNotificationClearsOnceFixed() {
+        runner = BackupRunner { _ -> BackupResult.Done(0, 0, 0, second = SecondResult.AuthFailed) }
+        runWorker()
+        assertEquals(1, errorNotifications().size)
+        runner = BackupRunner { _ -> BackupResult.Done(0, 0, 0, second = SecondResult.Done(0, 0, 0, 0)) }
+        runWorker()
+        assertTrue(errorNotifications().isEmpty())
+    }
+
+    @Test fun offLeavesNoSecondStatusAndClearsAnOldOne() {
+        runner = BackupRunner { _ -> BackupResult.Done(0, 0, 0, second = SecondResult.Unreachable) }
+        runWorker()
+        assertEquals("Not reachable", status().secondStatus)
+        runner = BackupRunner { _ -> BackupResult.Done(0, 0, 0) } // second removed
+        runWorker()
+        assertNull(status().secondStatus)
+    }
+
+    @Test fun cancellationKeepsTheSecondStatus() {
+        runner = BackupRunner { _ -> BackupResult.Done(0, 0, 0, second = SecondResult.Unreachable) }
+        runWorker()
+        runner = BackupRunner { _ -> throw kotlinx.coroutines.CancellationException("window closed") }
+        try { runWorker() } catch (_: kotlinx.coroutines.CancellationException) { }
+        assertEquals("Not reachable", status().secondStatus)
     }
 
     @Test fun unexpectedExceptionRetries() {
