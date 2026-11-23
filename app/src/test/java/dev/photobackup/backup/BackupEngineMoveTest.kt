@@ -370,25 +370,57 @@ class BackupEngineMoveTest {
         assertArrayEquals(data, store.files["$dog\\IMG.jpg"])
     }
 
-    /** The row was re-pointed (e.g. a re-upload) after reconcile read it: the stale path must not be moved. */
+    /**
+     * The row was re-pointed (e.g. a re-upload) after reconcile read it: the stale path must not be moved. The
+     * end-of-run pass then plans the row afresh and moves the file it now points at.
+     */
     @Test fun rowChangedAfterReconcileReadIsNotMoved() = runBlocking {
         val store = FakeRemoteStore(); val ledger = MemoryLedger(); val old = bytes(100, 1); val fresh = bytes(100, 2)
         seed(store, ledger, row(1, "$camera\\IMG.jpg"), old)
+        var once = true
         store.failOn = { op, _ ->
-            if (op == "mkdirs") runBlocking {
+            if (op == "mkdirs" && once) runBlocking {
+                once = false
                 store.files["$camera\\IMG (1).jpg"] = fresh
                 ledger.upsert(ledger.get(1)!!.copy(remotePath = "$camera\\IMG (1).jpg"))
             }
             null
         }
         val r = engine(store, ledger, toDog).run(emptyList()) as BackupResult.Done
-        assertEquals(0, r.moved)
-        assertArrayEquals(old, store.files["$camera\\IMG.jpg"])
-        assertArrayEquals(fresh, store.files["$camera\\IMG (1).jpg"])
+        assertEquals(1, r.moved)
+        assertEquals(0, r.moveFailed)
+        assertArrayEquals(old, store.files["$camera\\IMG.jpg"]) // the stale path was never touched
         assertNull(store.files["$dog\\IMG.jpg"])
+        assertArrayEquals(fresh, store.files["$dog\\IMG (1).jpg"])
         val e = ledger.get(1)!!
-        assertEquals("$camera\\IMG (1).jpg", e.remotePath)
+        assertEquals("$dog\\IMG (1).jpg", e.remotePath)
         assertNull(e.movingTo)
+    }
+
+    // --- Changes made while a run is going ---
+
+    /** A hand-pick or rule made mid-run (the "Back up now" it asks for is kept out) is moved by the same run. */
+    @Test fun changeMadeDuringTheUploadsIsMovedAtTheEndOfTheSameRun() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger(); val data = bytes(100)
+        seed(store, ledger, row(1, "$camera\\OLD.jpg", name = "OLD.jpg"), data)
+        var picked = false
+        val folderFor: suspend (Long, String) -> String? = { id, _ -> if (id == 1L && picked) "Dog" else null }
+        val opener = LocalOpener { picked = true; ByteArrayInputStream(bytes(100, 9)) }
+        val r = engine(store, ledger, folderFor, opener = opener).run(listOf(media(2))) as BackupResult.Done
+        assertEquals(1, r.uploaded)
+        assertEquals(1, r.moved)
+        assertEquals("$dog\\OLD.jpg", ledger.get(1)!!.remotePath)
+        assertArrayEquals(data, store.files["$dog\\OLD.jpg"])
+    }
+
+    @Test fun moveThatFailedAtTheStartIsNotRetriedAtTheEnd() = runBlocking {
+        val store = FakeRemoteStore(); val ledger = MemoryLedger()
+        seed(store, ledger, row(1, "$camera\\IMG.jpg"))
+        var renames = 0
+        store.failOn = { op, _ -> if (op == "rename") { renames++; IOException("x") } else null }
+        val r = engine(store, ledger, toDog).run(emptyList()) as BackupResult.Done
+        assertEquals(1, renames)
+        assertEquals(1, r.moveFailed)
     }
 
     // --- Failed moves are reported ---

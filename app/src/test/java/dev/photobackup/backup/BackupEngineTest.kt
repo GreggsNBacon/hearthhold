@@ -122,7 +122,9 @@ class BackupEngineTest {
         assertArrayEquals(data, store.files[target])
         assertEquals(target, ledger.get(1)!!.remotePath)
         assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
-        assertEquals(listOf(1L to "DCIM/Camera/"), seen)
+        // Asked for the upload, and again by the end-of-run move pass (which finds it already in place).
+        assertEquals(listOf(1L to "DCIM/Camera/", 1L to "DCIM/Camera/"), seen)
+        assertEquals(0, (r as BackupResult.Done).moved)
     }
 
     @Test fun neverOverwritesDifferentFileWithSameName() = runBlocking {

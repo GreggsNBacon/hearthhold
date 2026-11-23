@@ -165,8 +165,10 @@ class BackupEngine(
 
         // 2b. Move drive files into their desired folder (every run, even with nothing to upload), after finishing
         // any move a crash interrupted.
+        val unsettled: Set<Long>
         val moves = try {
-            reconcile(recoverMoves(), onMoving)
+            unsettled = recoverMoves()
+            reconcile(unsettled, onMoving)
         } catch (e: RemoteException) {
             return@withContext BackupResult.Stopped(e)
         }
@@ -194,12 +196,21 @@ class BackupEngine(
         } catch (s: StopRun) {
             return@withContext BackupResult.Stopped(s.reason)
         }
+
+        // 4. Moves asked for while this run was going (a hand-pick or rule whose "Back up now" was kept out by this
+        // run, or found the lock held) happen now instead of waiting for the next run. Rows that failed or could not
+        // be settled earlier in this run are not tried again.
+        val lateMoves = try {
+            reconcile(unsettled + moves.failedIds, onMoving)
+        } catch (e: RemoteException) {
+            return@withContext BackupResult.Stopped(e)
+        }
         synchronized(state.lock) {
             // Every reservation has been settled, so free = free at connect minus what this run uploaded.
             BackupResult.Done(
                 state.uploaded, state.skipped, state.failed, state.bytesUploaded,
-                driveFreeBytes = state.free, noRoom = state.noRoom, moved = moves.moved,
-                moveFailed = moves.failed,
+                driveFreeBytes = state.free, noRoom = state.noRoom, moved = moves.moved + lateMoves.moved,
+                moveFailed = unsettled.size + moves.failedIds.size + lateMoves.failedIds.size,
             )
         }
     }
@@ -336,8 +347,8 @@ class BackupEngine(
     /**
      * Moves each VERIFIED / REMOVED_FROM_PHONE drive file whose folder segment (right after `<destination>\<device>`)
      * differs, ignoring case, from its desired folder. Year and file name stay as recorded. Rows not under the current
-     * `<destination>\<device>\` are never moved. Returns how many moved and how many failed to. A [RemoteException]
-     * stops the run.
+     * `<destination>\<device>\` are never moved; nor are rows in [skip]. Returns how many moved and which failed to. A
+     * [RemoteException] stops the run.
      */
     private suspend fun reconcile(skip: Set<Long>, onMoving: (Int) -> Unit): Moves {
         val root = DrivePaths.deviceRoot(settings.destination, settings.deviceName)
@@ -355,7 +366,7 @@ class BackupEngine(
         }
         if (todo.isNotEmpty()) onMoving(todo.size)
         var moved = 0
-        var failed = skip.size
+        val failed = mutableSetOf<Long>()
         var pauseFirst = false
         for ((row, file, desired) in todo) {
             coroutineContext.ensureActive()
@@ -363,15 +374,15 @@ class BackupEngine(
             pauseFirst = true
             when (moveOne(row, row.remotePath!!, "$root\\$desired\\${file.year}", file.name)) {
                 MoveOutcome.MOVED -> moved++
-                MoveOutcome.FAILED -> failed++
+                MoveOutcome.FAILED -> failed += row.mediaId
                 MoveOutcome.SKIPPED -> {}
             }
         }
         return Moves(moved, failed)
     }
 
-    /** [failed] counts this run's failed moves plus interrupted moves recovery could not settle. */
-    private class Moves(val moved: Int, val failed: Int)
+    /** How many moved, and which rows failed to move in this pass. */
+    private class Moves(val moved: Int, val failedIds: Set<Long>)
 
     private enum class MoveOutcome { MOVED, FAILED, SKIPPED }
 
