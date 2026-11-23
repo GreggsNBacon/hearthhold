@@ -1,6 +1,8 @@
 package dev.photobackup.player
 
 import android.content.Context
+import android.view.LayoutInflater
+import dev.photobackup.R
 import androidx.annotation.OptIn
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -188,7 +190,7 @@ private fun ActivePlayer(
 
     AndroidView(
         factory = { ctx ->
-            PlayerView(ctx).apply {
+            (LayoutInflater.from(ctx).inflate(R.layout.video_player_view, null) as PlayerView).apply {
                 this.player = player
                 setShowNextButton(false)
                 setShowPreviousButton(false)
