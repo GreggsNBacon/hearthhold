@@ -15,6 +15,8 @@ sealed interface BackupResult {
         val bytesUploaded: Long = 0,
         val driveFreeBytes: Long? = null,
         val noRoom: Int = 0,
+        /** Drive files moved into their desired folder this run. */
+        val moved: Int = 0,
     ) : BackupResult
     data class Stopped(val reason: RemoteException) : BackupResult
 }

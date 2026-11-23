@@ -19,7 +19,8 @@ object SuggestionRule {
         return entries
             .filter { e ->
                 val p = phone[e.mediaId]
-                LedgerRules.isSafeToRemove(e, p) && itemDateMs(e, p) < cutoff
+                // A row with a drive move in flight is never offered (its drive path is not settled).
+                e.movingTo == null && LedgerRules.isSafeToRemove(e, p) && itemDateMs(e, p) < cutoff
             }
             .sortedByDescending { it.sizeBytes }
     }

@@ -67,4 +67,20 @@ class FakeRemoteStoreTest {
         } catch (_: RemoteException.Unreachable) {
         }
     }
+
+    @Test fun renameMovesAcrossFoldersButNeedsTheTargetFolder() = runBlocking {
+        val s = FakeRemoteStore()
+        val from = "B\\A\\x.jpg"; val to = "B\\C\\x.jpg"
+        s.mkdirs("B\\A"); s.files[from] = byteArrayOf(1)
+        try {
+            s.rename(from, to)
+            throw AssertionError("expected IOException")
+        } catch (_: IOException) {
+        }
+        assertArrayEquals(byteArrayOf(1), s.files[from])
+        s.mkdirs("B\\C")
+        s.rename(from, to)
+        assertNull(s.stat(from))
+        assertArrayEquals(byteArrayOf(1), s.files[to])
+    }
 }

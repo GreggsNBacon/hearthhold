@@ -1,6 +1,7 @@
 package dev.photobackup.backup
 
 import dev.photobackup.ledger.BackupStatus
+import dev.photobackup.ledger.FolderAssignmentStore
 import dev.photobackup.ledger.LedgerEntry
 import dev.photobackup.ledger.LedgerRules
 import dev.photobackup.ledger.LedgerStore
@@ -82,6 +83,8 @@ class BackupEngine(
     private val pause: suspend (Long) -> Unit = { delay(it) },
     /** The desired folder for an item (null = the default source folder). Reused for drive-only rows with no PhoneMedia. */
     private val folderFor: suspend (mediaId: Long, relativePath: String) -> String? = { _, _ -> null },
+    /** Hand-picked folders; only used to forget an item's assignment together with its ledger row. */
+    private val assignments: FolderAssignmentStore? = null,
 ) {
     companion object {
         const val FAT32_ERROR = "too big for this drive's format (FAT32, 4 GB limit)"
@@ -93,6 +96,8 @@ class BackupEngine(
         const val NOT_FOUND_ERROR = "Folder or file not found on the drive — will try again"
         const val NO_NAME_ERROR = "No free file name in the drive folder"
         const val LEFTOVER_ERROR = "Couldn't remove an unfinished copy on the drive — will try again"
+        const val MOVE_ERROR = "Couldn't move to the chosen folder — will try again"
+        const val MOVE_CONFLICT_ERROR = "An interrupted move left two files with this name — kept the original"
 
         /**
          * The text stored as an item's lastError (shown in the Gallery's failed-item dialog). Never the exception
@@ -157,7 +162,15 @@ class BackupEngine(
             return@withContext BackupResult.Stopped(e)
         }
 
-        val work = items.filter { LedgerRules.needsUpload(ledger.get(it.mediaId), it) }
+        // 2b. Move drive files into their desired folder (every run, even with nothing to upload), after finishing
+        // any move a crash interrupted.
+        val moved = try {
+            reconcile(recoverMoves())
+        } catch (e: RemoteException) {
+            return@withContext BackupResult.Stopped(e)
+        }
+
+        val work =items.filter { LedgerRules.needsUpload(ledger.get(it.mediaId), it) }
         val state = RunState(drive.freeBytes, work.size)
         val next = AtomicInteger(0)
 
@@ -184,7 +197,7 @@ class BackupEngine(
             // Every reservation has been settled, so free = free at connect minus what this run uploaded.
             BackupResult.Done(
                 state.uploaded, state.skipped, state.failed, state.bytesUploaded,
-                driveFreeBytes = state.free, noRoom = state.noRoom,
+                driveFreeBytes = state.free, noRoom = state.noRoom, moved = moved,
             )
         }
     }
@@ -272,6 +285,151 @@ class BackupEngine(
         for (row in ledger.byStatus(BackupStatus.UPLOADING)) {
             ledger.upsert(row.copy(status = BackupStatus.PENDING, updatedAtMs = clock()))
         }
+    }
+
+    /**
+     * Settles moves a crash interrupted (rows with movingTo set) by which of the two paths holds the file:
+     * - only the new path (with the recorded size): point the row at it;
+     * - only the old path: the rename never happened, forget the move;
+     * - both: keep the old path, flag a conflict;
+     * - neither (or the new path holds something else): leave the row as it is, flag an error.
+     * Returns the rows not settled cleanly; this run's moves leave them alone. A path still recorded in movingTo stays
+     * reserved for the whole run, so no move or upload takes that name meanwhile.
+     */
+    private suspend fun recoverMoves(): Set<Long> {
+        val unsettled = mutableSetOf<Long>()
+        for (row in ledger.withMovingTo()) {
+            val to = row.movingTo ?: continue
+            val from = row.remotePath
+            val newEntry: RemoteEntry?
+            val oldExists: Boolean
+            try {
+                newEntry = store.stat(to)?.takeIf { !it.isDirectory }
+                oldExists = from != null && store.stat(from)?.isDirectory == false
+            } catch (e: IOException) {
+                if (e is RemoteException) throw e
+                ledger.upsert(row.copy(lastError = MOVE_ERROR, updatedAtMs = clock()))
+                unsettled += row.mediaId
+                synchronized(reserved) { reserved += key(to) }
+                continue
+            }
+            val priorMoveError = row.lastError == MOVE_ERROR || row.lastError == MOVE_CONFLICT_ERROR
+            val keptError = if (priorMoveError) null else row.lastError
+            val fixed = when {
+                oldExists && newEntry != null -> row.copy(movingTo = null, lastError = MOVE_CONFLICT_ERROR)
+                oldExists -> row.copy(movingTo = null, lastError = keptError)
+                newEntry != null && newEntry.sizeBytes == row.sizeBytes ->
+                    row.copy(remotePath = to, movingTo = null, lastError = keptError)
+                else -> row.copy(lastError = MOVE_ERROR)
+            }
+            if (fixed.lastError == MOVE_CONFLICT_ERROR || fixed.lastError == MOVE_ERROR) unsettled += row.mediaId
+            fixed.movingTo?.let { synchronized(reserved) { reserved += key(it) } }
+            ledger.upsert(fixed.copy(updatedAtMs = clock()))
+        }
+        return unsettled
+    }
+
+    /** `<destination>\<device>`, built exactly as [RemotePathPlanner.targetDir] builds it. */
+    private fun deviceRoot(): String {
+        val dest = settings.destination.replace('/', '\\').trim('\\')
+        return listOf(dest, RemotePathPlanner.sanitise(settings.deviceName)).filter { it.isNotEmpty() }
+            .joinToString("\\")
+    }
+
+    /**
+     * Moves each VERIFIED / REMOVED_FROM_PHONE drive file whose folder segment (right after `<destination>\<device>`)
+     * differs, ignoring case, from its desired folder. Year and file name stay as recorded. Rows not under the current
+     * `<destination>\<device>\` are never moved. Returns how many moved. A [RemoteException] stops the run.
+     */
+    private suspend fun reconcile(skip: Set<Long>): Int {
+        val prefix = deviceRoot() + "\\"
+        val rows = (ledger.byStatus(BackupStatus.VERIFIED) + ledger.byStatus(BackupStatus.REMOVED_FROM_PHONE))
+            .sortedBy { it.mediaId }
+        var moved = 0
+        var pauseFirst = false
+        for (row in rows) {
+            coroutineContext.ensureActive()
+            if (row.mediaId in skip || row.movingTo != null || row.partPath != null) continue
+            val path = row.remotePath ?: continue
+            if (!path.startsWith(prefix, ignoreCase = true)) continue
+            val parts = path.substring(prefix.length).split('\\')
+            if (parts.size != 3 || parts.any { it.isEmpty() }) continue
+            val (current, year, name) = parts
+            val desired = folderFor(row.mediaId, row.relativePath)?.let { RemotePathPlanner.sanitise(it) }
+                ?: RemotePathPlanner.sourceFolder(row.relativePath)
+            if (desired.equals(current, ignoreCase = true)) continue
+            if (pauseFirst && itemPauseMs > 0) pause(itemPauseMs)
+            pauseFirst = true
+            if (moveOne(row, path, "$prefix$desired\\$year", name)) moved++
+        }
+        return moved
+    }
+
+    /**
+     * mkdirs, reserve a free name (clash scheme, never an existing name), record movingTo, rename, then record the new
+     * path. On failure the file stays where it was: movingTo is cleared only once a stat confirms the file is still at
+     * its recorded path (otherwise the next run's recovery settles it), and the row gets [MOVE_ERROR].
+     */
+    private suspend fun moveOne(row: LedgerEntry, from: String, dir: String, name: String): Boolean {
+        var target: String? = null
+        var renameTried = false
+        var keepReserved = false
+        try {
+            store.mkdirs(dir)
+            target = reserveFreeName(dir, name)
+            if (target == null) {
+                ledger.upsert(row.copy(lastError = MOVE_ERROR, updatedAtMs = clock()))
+                return false
+            }
+            ledger.upsert(row.copy(movingTo = target, updatedAtMs = clock()))
+            renameTried = true
+            store.rename(from, target)
+            val now = ledger.get(row.mediaId) ?: row // keep any change made meanwhile (e.g. status)
+            ledger.upsert(now.copy(remotePath = target, movingTo = null, lastError = null, updatedAtMs = clock()))
+            return true
+        } catch (e: IOException) {
+            if (e is RemoteException) throw e
+            if (!renameTried) {
+                ledger.upsert(row.copy(lastError = MOVE_ERROR, updatedAtMs = clock()))
+                return false
+            }
+            val stillThere = try {
+                store.stat(from)?.isDirectory == false
+            } catch (s: IOException) {
+                if (s is RemoteException) throw s
+                false
+            }
+            // Still recorded in movingTo: keep the name reserved for the rest of the run, as recovery does.
+            if (!stillThere) keepReserved = true
+            val now = ledger.get(row.mediaId) ?: row
+            ledger.upsert(
+                now.copy(
+                    remotePath = from,
+                    movingTo = if (stillThere) null else target,
+                    lastError = MOVE_ERROR,
+                    updatedAtMs = clock(),
+                )
+            )
+            return false
+        } finally {
+            if (!keepReserved) target?.let { release(it) }
+        }
+    }
+
+    /** First name in [dir] (clash scheme) that exists neither on the drive (nor its `.part`) nor in [reserved]. */
+    private suspend fun reserveFreeName(dir: String, name: String): String? {
+        for (n in 0..MAX_CLASH) {
+            val candidate = "$dir\\" + if (n == 0) name else RemotePathPlanner.clashName(name, n)
+            val part = RemotePathPlanner.partName(candidate)
+            val claimed = nameLock.withLock {
+                val taken = synchronized(reserved) { key(candidate) in reserved || key(part) in reserved }
+                if (taken || store.stat(candidate) != null || store.stat(part) != null) return@withLock false
+                synchronized(reserved) { reserved += key(candidate); reserved += key(part) }
+                true
+            }
+            if (claimed) return candidate
+        }
+        return null
     }
 
     private suspend fun processItem(
@@ -473,6 +631,7 @@ class BackupEngine(
 
     private suspend fun missingOnPhone(m: PhoneMedia): Outcome {
         ledger.delete(m.mediaId)
+        assignments?.clear(m.mediaId)
         return Outcome.SKIPPED
     }
 

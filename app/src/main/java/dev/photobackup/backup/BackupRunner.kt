@@ -85,6 +85,7 @@ class ProductionBackupRunner(private val context: Context) : BackupRunner {
                 clock = System::currentTimeMillis,
                 parallelUploads = settings.parallelUploads,
                 folderFor = { id, rel -> FolderRules.desired(rel, assignments.get(id)?.folder, settings.folderRules) },
+                assignments = assignments,
             )
             return engine.run(items) { done, total, bytes -> onProgress(done, total, bytes, totalBytes) }
         } finally {

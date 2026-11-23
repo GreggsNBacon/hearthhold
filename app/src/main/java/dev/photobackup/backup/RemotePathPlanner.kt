@@ -18,7 +18,8 @@ object RemotePathPlanner {
         return parts.filter { it.isNotEmpty() }.joinToString("\\")
     }
 
-    private fun sourceFolder(relativePath: String): String {
+    /** The default folder segment: the phone folder's own name, sanitised. */
+    fun sourceFolder(relativePath: String): String {
         val last = relativePath.split('/').lastOrNull { it.isNotBlank() } ?: return "Other"
         return sanitise(last)
     }

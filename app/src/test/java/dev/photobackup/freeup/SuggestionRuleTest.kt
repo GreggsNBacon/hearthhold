@@ -56,4 +56,9 @@ class SuggestionRuleTest {
         )
         assertEquals(listOf(1L), run(listOf(old, recent), map))
     }
+
+    @Test fun excludesRowsBeingMoved() {
+        val e = entry(1, ms(2025, 1, 1)).copy(movingTo = "elsewhere-f1.jpg")
+        assertEquals(emptyList<Long>(), run(listOf(e)))
+    }
 }

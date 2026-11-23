@@ -22,7 +22,9 @@ class FreeUpRepository(
     private val ledger: LedgerStore,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
-    suspend fun verifiedEntries(): List<LedgerEntry> = ledger.byStatus(BackupStatus.VERIFIED)
+    /** VERIFIED rows, except those with a drive move in flight (their drive path is not settled). */
+    suspend fun verifiedEntries(): List<LedgerEntry> =
+        ledger.byStatus(BackupStatus.VERIFIED).filter { it.movingTo == null }
 
     /**
      * Full integrity check before deletion. For each selected item (re-read from the ledger, must be VERIFIED now):
@@ -50,7 +52,7 @@ class FreeUpRepository(
             val e = ledger.get(sel.mediaId)
             val m = phone[sel.mediaId]
             val path = e?.remotePath
-            if (e != null && path != null && LedgerRules.isSafeToRemove(e, m)) {
+            if (e != null && path != null && e.movingTo == null && LedgerRules.isSafeToRemove(e, m)) {
                 val reason = integrityFailure(e, path, m!!, store, opener, ctx) { n ->
                     onProgress(i, total, doneBytes + n, totalBytes)
                 }
@@ -117,7 +119,7 @@ class FreeUpRepository(
         var n = 0
         for (item in items) {
             val e = ledger.get(item.mediaId) ?: continue
-            if (e.status != BackupStatus.VERIFIED) continue
+            if (e.status != BackupStatus.VERIFIED || e.movingTo != null) continue
             ledger.upsert(e.copy(status = BackupStatus.REMOVED_FROM_PHONE, updatedAtMs = now))
             n++
         }

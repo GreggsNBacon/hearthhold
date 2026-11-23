@@ -116,6 +116,9 @@ class FakeRemoteStore(
         check("rename", from)
         synchronized(this) {
             if (to in files || to in dirs) throw IOException("Target exists: $to")
+            // Like SMB, a rename can move a file into another folder of the share, but the folder must exist.
+            val toParent = parentOf(to)
+            if (toParent.isNotEmpty() && toParent !in dirs) throw FileNotFoundException(toParent)
             val data = files.remove(from) ?: throw FileNotFoundException(from)
             files[to] = data
         }

@@ -190,4 +190,26 @@ class FreeUpRepositoryTest {
         assertEquals(listOf(FreeUpRepository.DAMAGED), failed)
         assertEquals(uploading, ledger.get(1)) // partPath kept, so the next run cleans that .part
     }
+
+    @Test fun verifiedEntriesExcludeRowsBeingMoved() = runBlocking {
+        val still = entry(1); val moving = entry(2).copy(movingTo = "elsewhere-f2.jpg")
+        val (ledger, _) = setup(still, moving)
+        assertEquals(listOf(1L), FreeUpRepository(ledger).verifiedEntries().map { it.mediaId })
+    }
+
+    @Test fun recheckRefusesRowsBeingMoved() = runBlocking {
+        val moving = entry(1)
+        val (ledger, store) = setup(moving)
+        ledger.upsert(moving.copy(movingTo = "elsewhere-f1.jpg"))
+        val kept = FreeUpRepository(ledger).recheck(listOf(moving), store, mapOf(1L to phone(moving)), opener())
+        assertTrue(kept.isEmpty())
+        assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+    }
+
+    @Test fun markRemovedRefusesRowsBeingMoved() = runBlocking {
+        val moving = entry(1).copy(movingTo = "elsewhere-f1.jpg")
+        val (ledger, _) = setup(moving)
+        assertEquals(0, FreeUpRepository(ledger).markRemoved(listOf(moving)))
+        assertEquals(BackupStatus.VERIFIED, ledger.get(1)!!.status)
+    }
 }
