@@ -71,7 +71,9 @@ Remote access (Immich on a spare PC, router WireGuard VPN) and Google Photos are
 ### Backup behaviour
 - **Source:** MediaStore images and videos. *My call:* by default include the camera folder (DCIM/Camera) and Screenshots. Other folders (e.g. WhatsApp) can be turned on in Settings.
 - **Trigger:** WorkManager content-URI trigger on new media, plus a periodic job (every few hours) as a safety net. Constraints: unmetered network. Before uploading, the worker checks that it can connect and log in to the configured share. If it can't, it stops quietly and updates the status ("Drive not reachable — not at home?"). This reachability check is the only "am I home" test.
-- **Layout on the drive:** `<destination>/<device name>/YYYY/MM/<original file name>`, using date taken (falling back to date added). Device name is editable in Settings.
+- **Layout on the drive** *(owner's decision, 2026-11-22)*: `<destination>/<device name>/<source folder>/YYYY/<original file name>`.
+  - The year comes from date taken, falling back to date added.
+  - `<source folder>` is the last segment of the phone's relative path, sanitised. For example, `DCIM/Camera/` → `Camera`, `Pictures/Screenshots/` → `Screenshots`, `…/WhatsApp Images/` → `WhatsApp Images`. If the path is empty, it's `Other`. Device name is editable in Settings.
 - **Name clash:** if a file with the same name exists and has the same size and hash, mark it as already backed up. If it differs, upload as `name (1).ext` etc. Never overwrite.
 - **Upload:** write to `<name>.part` and rename when complete, so a half-copied file never looks finished. Resume isn't required: an interrupted file restarts.
 - **Verify:** compute SHA-256 of the local file while uploading. After the rename, read the remote file back and compare its SHA-256. Only a match marks the item **verified**.
