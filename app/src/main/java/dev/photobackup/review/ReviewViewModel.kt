@@ -157,6 +157,7 @@ class ReviewViewModel(
     /** User-safe message, never the exception text. Only Finish treats a network error as "connect to Wi-Fi". */
     private fun describe(e: Exception, finishing: Boolean = false): String = when {
         e is SecurityException -> "Photo access is needed"
+        e is dev.photobackup.settings.SettingsUnreadableException -> dev.photobackup.ui.MSG_SETTINGS_UNREADABLE
         finishing && e is IOException -> CONNECT_TO_FINISH_MESSAGE
         else -> "Something went wrong"
     }

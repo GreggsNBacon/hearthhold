@@ -95,6 +95,7 @@ class FreeUpViewModel(
 
     private fun describe(e: Exception): String = when (e) {
         is SecurityException -> "Photo access is needed"
+        is dev.photobackup.settings.SettingsUnreadableException -> dev.photobackup.ui.MSG_SETTINGS_UNREADABLE
         is IOException -> CONNECT_HOME_MESSAGE // includes RemoteException
         else -> "Something went wrong" // never the exception text (userMessage policy)
     }
@@ -183,7 +184,7 @@ class FreeUpViewModel(
                 val msg = listOfNotNull(
                     failureSummary(damaged, changed), secondSummary(waiting, secondDown), describe(e),
                 ).joinToString("\n")
-                showMessage(msg) { it.copy(driveReachable = e !is IOException && it.driveReachable) }
+                showMessage(msg) { it.copy(driveReachable = (e !is IOException || e is dev.photobackup.settings.SettingsUnreadableException) && it.driveReachable) }
             } finally {
                 _state.update { it.copy(checking = null) }
                 if (!published) {

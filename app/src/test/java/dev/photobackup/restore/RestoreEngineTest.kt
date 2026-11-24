@@ -453,6 +453,21 @@ class RestoreEngineTest {
         assertEquals("elsewhere", db.ledgerDao().get(900)!!.remotePath)
     }
 
+    @Test fun alreadyOnPhoneWithTheSameIdAsTheRowReKeysInPlace() = runBlocking {
+        put(row(1))
+        val m = PhoneMedia(
+            1, "content://media/external/images/media/1", "img1.jpg", "DCIM/Camera/", bytes(1).size.toLong(),
+            0, 10, 1_750_000_000, false, "image/jpeg",
+        )
+        phone.existing += m to bytes(1)
+        val r = engine().run(all) {}
+        assertEquals(1, r.alreadyThere)
+        assertTrue(phone.created.isEmpty())
+        val e = db.ledgerDao().get(1)!!
+        assertEquals(BackupStatus.VERIFIED, e.status)
+        assertEquals(1_750_000_000L, e.dateModifiedSec)
+    }
+
     // ---- cancel ----
 
     @Test fun cancelKeepsFinishedItemsAndDiscardsTheOneInFlight() = runBlocking {

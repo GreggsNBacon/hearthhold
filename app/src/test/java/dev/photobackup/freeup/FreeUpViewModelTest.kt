@@ -200,6 +200,13 @@ class FreeUpViewModelTest {
         assertFalse(v.state.value.busy)
     }
 
+    @Test fun unreadableSettingsShowRetryTextNotConnectHome() = kotlinx.coroutines.runBlocking {
+        seed(1)
+        val v = vm(open = { throw dev.photobackup.settings.SettingsUnreadableException() })
+        v.refresh()
+        assertEquals(dev.photobackup.ui.MSG_SETTINGS_UNREADABLE, v.state.value.error)
+    }
+
     // ---- Second-location gate ----
 
     private val copies = MemorySecondCopies()

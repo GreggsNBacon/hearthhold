@@ -271,7 +271,7 @@ class RestoreEngine(
             return Outcome.Failed(NO_PHOTO_ACCESS)
         }
         there?.let { m ->
-            if (ledger.hasRow(m.mediaId)) return Outcome.AlreadyThere
+            if (m.mediaId != row.mediaId && ledger.hasRow(m.mediaId)) return Outcome.AlreadyThere
             return if (ledger.rekey(row.mediaId, path, sha, m.restored(), clock())) {
                 Outcome.AlreadyThere
             } else {

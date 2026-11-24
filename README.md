@@ -207,3 +207,4 @@ keyPassword=CHANGE_ME
 | 31 | Set the stale warning to 1 day with a failing drive and items waiting: the notification appears | |
 | 32 | The health check status line shows after a check | |
 | 33 | When settings can't be read, "Couldn't read settings" with Retry shows, and Retry recovers | |
+| 34 | Restored photos keep their original date in the phone gallery (best effort; note any that show today's date) | |
