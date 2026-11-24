@@ -221,3 +221,7 @@ keyPassword=CHANGE_ME
 | 34 | Restored photos keep their original date in the phone gallery (best effort; note any that show today's date) | |
 | 35 | Export records, uninstall, reinstall, import: the Gallery and the freed-up items are back, and the password is asked for | |
 | 36 | Importing a wrong file (e.g. a photo) shows a plain message and changes nothing | |
+
+## Licence
+
+GPL-3.0 (see `LICENSE`). The app bundles the Jellyfin media3 FFmpeg decoder, which is GPL-3.0, so the app is too.
