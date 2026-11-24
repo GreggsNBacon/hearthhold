@@ -1,5 +1,8 @@
 package dev.photobackup.records
 
+import dev.photobackup.settings.AppSettings
+import dev.photobackup.smb.SmbConfig
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -14,15 +17,50 @@ class RecordsFilesTest {
 
     private fun f(name: String) = File(tmp.root, name)
 
-    @Test fun readyReplacesLiveAndDropsItsOldWalAndJournal() {
+    @Test fun readyReplacesLiveAndKeepsTheOldDbAsBackup() {
         f("ledger.db").writeText("old")
         f("ledger.db-wal").writeText("old wal frames")
         f("ledger.db-shm").writeText("shm")
         f("ledger.db-journal").writeText("journal")
+        f("ledger.db.before-import").writeText("older backup")
         f("ledger-import.db").writeText("new")
         assertTrue(RecordsFiles.promoteIfReady(tmp.root))
         assertEquals("new", f("ledger.db").readText())
         for (n in listOf("ledger.db-wal", "ledger.db-shm", "ledger.db-journal", "ledger-import.db")) assertFalse(n, f(n).exists())
+        // The old DB stays openable as a whole: its WAL and journal move with it.
+        assertEquals("old", f("ledger.db.before-import").readText())
+        assertEquals("old wal frames", f("ledger.db.before-import-wal").readText())
+        assertEquals("journal", f("ledger.db.before-import-journal").readText())
+        assertFalse(f("ledger.db.before-import-shm").exists())
+    }
+
+    @Test fun promoteLeavesAMarkerUntilTheFirstStartHasRescheduled() = runBlocking {
+        f("ledger-import.db").writeText("new")
+        assertFalse(RecordsFiles.importedMarker(tmp.root).exists())
+        RecordsFiles.promoteIfReady(tmp.root)
+        assertTrue(RecordsFiles.importedMarker(tmp.root).exists())
+
+        // Settings unreadable: try again next start.
+        assertFalse(RecordsFiles.rescheduleIfImported(tmp.root, { throw java.io.IOException() }) { })
+        assertTrue(RecordsFiles.importedMarker(tmp.root).exists())
+
+        val scheduled = mutableListOf<AppSettings>()
+        val s = AppSettings(SmbConfig("nas", "usb", "greg", null), "Photos", deviceName = "P", chargingOnly = true)
+        assertTrue(RecordsFiles.rescheduleIfImported(tmp.root, { s }) { scheduled += it })
+        assertEquals(listOf(s), scheduled)
+        assertFalse(RecordsFiles.importedMarker(tmp.root).exists())
+        // Only once.
+        assertFalse(RecordsFiles.rescheduleIfImported(tmp.root, { s }) { scheduled += it })
+        assertEquals(1, scheduled.size)
+    }
+
+    @Test fun rescheduleSkipsIncompleteSetupButClearsTheMarker() = runBlocking {
+        f("ledger-import.db").writeText("new")
+        RecordsFiles.promoteIfReady(tmp.root)
+        var called = false
+        assertFalse(RecordsFiles.rescheduleIfImported(tmp.root, { AppSettings(null, null, deviceName = "P") }) { called = true })
+        assertFalse(called)
+        assertFalse(RecordsFiles.importedMarker(tmp.root).exists())
     }
 
     @Test fun readyWithoutLiveBecomesLive() {

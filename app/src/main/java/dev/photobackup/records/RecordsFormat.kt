@@ -41,6 +41,7 @@ object RecordsMessages {
     const val MEDIA_ACCESS = "Allow access to all photos first, then import again"
     const val IMPORT_FAILED = "Couldn't import the records — nothing was changed"
     const val EXPORT_FAILED = "Couldn't export the records"
+    const val NOT_APPLIED = "Imported records couldn't be put in place — open the app again, or import again"
     const val SETTINGS_NOT_RESTORED = "Records imported, but the settings couldn't be restored — set up the drive again"
 
     fun exported(items: Int) = "Exported $items items"

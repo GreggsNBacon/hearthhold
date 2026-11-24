@@ -54,8 +54,6 @@ fun SetupScreen(
     onCancel: () -> Unit = {},
     /** First-run only: "Have records from before? Import". Null hides it. */
     records: RecordsViewModel? = null,
-    /** Restarts the app after an import. */
-    onRestart: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
 
@@ -85,7 +83,7 @@ fun SetupScreen(
             when (state.step) {
                 SetupStep.DISCOVER -> {
                     if (!second && records != null) {
-                        ImportRecordsEntry(records, onRestart)
+                        ImportRecordsEntry(records)
                         HorizontalDivider()
                     }
                     DiscoverStep(state, viewModel)

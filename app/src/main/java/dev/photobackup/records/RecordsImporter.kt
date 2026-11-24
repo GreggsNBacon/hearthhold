@@ -21,8 +21,8 @@ import java.util.zip.ZipInputStream
  * "Import records", in two steps around the confirm dialog:
  * 1. [inspect] copies the file's DB to [RecordsFiles.STAGING], checks it (entries, format, schema not newer than the
  *    app, opens and migrates with Room) and keeps the settings in memory. The live DB is never touched.
- * 2. [apply], under [BackupLock]: drops phone rows whose photo id no longer points to the same file (name and size),
- *    with their child rows, so the normal backup re-matches them by hash; commits the DB ([RecordsFiles.commit]) and
+ * 2. [apply], under [BackupLock]: drops phone rows whose photo id now points to a different file (name or size), and
+ *    gone rows without a drive copy, with their child rows, so the normal backup re-matches them by hash; commits the DB ([RecordsFiles.commit]) and
  *    restores the settings without passwords. The app then restarts and the new DB replaces the old one on open.
  * Any failure leaves the current records as they were. Never throws but cancellation; never logs or shows exception
  * text, paths or file contents. Drive files are never touched.
@@ -70,7 +70,10 @@ class RecordsImporter(
                     val e = zip.nextEntry ?: break
                     when (e.name) {
                         RecordsFormat.ENTRY_DB -> {
-                            staging.outputStream().use { zip.copyTo(it) }
+                            staging.outputStream().use {
+                                zip.copyTo(it)
+                                it.fd.sync()
+                            }
                             hasDb = true
                         }
                         RecordsFormat.ENTRY_META -> meta = readSmall(zip)
@@ -176,12 +179,24 @@ class RecordsImporter(
     private suspend fun sanitise(db: AppDatabase): Pair<Int, Int> {
         val sdb = db.openHelper.writableDatabase
         val statuses = PHONE_SIDE.joinToString(",") { "'${it.name}'" }
-        val rows = sdb.query("SELECT mediaId, displayName, sizeBytes FROM LedgerEntry WHERE status IN ($statuses)").use { c ->
-            buildList { while (c.moveToNext()) add(Row(c.getLong(0), c.getString(1), c.getLong(2))) }
+        val rows = sdb.query(
+            "SELECT mediaId, displayName, sizeBytes, status, remotePath FROM LedgerEntry WHERE status IN ($statuses)"
+        ).use { c ->
+            buildList {
+                while (c.moveToNext()) {
+                    add(Row(c.getLong(0), c.getString(1), c.getLong(2), c.getString(3), if (c.isNull(4)) null else c.getString(4)))
+                }
+            }
         }
         val now = if (rows.isEmpty()) emptyMap() else identities(rows.map { it.id })
-        val drop = rows.filter { r -> now[r.id].let { it == null || it.displayName != r.name || it.sizeBytes != r.size } }
-            .map { it.id }
+        val drop = rows.filter { r ->
+            when (val m = now[r.id]) {
+                // Ids are never reused on the same phone: a gone id is the same item, deleted outside the app. A
+                // VERIFIED row with its drive file is then a drive-only item (as the Gallery shows it): kept.
+                null -> !(r.status == BackupStatus.VERIFIED.name && r.remotePath != null)
+                else -> m.displayName != r.name || m.sizeBytes != r.size
+            }
+        }.map { it.id }
         sdb.beginTransaction()
         try {
             for (chunk in drop.chunked(500)) {
@@ -207,7 +222,7 @@ class RecordsImporter(
         return out.toString(Charsets.UTF_8.name())
     }
 
-    private data class Row(val id: Long, val name: String, val size: Long)
+    private data class Row(val id: Long, val name: String, val size: Long, val status: String, val remotePath: String?)
 
     private companion object {
         /** Rows whose item should still be on the phone. Freed (REMOVED_FROM_PHONE) and BINNED rows have no phone file. */

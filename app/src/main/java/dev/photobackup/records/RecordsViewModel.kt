@@ -2,9 +2,11 @@ package dev.photobackup.records
 
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -12,7 +14,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.FileNotFoundException
 import java.time.LocalDate
 
 /** Export / import as the screens see them; [uri] is a SAF document picked by the user. */
@@ -30,22 +31,35 @@ class ContentRecordsActions(
     private val importer: RecordsImporter,
 ) : RecordsActions {
     override suspend fun export(uri: String): ExportResult = withContext(Dispatchers.IO) {
-        val out = try {
-            context.contentResolver.openOutputStream(Uri.parse(uri), "wt")
-        } catch (_: FileNotFoundException) {
-            null
-        } catch (_: SecurityException) {
-            null
-        } ?: return@withContext ExportResult.Failed(RecordsMessages.EXPORT_FAILED)
-        out.use { exporter.export(it) }
+        val doc = Uri.parse(uri)
+        val result = try {
+            val out = try {
+                context.contentResolver.openOutputStream(doc, "wt")
+            } catch (_: IllegalArgumentException) {
+                context.contentResolver.openOutputStream(doc, "w") // some providers don't take "wt"
+            }
+            out?.use { exporter.export(it) } ?: ExportResult.Failed(RecordsMessages.EXPORT_FAILED)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            ExportResult.Failed(RecordsMessages.EXPORT_FAILED)
+        }
+        // The save dialog already created the document: don't leave a broken records file behind.
+        if (result is ExportResult.Failed) {
+            try {
+                DocumentsContract.deleteDocument(context.contentResolver, doc)
+            } catch (_: Exception) {
+            }
+        }
+        result
     }
 
     override suspend fun inspect(uri: String): InspectResult = withContext(Dispatchers.IO) {
         val input = try {
             context.contentResolver.openInputStream(Uri.parse(uri))
-        } catch (_: FileNotFoundException) {
-            null
-        } catch (_: SecurityException) {
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
             null
         } ?: return@withContext InspectResult.Rejected(RecordsMessages.NOT_RECORDS)
         input.use { importer.inspect(it) }
@@ -69,9 +83,15 @@ data class RecordsUiState(
     val restart: Boolean = false,
 )
 
-/** "Export records" / "Import records" (Settings) and "Have records from before? Import" (Setup). Never crashes. */
+/**
+ * "Export records" / "Import records" (Settings) and "Have records from before? Import" (Setup). Never crashes.
+ * The import itself runs in [importScope] (the app's scope) and calls [restart] straight away once it is committed:
+ * leaving the screen mid-import must never leave the old process running on the old records.
+ */
 class RecordsViewModel(
     private val actions: RecordsActions,
+    private val importScope: CoroutineScope,
+    private val restart: () -> Unit,
     private val today: () -> LocalDate = LocalDate::now,
 ) : ViewModel() {
     private val _state = MutableStateFlow(RecordsUiState())
@@ -126,7 +146,7 @@ class RecordsViewModel(
     fun confirmImport() {
         if (_state.value.confirmItems == null || _state.value.working != null) return
         _state.update { it.copy(confirmItems = null, working = RecordsWork.IMPORTING, message = null) }
-        viewModelScope.launch {
+        importScope.launch {
             val r = try {
                 actions.apply()
             } catch (e: CancellationException) {
@@ -144,6 +164,7 @@ class RecordsViewModel(
                     is ImportResult.Failed -> it.copy(working = null, message = r.message)
                 }
             }
+            if (r is ImportResult.Done) restart()
         }
     }
 

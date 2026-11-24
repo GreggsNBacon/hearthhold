@@ -45,6 +45,7 @@ import dev.photobackup.records.ContentRecordsActions
 import dev.photobackup.records.RecordsExporter
 import dev.photobackup.records.RecordsFiles
 import dev.photobackup.records.RecordsImporter
+import dev.photobackup.records.RecordsMessages
 import dev.photobackup.records.RecordsViewModel
 import dev.photobackup.records.vacuumInto
 import dev.photobackup.player.PlayerSession
@@ -117,9 +118,26 @@ class PhotoBackupApp : Application(), ImageLoaderFactory {
             if (e is CancellationException) throw e
         }
         // A records import checked but never confirmed (killed meanwhile): its staging file is just left over.
+        val dbDir = getDatabasePath(RecordsFiles.LIVE).parentFile!!
         try {
-            RecordsFiles.clearStaging(getDatabasePath(RecordsFiles.LIVE).parentFile!!)
+            RecordsFiles.clearStaging(dbDir)
         } catch (_: Exception) {
+        }
+        // First start after an import: put it in place now (before any screen), re-schedule backups, and say so if
+        // the imported DB could not be put in place.
+        container.appScope.launch(Dispatchers.IO) {
+            try {
+                LedgerDatabase.get(this@PhotoBackupApp)
+                if (java.io.File(dbDir, RecordsFiles.READY).exists()) {
+                    container.statusRepository.update { it.copy(lastError = RecordsMessages.NOT_APPLIED) }
+                }
+                RecordsFiles.rescheduleIfImported(dbDir, { container.settingsStore.settings.first() }) { s ->
+                    container.backup.scheduleAll(s.chargingOnly, s.overnightWindow())
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
         }
         // "Open in another app" copies of drive videos: kept a day, then removed. Never throws.
         container.appScope.launch(Dispatchers.IO) {
@@ -428,30 +446,30 @@ class AppContainer(context: Context) {
     }
 
     val recordsFactory: ViewModelProvider.Factory = viewModelFactory {
-        initializer { RecordsViewModel(ContentRecordsActions(app, recordsExporter, recordsImporter)) }
+        initializer {
+            RecordsViewModel(
+                ContentRecordsActions(app, recordsExporter, recordsImporter),
+                importScope = appScope,
+                restart = { restartAfterImport() },
+            )
+        }
     }
 
     /**
-     * After an import: re-schedule background work from the restored settings, then restart the process so the
-     * imported DB replaces the old one before anything opens it. The new start opens the password dialog
-     * (passwords are never in a records file).
+     * Right after an import is committed: restart the process so the imported DB replaces the old one before anything
+     * opens it. The new start re-schedules background work ([RecordsFiles.rescheduleIfImported]) and opens the
+     * password dialog (passwords are never in a records file). Exits even if the relaunch can't be started.
      */
     fun restartAfterImport() {
-        appScope.launch {
-            try {
-                val s = settings()
-                backup.scheduleAll(s.chargingOnly, s.overnightWindow())
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                // No settings (they weren't restored): setup schedules the work.
-            }
+        try {
             val launch = app.packageManager.getLaunchIntentForPackage(app.packageName)?.component
             if (launch != null) {
                 app.startActivity(Intent.makeRestartActivityTask(launch).putExtra(MainActivity.EXTRA_REAUTH, true))
             }
-            Runtime.getRuntime().exit(0)
+        } catch (_: Exception) {
+            // The user opens the app again; the import is applied on that start.
         }
+        Runtime.getRuntime().exit(0)
     }
 
     val galleryFactory: ViewModelProvider.Factory = viewModelFactory {

@@ -63,8 +63,6 @@ fun SettingsScreen(
     onSetUpSecond: () -> Unit = {},
     /** Export / import records; null hides the section. */
     records: RecordsViewModel? = null,
-    /** Restarts the app after an import. */
-    onRestart: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
     var picking by remember { mutableStateOf(false) }
@@ -200,7 +198,7 @@ fun SettingsScreen(
             }
             if (records != null) {
                 HorizontalDivider()
-                RecordsSettingsSection(records, onRestart)
+                RecordsSettingsSection(records)
             }
         }
     }

@@ -230,6 +230,33 @@ class RecordsImportTest {
         assertEquals(listOf(1L), db.secondCopyDao().all().map { it.mediaId })
     }
 
+    @Test fun verifiedRowWhosePhotoIsGoneIsKeptAsDriveItem() = runBlocking {
+        val zip = exportedBytes()
+        // 1 and 2 (VERIFIED, on the drive) were deleted from the phone outside the app: their ids no longer resolve.
+        val imp = importer(store("b"), phone = phoneMatching(3, 6))
+        imp.inspect(ByteArrayInputStream(zip))
+        assertEquals(ImportResult.Done(items = 6, dropped = 0, settingsRestored = true), imp.apply())
+        val db = liveAfterRestart()
+        assertEquals((1L..6L).toList(), db.ledgerDao().observeAll().first().map { it.mediaId }.sorted())
+        assertEquals(listOf(1L, 2L), db.folderAssignmentDao().all().map { it.mediaId }.sorted())
+        assertEquals(listOf(1L, 2L), db.secondCopyDao().all().map { it.mediaId }.sorted())
+    }
+
+    @Test fun goneRowsWithoutADriveCopyAreDropped() = runBlocking {
+        val src = room("source.db")
+        src.ledgerDao().upsert(entry(1, BackupStatus.VERIFIED).copy(remotePath = null))
+        src.ledgerDao().upsert(entry(2, BackupStatus.FAILED))
+        src.ledgerDao().upsert(entry(3, BackupStatus.UPLOADING))
+        src.ledgerDao().upsert(entry(4, BackupStatus.VERIFIED))
+        val settings = store("a")
+        val out = ByteArrayOutputStream()
+        exporter(src, settings).export(out)
+        val imp = importer(store("b"), phone = phoneMatching())
+        imp.inspect(ByteArrayInputStream(out.toByteArray()))
+        assertEquals(ImportResult.Done(items = 1, dropped = 3, settingsRestored = true), imp.apply())
+        assertEquals(listOf(4L), liveAfterRestart().ledgerDao().observeAll().first().map { it.mediaId })
+    }
+
     @Test fun noPhotoAccessFailsAndChangesNothing() = runBlocking {
         val zip = exportedBytes()
         val before = liveSnapshot()

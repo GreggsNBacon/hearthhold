@@ -13,9 +13,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -24,7 +24,7 @@ import dev.photobackup.ui.setup.setupPermissions
 
 /** Settings → "Records": Export records / Import records. */
 @Composable
-fun RecordsSettingsSection(vm: RecordsViewModel, onRestart: () -> Unit) {
+fun RecordsSettingsSection(vm: RecordsViewModel) {
     val state by vm.state.collectAsState()
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(MIME)) { uri ->
         vm.export(uri?.toString())
@@ -42,19 +42,19 @@ fun RecordsSettingsSection(vm: RecordsViewModel, onRestart: () -> Unit) {
         }
         OutlinedButton(onClick = startImport, enabled = state.working == null) { Text("Import records") }
     }
-    RecordsStatus(state, vm, onRestart)
+    RecordsStatus(state, vm)
 }
 
 /** Setup's first step: "Have records from before? Import". */
 @Composable
-fun ImportRecordsEntry(vm: RecordsViewModel, onRestart: () -> Unit) {
+fun ImportRecordsEntry(vm: RecordsViewModel) {
     val state by vm.state.collectAsState()
     val startImport = rememberImportLauncher(vm)
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Have records from before?", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
         OutlinedButton(onClick = startImport, enabled = state.working == null) { Text("Import") }
     }
-    RecordsStatus(state, vm, onRestart)
+    RecordsStatus(state, vm)
 }
 
 /**
@@ -77,8 +77,7 @@ private fun rememberImportLauncher(vm: RecordsViewModel): () -> Unit {
 }
 
 @Composable
-private fun RecordsStatus(state: RecordsUiState, vm: RecordsViewModel, onRestart: () -> Unit) {
-    LaunchedEffect(state.restart) { if (state.restart) onRestart() }
+private fun RecordsStatus(state: RecordsUiState, vm: RecordsViewModel) {
     state.working?.let { w ->
         LinearProgressIndicator(Modifier.fillMaxWidth())
         Text(
@@ -89,7 +88,12 @@ private fun RecordsStatus(state: RecordsUiState, vm: RecordsViewModel, onRestart
             }
         )
     }
-    state.message?.let { Text(it) }
+    state.message?.let { m ->
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(m, Modifier.weight(1f))
+            if (state.working == null) TextButton(onClick = { vm.messageShown() }) { Text("OK") }
+        }
+    }
     state.confirmItems?.let { n ->
         AlertDialog(
             onDismissRequest = { vm.cancelImport() },

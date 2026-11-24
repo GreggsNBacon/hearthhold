@@ -1,6 +1,10 @@
 package dev.photobackup.records
 
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -30,10 +34,14 @@ private class FakeActions : RecordsActions {
 class RecordsViewModelTest {
     private val actions = FakeActions()
     private lateinit var vm: RecordsViewModel
+    /** Stands in for the app scope: outlives the VM. */
+    private lateinit var appScope: CoroutineScope
+    private val restarts = mutableListOf<String>()
 
     @Before fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
-        vm = RecordsViewModel(actions, today = { LocalDate.of(2026, 11, 23) })
+        appScope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher())
+        vm = RecordsViewModel(actions, appScope, restart = { restarts += "restart" }, today = { LocalDate.of(2026, 11, 23) })
     }
 
     @After fun tearDown() = Dispatchers.resetMain()
@@ -97,6 +105,16 @@ class RecordsViewModelTest {
         actions.applyGate.complete(ImportResult.Done(38, 2, true))
         assertTrue(vm.state.value.restart)
         assertEquals(RecordsWork.IMPORTING, vm.state.value.working) // stays busy until the app restarts
+        assertEquals(listOf("restart"), restarts)
+    }
+
+    @Test fun leavingTheScreenMidImportStillRestarts() {
+        vm.pickImport("content://doc/2")
+        actions.inspectGate.complete(InspectResult.Ready(40))
+        vm.confirmImport()
+        vm.viewModelScope.cancel() // Back: the VM is cleared while "Importing" shows
+        actions.applyGate.complete(ImportResult.Done(40, 0, true))
+        assertEquals(listOf("restart"), restarts)
     }
 
     @Test fun importWithoutSettingsStillRestartsWithNotice() {
@@ -114,6 +132,7 @@ class RecordsViewModelTest {
         vm.confirmImport()
         actions.applyGate.complete(ImportResult.Failed(RecordsMessages.BUSY))
         assertFalse(vm.state.value.restart)
+        assertEquals(emptyList<String>(), restarts)
         assertNull(vm.state.value.working)
         assertEquals(RecordsMessages.BUSY, vm.state.value.message)
     }
