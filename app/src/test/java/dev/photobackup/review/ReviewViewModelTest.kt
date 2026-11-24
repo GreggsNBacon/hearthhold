@@ -564,4 +564,14 @@ class ReviewViewModelTest {
         v.swipe(Swipe.DOWN) // skip only: the card stays, nothing to finish
         assertFalse(v.state.value.offerFinish)
     }
+
+    @Test fun screenStaysOnOnlyWhileFinishIsWorking() {
+        assertTrue(keepsScreenOn(FinishState.Checking()))
+        assertTrue(keepsScreenOn(FinishState.Checking(3, 40)))
+        assertTrue(keepsScreenOn(FinishState.Applying))
+        assertFalse(keepsScreenOn(FinishState.Idle))
+        assertFalse(keepsScreenOn(FinishState.NeedsConfirm(null, 1, 0)))
+        assertFalse(keepsScreenOn(FinishState.Done(0, 0, 0)))
+        assertFalse(keepsScreenOn(FinishState.Error("x")))
+    }
 }

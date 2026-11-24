@@ -69,6 +69,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -237,6 +238,12 @@ fun ReviewScreen(viewModel: ReviewViewModel, gestures: Map<Swipe, ReviewAction?>
             },
             dismissButton = { TextButton(onClick = { askFinish = false }) { Text("Not yet") } },
         )
+    }
+    val view = LocalView.current
+    val awake = keepsScreenOn(finish)
+    DisposableEffect(awake) {
+        view.keepScreenOn = awake
+        onDispose { view.keepScreenOn = false }
     }
     when (finish) {
         is FinishState.Checking -> Progress(checkingText(finish))

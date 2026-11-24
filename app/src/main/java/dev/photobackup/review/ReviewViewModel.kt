@@ -454,3 +454,6 @@ fun doneLines(d: FinishState.Done): List<String> {
     )
     return lines.ifEmpty { listOf("Nothing needed changing") }
 }
+
+/** Keep the screen awake while Finish is checking or applying, so the phone doesn't lock mid-way. */
+fun keepsScreenOn(f: FinishState): Boolean = f is FinishState.Checking || f == FinishState.Applying
