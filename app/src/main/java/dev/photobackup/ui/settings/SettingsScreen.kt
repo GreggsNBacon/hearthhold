@@ -48,7 +48,10 @@ import dev.photobackup.review.gestureLabel
 import dev.photobackup.review.label
 import dev.photobackup.settings.AppSettings
 import dev.photobackup.smb.RemoteStore
+import dev.photobackup.records.RecordsSettingsSection
+import dev.photobackup.records.RecordsViewModel
 import dev.photobackup.ui.Screen
+import dev.photobackup.ui.home.passwordUnreadable
 import dev.photobackup.ui.setup.FolderPicker
 
 @Composable
@@ -58,6 +61,10 @@ fun SettingsScreen(
     onBack: () -> Unit,
     /** Opens setup in "second" mode (Set up, and Change once the old location is removed). */
     onSetUpSecond: () -> Unit = {},
+    /** Export / import records; null hides the section. */
+    records: RecordsViewModel? = null,
+    /** Restarts the app after an import. */
+    onRestart: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
     var picking by remember { mutableStateOf(false) }
@@ -190,6 +197,10 @@ fun SettingsScreen(
             RuleDialog(confirm, { confirm = null }) { c, yes ->
                 confirm = null
                 if (c is RuleConfirm.Remove) viewModel.removeRule(c.path, yes)
+            }
+            if (records != null) {
+                HorizontalDivider()
+                RecordsSettingsSection(records, onRestart)
             }
         }
     }
@@ -325,6 +336,9 @@ private fun DriveSection(s: AppSettings, state: SettingsUiState, vm: SettingsVie
             visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
         )
+    }
+    if (!guest && passwordUnreadable(s)) {
+        Text("No drive password saved — enter it and tap Test and save", color = MaterialTheme.colorScheme.error)
     }
     Button(
         onClick = { vm.saveDrive(host, share, guest, user, pass); pass = "" },

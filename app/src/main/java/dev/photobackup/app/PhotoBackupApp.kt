@@ -2,6 +2,7 @@ package dev.photobackup.app
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -38,7 +39,14 @@ import dev.photobackup.ledger.LedgerDao
 import dev.photobackup.ledger.SecondCopy
 import dev.photobackup.media.LocalMediaSource
 import dev.photobackup.media.MediaAccess
+import dev.photobackup.MainActivity
 import dev.photobackup.player.OpenElsewhere
+import dev.photobackup.records.ContentRecordsActions
+import dev.photobackup.records.RecordsExporter
+import dev.photobackup.records.RecordsFiles
+import dev.photobackup.records.RecordsImporter
+import dev.photobackup.records.RecordsViewModel
+import dev.photobackup.records.vacuumInto
 import dev.photobackup.player.PlayerSession
 import dev.photobackup.restore.RestoreFactory
 import dev.photobackup.restore.RestoreResults
@@ -107,6 +115,11 @@ class PhotoBackupApp : Application(), ImageLoaderFactory {
             BackupScheduler.enqueueStaleCheck(this)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+        }
+        // A records import checked but never confirmed (killed meanwhile): its staging file is just left over.
+        try {
+            RecordsFiles.clearStaging(getDatabasePath(RecordsFiles.LIVE).parentFile!!)
+        } catch (_: Exception) {
         }
         // "Open in another app" copies of drive videos: kept a day, then removed. Never throws.
         container.appScope.launch(Dispatchers.IO) {
@@ -388,6 +401,56 @@ class AppContainer(context: Context) {
                 clearSecondCopies = { LedgerDatabase.get(app).secondCopyDao().clear() },
                 clearSecondStatus = { clearSecondStatus() },
             )
+        }
+    }
+
+    /** One importer for the app: it keeps the checked file between "Import" and the confirm dialog. */
+    private val recordsImporter: RecordsImporter by lazy {
+        RecordsImporter(
+            dir = app.getDatabasePath(RecordsFiles.LIVE).parentFile!!,
+            openStaged = { name -> LedgerDatabase.open(app, name, staging = true) },
+            identities = { ids -> media.identities(ids) },
+            restoreSettings = { settingsStore.importSettings(it) },
+        )
+    }
+
+    private val recordsExporter: RecordsExporter by lazy {
+        RecordsExporter(
+            snapshot = { file -> vacuumInto(LedgerDatabase.get(app).openHelper.writableDatabase, file) },
+            readSettings = { settings() },
+            appVersion = try {
+                app.packageManager.getPackageInfo(app.packageName, 0).versionName ?: ""
+            } catch (_: Exception) {
+                ""
+            },
+            tempDir = app.cacheDir.resolve("records"),
+        )
+    }
+
+    val recordsFactory: ViewModelProvider.Factory = viewModelFactory {
+        initializer { RecordsViewModel(ContentRecordsActions(app, recordsExporter, recordsImporter)) }
+    }
+
+    /**
+     * After an import: re-schedule background work from the restored settings, then restart the process so the
+     * imported DB replaces the old one before anything opens it. The new start opens the password dialog
+     * (passwords are never in a records file).
+     */
+    fun restartAfterImport() {
+        appScope.launch {
+            try {
+                val s = settings()
+                backup.scheduleAll(s.chargingOnly, s.overnightWindow())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // No settings (they weren't restored): setup schedules the work.
+            }
+            val launch = app.packageManager.getLaunchIntentForPackage(app.packageName)?.component
+            if (launch != null) {
+                app.startActivity(Intent.makeRestartActivityTask(launch).putExtra(MainActivity.EXTRA_REAUTH, true))
+            }
+            Runtime.getRuntime().exit(0)
         }
     }
 

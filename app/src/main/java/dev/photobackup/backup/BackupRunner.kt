@@ -2,16 +2,15 @@ package dev.photobackup.backup
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.RoomDatabase
 import dev.photobackup.ledger.AppDatabase
 import dev.photobackup.ledger.FolderAssignmentDao
 import dev.photobackup.ledger.LedgerDao
-import dev.photobackup.ledger.MIGRATION_1_2
-import dev.photobackup.ledger.MIGRATION_2_3
-import dev.photobackup.ledger.MIGRATION_3_4
-import dev.photobackup.ledger.MIGRATION_4_5
+import dev.photobackup.ledger.ALL_MIGRATIONS
 import dev.photobackup.ledger.LedgerRules
 import dev.photobackup.media.FolderRules
 import dev.photobackup.media.LocalMediaSource
+import dev.photobackup.records.RecordsFiles
 import dev.photobackup.settings.KeystoreCredentialCipher
 import dev.photobackup.settings.SettingsStore
 import dev.photobackup.smb.SmbjRemoteStore
@@ -79,11 +78,30 @@ object BackupRunnerFactory {
 object LedgerDatabase {
     @Volatile private var instance: AppDatabase? = null
 
+    /**
+     * The one ledger DB. Before it is first opened in a process, an imported records DB that is ready
+     * ([RecordsFiles.READY]) replaces `ledger.db`: nothing has the file open yet, so the swap is a plain rename.
+     */
     fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
-        instance ?: Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "ledger.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
-            .build().also { instance = it }
+        instance ?: run {
+            try {
+                RecordsFiles.promoteIfReady(context.applicationContext.getDatabasePath(RecordsFiles.LIVE).parentFile!!)
+            } catch (_: Exception) {
+                // Old records stay in use; the ready file is tried again next start.
+            }
+            open(context, RecordsFiles.LIVE)
+        }.also { instance = it }
     }
+
+    /**
+     * A Room DB on [name] in the app's databases folder, with every migration. [staging]: an import being checked,
+     * opened without WAL so it stays one self-contained file.
+     */
+    fun open(context: Context, name: String, staging: Boolean = false): AppDatabase =
+        Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, name)
+            .addMigrations(*ALL_MIGRATIONS)
+            .apply { if (staging) setJournalMode(RoomDatabase.JournalMode.TRUNCATE) }
+            .build()
 }
 
 class ProductionBackupRunner(private val context: Context) : BackupRunner {

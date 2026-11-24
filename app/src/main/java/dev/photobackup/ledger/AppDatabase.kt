@@ -64,6 +64,9 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
     }
 }
 
+/** Every migration, oldest first: the live DB and imported records files both go through these. */
+val ALL_MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+
 @Database(
     entities = [
         LedgerEntry::class, FolderAssignment::class, ReviewDecision::class, ReviewKeep::class, SecondCopy::class,

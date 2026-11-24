@@ -15,8 +15,8 @@ android {
         applicationId = "dev.photobackup"
         minSdk = 30
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.4.0"
+        versionCode = 7
+        versionName = "1.4.1"
         // Phones only: drops the x86/x86_64 copies of native libraries (FFmpeg decoder, ~3 MB), used by emulators.
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }

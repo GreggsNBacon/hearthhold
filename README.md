@@ -107,6 +107,17 @@
 - Settings → **Warn if no backup for (days)**: 1 to 30, default 3.
 - If no backup has succeeded for that long while items are waiting, you get one notification a day.
 
+## Moving to a new install
+
+Uninstalling the app deletes its records (backed-up and freed-up items, Bin, second copies, folder rules, settings). To keep them across an uninstall, such as a switch to a new signing key, on the same phone:
+
+- Before uninstalling: Settings → Records → **Export records**. Save the `hearthhold-records-YYYYMMDD.hearthhold` file somewhere that survives the uninstall (Downloads, a USB stick, or the drive through the Files app).
+- Uninstall, then install the new APK.
+- On the first screen tap **Have records from before? Import** (or Settings → Records → **Import records**) and pick the file. Allow photo access when asked.
+- Confirm "Replace this app's records with the file's?". The app restarts and asks for the drive password: it is never in the file.
+- Same phone only: photo ids differ on another phone. Items whose photo id now points to a different file are dropped from the records and matched again by the next backup, without uploading them again. Nothing on the drive is changed.
+- Export and import are refused while a backup or restore runs. A wrong or damaged file is refused and the current records stay as they are.
+
 ## Video formats
 
 - Videos play with Android's player, with a fallback decoder for formats it can't handle (e.g. FLV).
@@ -208,3 +219,5 @@ keyPassword=CHANGE_ME
 | 32 | The health check status line shows after a check | |
 | 33 | When settings can't be read, "Couldn't read settings" with Retry shows, and Retry recovers | |
 | 34 | Restored photos keep their original date in the phone gallery (best effort; note any that show today's date) | |
+| 35 | Export records, uninstall, reinstall, import: the Gallery and the freed-up items are back, and the password is asked for | |
+| 36 | Importing a wrong file (e.g. a photo) shows a plain message and changes nothing | |

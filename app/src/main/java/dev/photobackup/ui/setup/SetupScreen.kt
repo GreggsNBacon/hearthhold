@@ -41,6 +41,8 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import dev.photobackup.smb.RemoteStore
 import dev.photobackup.media.MediaAccess
+import dev.photobackup.records.ImportRecordsEntry
+import dev.photobackup.records.RecordsViewModel
 import dev.photobackup.ui.Screen
 
 @Composable
@@ -50,6 +52,10 @@ fun SetupScreen(
     onFinished: () -> Unit,
     /** Second mode only: leave setup from its first step without saving. */
     onCancel: () -> Unit = {},
+    /** First-run only: "Have records from before? Import". Null hides it. */
+    records: RecordsViewModel? = null,
+    /** Restarts the app after an import. */
+    onRestart: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
 
@@ -77,7 +83,13 @@ fun SetupScreen(
         Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (state.busy || state.loadingShares) LinearProgressIndicator(Modifier.fillMaxWidth())
             when (state.step) {
-                SetupStep.DISCOVER -> DiscoverStep(state, viewModel)
+                SetupStep.DISCOVER -> {
+                    if (!second && records != null) {
+                        ImportRecordsEntry(records, onRestart)
+                        HorizontalDivider()
+                    }
+                    DiscoverStep(state, viewModel)
+                }
                 SetupStep.SHARE -> ShareStep(state, viewModel)
                 SetupStep.CREDENTIALS -> CredentialsStep(state, viewModel)
                 SetupStep.FOLDER -> {

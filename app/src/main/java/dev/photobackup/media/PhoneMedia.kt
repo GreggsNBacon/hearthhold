@@ -12,3 +12,6 @@ data class PhoneMedia(
     val isVideo: Boolean,
     val mimeType: String,
 )
+
+/** What a MediaStore id points to now: enough to tell whether it is still the same file as a ledger row. */
+data class MediaIdentity(val displayName: String, val sizeBytes: Long)

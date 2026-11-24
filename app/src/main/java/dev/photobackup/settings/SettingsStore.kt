@@ -69,6 +69,18 @@ class SettingsStore internal constructor(
         }
     }
 
+    /**
+     * Records import: replaces every setting with [imported], with no password on either login (the old install's
+     * passwords can't be decrypted here; the user types them again).
+     */
+    suspend fun importSettings(imported: AppSettings) {
+        val s = imported.copy(
+            smb = imported.smb?.copy(password = null),
+            second = imported.second?.let { it.copy(smb = it.smb.copy(password = null)) },
+        )
+        dataStore.edit { prefs -> write(prefs, s, writeLogin = true, writeSecond = true) }
+    }
+
     private fun read(p: Preferences): AppSettings {
         val host = p[HOST]
         val share = p[SHARE]

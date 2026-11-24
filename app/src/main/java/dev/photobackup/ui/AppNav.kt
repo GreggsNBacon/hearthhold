@@ -95,6 +95,8 @@ fun AppNav(container: AppContainer) {
                 viewModel = viewModel(factory = container.setupFactory),
                 driveStore = container::driveStore,
                 onFinished = { nav.navigate(Routes.GALLERY) { popUpTo(Routes.SETUP) { inclusive = true } } },
+                records = viewModel(factory = container.recordsFactory),
+                onRestart = container::restartAfterImport,
             )
         }
         composable(Routes.FREEUP) {
@@ -126,6 +128,8 @@ fun AppNav(container: AppContainer) {
                 driveStore = container::driveStore,
                 onBack = { nav.popBackStack() },
                 onSetUpSecond = { nav.navigate(Routes.SETUP_SECOND) },
+                records = viewModel(factory = container.recordsFactory),
+                onRestart = container::restartAfterImport,
             )
         }
         composable(Routes.SETUP_SECOND) {
